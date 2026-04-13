@@ -77,6 +77,8 @@ const MAX_ATTACHMENT_SIZE_BYTES = 10 * 1024 * 1024;
 const AUDIO_EXTENSIONS = ["wav", "mp3", "m4a", "ogg", "webm"];
 const IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"];
 const SPECIAL_ATTACHMENT_NAMES = [".env", ".gitignore", "dockerfile", "makefile"];
+const IMAGE_INPUT_UNAVAILABLE_MESSAGE =
+  "Image attachments are unavailable with the current local backend.";
 
 interface ChatPaneProps {
   messages: Message[];
@@ -146,6 +148,11 @@ function isSupportedAttachmentName(name: string) {
   );
 }
 
+function isImageAttachmentName(name: string) {
+  const ext = name.toLowerCase().split(".").pop() || "";
+  return IMAGE_EXTENSIONS.includes(ext);
+}
+
 function humanizeBackendState(state?: string) {
   switch (state) {
     case "ready":
@@ -211,6 +218,7 @@ export default function ChatPane({
     typeof navigator !== "undefined" &&
     typeof MediaRecorder !== "undefined" &&
     !!navigator.mediaDevices?.getUserMedia;
+  const imageInputAvailable = backendStatus?.supports_image_input ?? false;
 
   const cleanupTempAttachments = useCallback(async (items: FileAttachment[]) => {
     const tempPaths = Array.from(
@@ -293,7 +301,16 @@ export default function ChatPane({
 
   const handleSend = async () => {
     const text = input.trim();
-    if ((!text && attachments.length === 0) || isGenerating) return;
+    const hasLoadingAttachments = attachments.some(
+      (attachment) => attachment.status === "loading",
+    );
+    const hasReadyAttachments = attachments.some(
+      (attachment) => attachment.status === "ready",
+    );
+
+    if ((!text && !hasReadyAttachments) || hasLoadingAttachments || isGenerating) {
+      return;
+    }
 
     setInput("");
     const attachedFiles = [...attachments];
@@ -324,6 +341,21 @@ export default function ChatPane({
   const loadFile = useCallback(
     async (filePath: string): Promise<FileAttachment> => {
       const name = filePath.split("/").pop()?.split("\\").pop() || "file";
+
+      if (isImageAttachmentName(name) && !imageInputAvailable) {
+        const unsupported: FileAttachment = {
+          path: filePath,
+          name,
+          mimeType: "image/unsupported",
+          sizeBytes: 0,
+          isTemp: false,
+          status: "error",
+          error: IMAGE_INPUT_UNAVAILABLE_MESSAGE,
+        };
+        setAttachments((prev) => [...prev, unsupported]);
+        return unsupported;
+      }
+
       const attachment: FileAttachment = {
         path: filePath,
         name,
@@ -344,10 +376,13 @@ export default function ChatPane({
             type: string;
             text?: string;
             dataUrl?: string;
+            data_url?: string;
             path?: string;
             note?: string;
           };
         }>("read_file_context", { path: filePath });
+
+        const imageDataUrl = result.content.dataUrl ?? result.content.data_url;
 
         const loaded: FileAttachment = {
           path: filePath,
@@ -364,7 +399,7 @@ export default function ChatPane({
             result.content.type === "text"
               ? { text: result.content.text }
               : result.content.type === "image"
-                ? { dataUrl: result.content.dataUrl }
+                ? { dataUrl: imageDataUrl }
                 : result.content.type === "audio"
                   ? { path: result.content.path }
                 : null,
@@ -388,7 +423,7 @@ export default function ChatPane({
         return { ...attachment, status: "error", error: errorMsg };
       }
     },
-    [],
+    [imageInputAvailable],
   );
 
   const handlePickFile = async () => {
@@ -474,6 +509,25 @@ export default function ChatPane({
     const sizeBytes = file.size;
     const mimeType = file.type || "application/octet-stream";
     let tempPathToCleanup: string | null = null;
+    const isImage = IMAGE_EXTENSIONS.includes(ext);
+    const isAudio = AUDIO_EXTENSIONS.includes(ext);
+    const isPdf = ext === "pdf";
+    const isDocx = ext === "docx";
+
+    if (isImage && !imageInputAvailable) {
+      setAttachments((prev) => [
+        ...prev,
+        {
+          path: attachmentId,
+          name,
+          mimeType,
+          sizeBytes,
+          status: "error",
+          error: IMAGE_INPUT_UNAVAILABLE_MESSAGE,
+        },
+      ]);
+      return;
+    }
 
     if (sizeBytes > MAX_ATTACHMENT_SIZE_BYTES) {
       setAttachments((prev) => [
@@ -502,11 +556,6 @@ export default function ChatPane({
     setAttachments((prev) => [...prev, attachment]);
 
     try {
-      const isImage = IMAGE_EXTENSIONS.includes(ext);
-      const isAudio = AUDIO_EXTENSIONS.includes(ext);
-      const isPdf = ext === "pdf";
-      const isDocx = ext === "docx";
-
       if (isImage) {
         const dataUrl = await readFileAsDataUrl(file);
         setAttachments((prev) =>
@@ -741,6 +790,7 @@ export default function ChatPane({
   const isWebSearchActive = webSearchAvailable && webSearchEnabled;
   const isThinkingActive = thinkingAvailable && thinkingEnabled;
   const readyAttachments = attachments.filter((a) => a.status === "ready");
+  const hasLoadingAttachments = attachments.some((a) => a.status === "loading");
   const hasUserMessages = messages.some((message) => message.role === "user");
   const backendLabel = backendStatus?.connected
     ? "Connected"
@@ -748,6 +798,9 @@ export default function ChatPane({
   const privacyStatus = isWebSearchActive
     ? "Web enabled for this message; Friday may contact external sites"
     : "On-device only for this message";
+  const capabilityStatus = imageInputAvailable
+    ? null
+    : IMAGE_INPUT_UNAVAILABLE_MESSAGE;
 
   return (
     <div
@@ -1223,7 +1276,10 @@ export default function ChatPane({
                 type="primary"
                 icon={<SendOutlined />}
                 onClick={() => void handleSend()}
-                disabled={!input.trim() && readyAttachments.length === 0}
+                disabled={
+                  hasLoadingAttachments ||
+                  (!input.trim() && readyAttachments.length === 0)
+                }
                 style={{
                   borderRadius: 12,
                   border: "2px solid #2C2C2C",
@@ -1251,6 +1307,7 @@ export default function ChatPane({
             }}
           >
             <span>{privacyStatus}</span>
+            {capabilityStatus ? <span>{capabilityStatus}</span> : null}
             <span>{isRecordingAudio ? "Recording…" : "Enter to send"}</span>
           </div>
         </div>

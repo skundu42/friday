@@ -136,4 +136,148 @@ describe("ChatPane", () => {
       ).toBe(true),
     );
   });
+
+  it("blocks sending while an attachment is still loading", async () => {
+    let resolveRead:
+      | ((value: {
+          name: string;
+          mimeType: string;
+          sizeBytes: number;
+          content: { type: string; dataUrl: string };
+        }) => void)
+      | undefined;
+    const onSendMessage = vi.fn();
+
+    openMock.mockResolvedValue(["/tmp/photo.png"]);
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "read_file_context") {
+        return new Promise((resolve) => {
+          resolveRead = resolve;
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+
+    renderChatPane({ onSendMessage });
+
+    fireEvent.click(screen.getByRole("button", { name: "Attach files" }));
+
+    await waitFor(() =>
+      expect(
+        invokeMock.mock.calls.some(
+          ([command, payload]) =>
+            command === "read_file_context" && payload?.path === "/tmp/photo.png",
+        ),
+      ).toBe(true),
+    );
+
+    const composer = screen.getByPlaceholderText(
+      "Ask about the attached files or audio...",
+    );
+    fireEvent.change(composer, {
+      target: { value: "What is in this image?" },
+    });
+
+    const sendButton = screen.getByRole("button", { name: /send/i });
+    expect((sendButton as HTMLButtonElement).disabled).toBe(true);
+
+    fireEvent.keyDown(composer, { key: "Enter" });
+    expect(onSendMessage).not.toHaveBeenCalled();
+
+    resolveRead?.({
+      name: "photo.png",
+      mimeType: "image/png",
+      sizeBytes: 128,
+      content: {
+        type: "image",
+        dataUrl: "data:image/png;base64,ZmFrZQ==",
+      },
+    });
+
+    await waitFor(() =>
+      expect((screen.getByRole("button", { name: /send/i }) as HTMLButtonElement).disabled).toBe(
+        false,
+      ),
+    );
+  });
+
+  it("accepts image attachments returned with snake_case data_url", async () => {
+    const onSendMessage = vi.fn();
+
+    openMock.mockResolvedValue(["/tmp/photo.png"]);
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "read_file_context") {
+        return Promise.resolve({
+          name: "photo.png",
+          mimeType: "image/png",
+          sizeBytes: 128,
+          content: {
+            type: "image",
+            data_url: "data:image/png;base64,ZmFrZQ==",
+          },
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+
+    renderChatPane({ onSendMessage });
+
+    fireEvent.click(screen.getByRole("button", { name: "Attach files" }));
+
+    await waitFor(() =>
+      expect(
+        screen.getByText("photo.png"),
+      ).not.toBeNull(),
+    );
+
+    const composer = screen.getByPlaceholderText(
+      "Ask about the attached files or audio...",
+    );
+    fireEvent.change(composer, {
+      target: { value: "What is in this image?" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /send/i }));
+
+    await waitFor(() =>
+      expect(onSendMessage).toHaveBeenCalledWith(
+        "What is in this image?",
+        expect.arrayContaining([
+          expect.objectContaining({
+            name: "photo.png",
+            mimeType: "image/png",
+            content: expect.objectContaining({
+              dataUrl: "data:image/png;base64,ZmFrZQ==",
+            }),
+          }),
+        ]),
+      ),
+    );
+  });
+
+  it("rejects image attachments when the backend reports vision as unavailable", async () => {
+    openMock.mockResolvedValue(["/tmp/photo.png"]);
+
+    renderChatPane({
+      backendStatus: {
+        ...backendStatus,
+        supports_image_input: false,
+      },
+    });
+
+    expect(
+      screen.getByText(
+        "Image attachments are unavailable with the current local backend.",
+      ),
+    ).not.toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Attach files" }));
+
+    await waitFor(() => expect(screen.getByText("photo.png")).not.toBeNull());
+
+    expect(invokeMock).not.toHaveBeenCalled();
+    expect((screen.getByRole("button", { name: /send/i }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+  });
 });

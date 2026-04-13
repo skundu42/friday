@@ -508,6 +508,50 @@ describe("useAppController", () => {
     ).toBe(true);
   });
 
+  it("ignores attachments that are not ready yet", async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "bootstrap_app") return Promise.resolve(bootstrapPayload);
+      if (command === "detect_backend") return Promise.resolve(backendStatus);
+      if (command === "send_message") return Promise.resolve(undefined);
+      if (command === "list_sessions") return Promise.resolve(bootstrapPayload.sessions);
+      if (command === "select_session") {
+        return Promise.resolve({
+          session: bootstrapPayload.currentSession,
+          messages: [],
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+
+    const { result } = renderHook(() => useAppController());
+    await waitFor(() =>
+      expect(result.current.activeSession?.id).toBe("session-a"),
+    );
+
+    await act(async () => {
+      await result.current.sendMessage("What is in this image?", [
+        {
+          path: "/tmp/photo.png",
+          name: "photo.png",
+          mimeType: "image/png",
+          sizeBytes: 128,
+          content: { dataUrl: "data:image/png;base64,ZmFrZQ==" },
+          status: "loading",
+        },
+      ]);
+    });
+
+    expect(
+      invokeMock.mock.calls.some(
+        ([command, payload]) =>
+          command === "send_message" &&
+          payload?.sessionId === "session-a" &&
+          payload?.message === "What is in this image?" &&
+          payload?.attachments === null,
+      ),
+    ).toBe(true);
+  });
+
   it("saves settings and refreshes backend state", async () => {
     const updatedSettings: AppSettings = {
       auto_start_backend: false,

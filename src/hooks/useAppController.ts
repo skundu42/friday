@@ -634,7 +634,9 @@ export function useAppController() {
     attachments?: FileAttachment[],
   ) => {
     const trimmed = content.trim();
-    const hasAttachments = attachments && attachments.length > 0;
+    const readyAttachments =
+      attachments?.filter((attachment) => attachment.status === "ready") ?? [];
+    const hasAttachments = readyAttachments.length > 0;
     if ((!trimmed && !hasAttachments) || isGenerating || !activeSession) return;
     const sessionId = activeSession.id;
     const effectiveThinkingEnabled =
@@ -643,9 +645,7 @@ export function useAppController() {
     // Build display content for the user bubble
     let displayContent = trimmed;
     if (hasAttachments) {
-      const fileNames = attachments!
-        .filter((a) => a.status === "ready")
-        .map((a) => a.name);
+      const fileNames = readyAttachments.map((attachment) => attachment.name);
       if (fileNames.length > 0) {
         const fileTag = `📎 ${fileNames.join(", ")}`;
         displayContent = trimmed ? `${fileTag}\n${trimmed}` : fileTag;
@@ -654,8 +654,7 @@ export function useAppController() {
 
     // Build serializable attachments for the backend
     const serializedAttachments = hasAttachments
-      ? attachments!
-          .filter((a) => a.status === "ready")
+      ? readyAttachments
           .map((a) => ({
             path: a.path,
             name: a.name,

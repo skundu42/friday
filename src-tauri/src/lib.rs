@@ -5,7 +5,7 @@ mod settings;
 mod sidecar;
 mod storage;
 
-use models::litert::StreamEvent;
+use models::python_worker::StreamEvent;
 use serde::Serialize;
 use session::{Message, Session};
 use sidecar::SidecarManager;
@@ -482,10 +482,19 @@ struct FileContext {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 enum FileContent {
-    Text { text: String },
-    Image { data_url: String },
-    Audio { path: String },
-    Unsupported { note: String },
+    Text {
+        text: String,
+    },
+    Image {
+        #[serde(rename = "dataUrl")]
+        data_url: String,
+    },
+    Audio {
+        path: String,
+    },
+    Unsupported {
+        note: String,
+    },
 }
 
 #[tauri::command]
@@ -1988,6 +1997,24 @@ mod tests {
             Some(models::ChatContent::Parts(parts))
                 if matches!(parts.get(1), Some(models::ChatContentPart::Image { .. }))
         ));
+    }
+
+    #[test]
+    fn file_content_image_serializes_data_url_in_camel_case() {
+        let payload = serde_json::to_value(FileContent::Image {
+            data_url: "data:image/png;base64,ZmFrZQ==".to_string(),
+        })
+        .unwrap();
+
+        assert_eq!(
+            payload.get("type").and_then(|value| value.as_str()),
+            Some("image")
+        );
+        assert_eq!(
+            payload.get("dataUrl").and_then(|value| value.as_str()),
+            Some("data:image/png;base64,ZmFrZQ==")
+        );
+        assert!(payload.get("data_url").is_none());
     }
 
     #[test]

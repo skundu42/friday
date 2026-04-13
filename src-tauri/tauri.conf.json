@@ -29,7 +29,8 @@
     "active": true,
     "targets": "all",
     "resources": {
-      "resources/litert-runtime/": "litert-runtime/"
+      "resources/litert-runtime/": "litert-runtime/",
+      "resources/litert-python/": "litert-python/"
     },
     "icon": [
       "icons/32x32.png",
