@@ -66,7 +66,9 @@ Friday defaults to `Gemma 4 E2B` on most systems and to `Gemma 4 E4B` when total
 React app
   -> Tauri IPC commands
 Rust backend
-  -> managed local LiteRT runtime over loopback HTTP
+  -> bundled Friday Python worker
+Python worker
+  -> local LiteRT-LM Python API
 LiteRT-LM runtime
   -> Gemma 4 local inference
 ```
@@ -76,7 +78,8 @@ Responsibilities:
 - `src/`: UI, settings, chat interactions, attachments, session navigation
 - `src-tauri/src/lib.rs`: Tauri commands, persistence flow, prompt assembly, streaming events
 - `src-tauri/src/sidecar.rs`: runtime bootstrap, model registry, model download lifecycle, daemon warmup/shutdown
-- `src-tauri/src/models/litert.rs`: LiteRT request building, native tool declarations, multimodal request handling
+- `src-tauri/src/models/python_worker.rs`: Rust bridge to the bundled Friday Python worker
+- `src-tauri/resources/litert-python/macos-aarch64/worker/friday_litert_worker.py`: LiteRT-LM Python engine integration, tool hooks, and streaming worker protocol
 - `src-tauri/src/rag/mod.rs`: local RAG ingestion and search
 
 ## Tech Stack
@@ -202,7 +205,8 @@ Important files:
 - [`src/components/SetupWizard.tsx`](src/components/SetupWizard.tsx): first-run onboarding and download flow
 - [`src-tauri/src/lib.rs`](src-tauri/src/lib.rs): IPC surface and persistence/prompt pipeline
 - [`src-tauri/src/sidecar.rs`](src-tauri/src/sidecar.rs): model/runtime lifecycle
-- [`src-tauri/src/models/litert.rs`](src-tauri/src/models/litert.rs): inference request construction and tool execution
+- [`src-tauri/src/models/python_worker.rs`](src-tauri/src/models/python_worker.rs): Rust-side worker protocol and prompt normalization
+- [`src-tauri/resources/litert-python/macos-aarch64/worker/friday_litert_worker.py`](src-tauri/resources/litert-python/macos-aarch64/worker/friday_litert_worker.py): shipped LiteRT-LM Python worker implementation
 - [`src-tauri/src/rag/mod.rs`](src-tauri/src/rag/mod.rs): RAG ingestion/search
 
 ## Runtime Data

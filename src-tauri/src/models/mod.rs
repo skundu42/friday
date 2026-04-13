@@ -1,5 +1,3 @@
-#[cfg(test)]
-pub mod litert;
 pub mod python_worker;
 
 use serde::{Deserialize, Serialize};

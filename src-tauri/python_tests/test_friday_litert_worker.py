@@ -79,6 +79,32 @@ class WorkerProtocolTests(unittest.TestCase):
         self.assertTrue(conversation.cancelled)
         self.assertEqual(worker._cancelled_request_id, "req-2")
 
+    def test_should_force_web_search_matches_time_sensitive_queries(self) -> None:
+        self.assertTrue(_MODULE.should_force_web_search("What's the latest stock price today?"))
+        self.assertFalse(_MODULE.should_force_web_search("Explain Rust ownership."))
+
+    def test_inject_web_search_results_prefixes_prompt_text(self) -> None:
+        prompt = {"role": "user", "content": "Summarize this."}
+        result = {
+            "results": [
+                {
+                    "title": "Example",
+                    "url": "https://example.com",
+                    "snippet": "Fresh result",
+                }
+            ]
+        }
+
+        injected = _MODULE.inject_web_search_results(prompt, result)
+
+        self.assertIn("Live web search results for this turn", injected["content"])
+        self.assertIn("Example - https://example.com - Fresh result", injected["content"])
+        self.assertIn("User request:\nSummarize this.", injected["content"])
+
+    def test_calculate_impl_supports_safe_math(self) -> None:
+        self.assertEqual(_MODULE.calculate_impl("2 + 2")["result"], "4.0")
+        self.assertIn("error", _MODULE.calculate_impl("__import__('os').system('whoami')"))
+
 
 if __name__ == "__main__":
     unittest.main()

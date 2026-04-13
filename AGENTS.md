@@ -20,8 +20,8 @@ Current backend-only or partially surfaced capabilities:
 
 - RAG ingestion and search commands exist in the backend
 - Prompt-time RAG augmentation exists, but RAG is disabled by default and not wired to a dedicated UI
-- The LiteRT integration contains tool declarations for `web_search`, `web_fetch`, `file_read`, `list_directory`, and `calculate`
-- In the shipped chat flow, web assist currently enables `web_search`, `web_fetch`, and `calculate`; local file helper tools are not enabled for user chats
+- The shipped LiteRT-LM Python worker exposes `web_search`, `web_fetch`, `file_read`, `list_directory`, and `calculate`
+- In the shipped chat flow, web assist enables `web_search`, `web_fetch`, and `calculate`; local file helper tools remain disabled for user chats
 
 Privacy note:
 
@@ -117,7 +117,8 @@ Key files:
 - [`src/components/SetupWizard.tsx`](src/components/SetupWizard.tsx): first-run onboarding and model download flow
 - [`src-tauri/src/lib.rs`](src-tauri/src/lib.rs): Tauri commands, app state, prompt assembly, persistence flow, streaming event emission
 - [`src-tauri/src/sidecar.rs`](src-tauri/src/sidecar.rs): runtime bootstrap, model downloads, native runtime lifecycle, model registry, warmup
-- [`src-tauri/src/models/litert.rs`](src-tauri/src/models/litert.rs): LiteRT runtime client bridge, multimodal request building, tool declarations/execution
+- [`src-tauri/src/models/python_worker.rs`](src-tauri/src/models/python_worker.rs): Rust bridge to the bundled Friday LiteRT-LM Python worker
+- [`src-tauri/resources/litert-python/macos-aarch64/worker/friday_litert_worker.py`](src-tauri/resources/litert-python/macos-aarch64/worker/friday_litert_worker.py): shipped LiteRT-LM Python worker, tool hooks, and streaming logic
 - [`src-tauri/src/rag/mod.rs`](src-tauri/src/rag/mod.rs): Rust-owned RAG ingestion and search
 - [`src-tauri/src/settings.rs`](src-tauri/src/settings.rs): settings schema, defaults, validation
 - [`src-tauri/src/storage/mod.rs`](src-tauri/src/storage/mod.rs): SQLite init and setting helpers
@@ -293,7 +294,7 @@ Notes:
 - Changing a Tauri command requires updating `generate_handler!` in [`src-tauri/src/lib.rs`](src-tauri/src/lib.rs)
 - If a command payload changes, update the matching TypeScript types in [`src/types.ts`](src/types.ts)
 - Model-related changes usually touch both [`src-tauri/src/sidecar.rs`](src-tauri/src/sidecar.rs) and the settings/setup UI
-- LiteRT runtime integration changes typically span [`src-tauri/src/sidecar.rs`](src-tauri/src/sidecar.rs), [`src-tauri/src/models/litert.rs`](src-tauri/src/models/litert.rs), and the status/setup UI
+- LiteRT runtime integration changes typically span [`src-tauri/src/sidecar.rs`](src-tauri/src/sidecar.rs), [`src-tauri/src/models/python_worker.rs`](src-tauri/src/models/python_worker.rs), and the shipped worker script under [`src-tauri/resources/litert-python/macos-aarch64/worker/friday_litert_worker.py`](src-tauri/resources/litert-python/macos-aarch64/worker/friday_litert_worker.py)
 - Attachment-flow changes can require coordinated updates across [`src/components/ChatPane.tsx`](src/components/ChatPane.tsx), `read_file_context`, `save_temp_file`, and `delete_temp_file`
 - If model capability metadata changes, update both Rust model structs and the mirrored TypeScript types/UI consumers
 - RAG behavior lives in [`src-tauri/src/rag/mod.rs`](src-tauri/src/rag/mod.rs)

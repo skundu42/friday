@@ -123,7 +123,7 @@ struct RuntimeFeatureSupport {
 
 fn runtime_feature_support(model: &ModelInfo) -> RuntimeFeatureSupport {
     RuntimeFeatureSupport {
-        supports_native_tools: false,
+        supports_native_tools: true,
         supports_audio_input: model.supports_audio_input,
         supports_image_input: model.supports_image_input,
         supports_video_input: model.supports_video_input,
@@ -626,8 +626,8 @@ impl SidecarManager {
         _session_id: &str,
         messages: &[ChatMessage],
         generation_config: GenerationRequestConfig,
-        _tools_enabled: bool,
-        _rag_context: Option<serde_json::Value>,
+        tools_enabled: bool,
+        rag_context: Option<serde_json::Value>,
     ) -> Result<mpsc::Receiver<StreamEvent>, String> {
         self.ensure_daemon().await?;
 
@@ -637,7 +637,7 @@ impl SidecarManager {
             .ok_or_else(|| "Friday LiteRT Python worker is not available".to_string())?;
 
         daemon
-            .send_chat_with_options(messages, generation_config)
+            .send_chat_with_options(messages, generation_config, tools_enabled, rag_context)
             .await
     }
 
@@ -1895,15 +1895,15 @@ mod tests {
         assert!(!status.connected);
         assert_eq!(status.state, "ready");
         assert!(status.supports_image_input);
-        assert!(!status.supports_native_tools);
+        assert!(status.supports_native_tools);
     }
 
     #[test]
-    fn runtime_feature_support_reports_multimodal_without_native_tools() {
+    fn runtime_feature_support_reports_multimodal_and_native_tools() {
         let supports = runtime_feature_support(default_model());
         assert!(supports.supports_audio_input);
         assert!(supports.supports_image_input);
-        assert!(!supports.supports_native_tools);
+        assert!(supports.supports_native_tools);
     }
 
     #[test]
