@@ -1,0 +1,4 @@
+# Ignore the sidecar binary from triggering dev rebuilds
+binaries/
+default.profraw
+*.profraw

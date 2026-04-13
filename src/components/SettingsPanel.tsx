@@ -1,0 +1,651 @@
+import { useEffect, useState } from "react";
+import {
+  Alert,
+  Button,
+  Collapse,
+  Radio,
+  Select,
+  Slider,
+  Space,
+  Switch,
+  Tag,
+  Typography,
+} from "antd";
+import {
+  CheckCircleOutlined,
+  DownloadOutlined,
+} from "@ant-design/icons";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import type {
+  AppSettings,
+  AppSettingsInput,
+  BackendStatus,
+  ModelInfo,
+  ReplyLanguage,
+} from "../types";
+
+const { Title, Text, Paragraph } = Typography;
+const TOKEN_PRESETS = [1024, 4096, 8192, 16384, 32768, 65536, 131072] as const;
+const TOKEN_PRESET_LABELS = [
+  "1K",
+  "4K",
+  "8K",
+  "16K",
+  "32K",
+  "64K",
+  "128K",
+] as const;
+const REPLY_LANGUAGE_OPTIONS: { label: string; value: ReplyLanguage }[] = [
+  { label: "English", value: "english" },
+  { label: "Hindi", value: "hindi" },
+  { label: "Bengali", value: "bengali" },
+  { label: "Marathi", value: "marathi" },
+  { label: "Tamil", value: "tamil" },
+  { label: "Punjabi", value: "punjabi" },
+];
+
+function coerceMaxTokens(value: unknown) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return 16384;
+  }
+
+  const closest = TOKEN_PRESETS.reduce((best, preset) => {
+    const currentDistance = Math.abs(preset - value);
+    const bestDistance = Math.abs(best - value);
+    return currentDistance < bestDistance ? preset : best;
+  }, TOKEN_PRESETS[0]);
+
+  return closest;
+}
+
+function findPresetIndex(value: number) {
+  const exactMatch = TOKEN_PRESETS.indexOf(
+    value as (typeof TOKEN_PRESETS)[number],
+  );
+  return exactMatch >= 0
+    ? exactMatch
+    : TOKEN_PRESETS.indexOf(coerceMaxTokens(value));
+}
+
+function formatTokenCount(value: number) {
+  return `${value.toLocaleString("en-IN")} tokens`;
+}
+
+function formatCompactTokenCount(value: number) {
+  if (value >= 1024) {
+    const compact = value / 1024;
+    return `${Number.isInteger(compact) ? compact : compact.toFixed(1)}K`;
+  }
+  return value.toString();
+}
+
+function modelCapabilityTags(model: ModelInfo) {
+  const tags = ["Text"];
+  if (model.supports_image_input) tags.push("Image");
+  if (model.supports_audio_input) tags.push("Audio");
+  if (model.supports_video_input) tags.push("Video");
+  if (model.supports_thinking) tags.push("Thinking");
+  return tags;
+}
+
+interface SettingsPanelProps {
+  settings: AppSettings;
+  backendStatus: BackendStatus;
+  activeModelId: string;
+  isSwitchingModel: boolean;
+  onModelChange: (modelId: string) => Promise<void>;
+  isSaving: boolean;
+  onSaveSettings: (input: AppSettingsInput) => Promise<AppSettings>;
+}
+
+function ModelCard({
+  totalRamGb,
+  activeModelId,
+  isSwitchingModel,
+  onModelChange,
+}: {
+  totalRamGb: number;
+  activeModelId: string;
+  isSwitchingModel: boolean;
+  onModelChange: (modelId: string) => Promise<void>;
+}) {
+  const [models, setModels] = useState<ModelInfo[]>([]);
+  const [downloadingModelId, setDownloadingModelId] = useState<string | null>(
+    null,
+  );
+  const [downloadProgress, setDownloadProgress] = useState<
+    Record<string, number>
+  >({});
+  const [downloadedModelIds, setDownloadedModelIds] = useState<string[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [switching, setSwitching] = useState(false);
+
+  const refreshDownloadedModels = async () => {
+    const downloadedIds = await invoke<string[]>("list_downloaded_model_ids");
+    setDownloadedModelIds(downloadedIds);
+  };
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const [list, downloadedIds] = await Promise.all([
+          invoke<ModelInfo[]>("list_models"),
+          invoke<string[]>("list_downloaded_model_ids"),
+        ]);
+        setModels(list);
+        setDownloadedModelIds(downloadedIds);
+        setDownloadProgress(
+          downloadedIds.reduce<Record<string, number>>((progress, modelId) => {
+            const model = list.find((item) => item.id === modelId);
+            if (model) {
+              progress[model.display_name] = 100;
+            }
+            return progress;
+          }, {}),
+        );
+      } catch (e) {
+        console.error("Failed to load models:", e);
+      }
+    })();
+  }, []);
+
+  useEffect(() => {
+    const unlisten = listen<{
+      state: string;
+      displayName: string;
+      downloadedBytes: number;
+      totalBytes: number;
+      percentage: number;
+    }>("model-download-progress", (event) => {
+      const p = event.payload;
+      if (p.state === "downloading") {
+        setDownloadProgress((prev) => ({
+          ...prev,
+          [p.displayName]: p.percentage,
+        }));
+      } else if (p.state === "complete") {
+        setDownloadProgress((prev) => ({ ...prev, [p.displayName]: 100 }));
+        setDownloadingModelId(null);
+        void refreshDownloadedModels();
+      } else if (p.state === "error") {
+        setDownloadingModelId(null);
+      }
+    });
+
+    return () => {
+      void unlisten.then((fn) => fn());
+    };
+  }, []);
+
+  const handleSelect = async (modelId: string) => {
+    if (modelId === activeModelId) return;
+    if (!downloadedModelIds.includes(modelId)) {
+      setError("Download the model before switching to it.");
+      return;
+    }
+    setError(null);
+    try {
+      setSwitching(true);
+      await onModelChange(modelId);
+    } catch (e) {
+      setError(typeof e === "string" ? e : String(e));
+    } finally {
+      setSwitching(false);
+    }
+  };
+
+  const handleDownload = async (modelId: string) => {
+    setDownloadingModelId(modelId);
+    setError(null);
+    try {
+      await invoke<string>("pull_model", { modelId });
+      await refreshDownloadedModels();
+    } catch (e) {
+      setError(typeof e === "string" ? e : String(e));
+      setDownloadingModelId(null);
+    }
+  };
+
+  return (
+    <div>
+      {error ? (
+        <Alert
+          type="error"
+          message={error}
+          style={{ marginBottom: 12 }}
+          closable
+          onClose={() => setError(null)}
+        />
+      ) : null}
+
+      <Radio.Group
+        value={activeModelId || undefined}
+        onChange={(e) => void handleSelect(e.target.value)}
+        style={{ width: "100%" }}
+        disabled={Boolean(downloadingModelId) || switching || isSwitchingModel}
+      >
+        <Space direction="vertical" style={{ width: "100%" }} size={10}>
+          {models.map((model) => {
+            const isActive = model.id === activeModelId;
+            const progress = downloadProgress[model.display_name];
+            const ramOk = totalRamGb >= model.min_ram_gb;
+            const isDownloaded = downloadedModelIds.includes(model.id);
+            const isDownloading = downloadingModelId === model.id;
+
+            return (
+              <Radio
+                key={model.id}
+                value={model.id}
+                style={{ width: "100%" }}
+                disabled={!isDownloaded && !isActive}
+              >
+                <div
+                  style={{
+                    border: isActive
+                      ? "2px solid #52C41A"
+                      : "2px solid #E8E8E8",
+                    borderRadius: 14,
+                    padding: "14px 16px",
+                    background: isActive ? "#F6FFED" : "#FFFFFF",
+                  }}
+                >
+                  <div
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "flex-start",
+                      gap: 16,
+                    }}
+                  >
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <strong>{model.display_name}</strong>
+                      <br />
+                      <Text type="secondary" style={{ fontSize: 11 }}>
+                        {formatCompactTokenCount(model.max_context_tokens)} context
+                        {" · "}
+                        {model.size_gb.toFixed(1)} GB download
+                        {" · "}
+                        {model.min_ram_gb} GB RAM minimum
+                      </Text>
+                      <div
+                        style={{
+                          marginTop: 8,
+                          display: "flex",
+                          gap: 6,
+                          flexWrap: "wrap",
+                        }}
+                      >
+                        {modelCapabilityTags(model).map((capability) => (
+                          <Tag key={capability} style={{ margin: 0, fontSize: 10 }}>
+                            {capability}
+                          </Tag>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div
+                      style={{
+                        flexShrink: 0,
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 8,
+                      }}
+                    >
+                      {!ramOk ? (
+                        <Tag color="warning" style={{ fontSize: 10 }}>
+                          Low RAM
+                        </Tag>
+                      ) : null}
+                      {progress !== undefined && progress > 0 && progress < 100 ? (
+                        <Tag color="processing" style={{ fontSize: 10 }}>
+                          {progress}%
+                        </Tag>
+                      ) : null}
+                      {isDownloaded ? (
+                        <Tag
+                          color="success"
+                          icon={<CheckCircleOutlined />}
+                          style={{ fontSize: 11, padding: "2px 8px" }}
+                        >
+                          Downloaded
+                        </Tag>
+                      ) : (
+                        <Button
+                          size="small"
+                          type={isActive ? "primary" : "default"}
+                          icon={<DownloadOutlined />}
+                          loading={isDownloading}
+                          disabled={
+                            (Boolean(downloadingModelId) &&
+                              downloadingModelId !== model.id) ||
+                            !ramOk
+                          }
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void handleDownload(model.id);
+                          }}
+                        >
+                          Download
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </Radio>
+            );
+          })}
+        </Space>
+      </Radio.Group>
+    </div>
+  );
+}
+
+export default function SettingsPanel({
+  settings,
+  backendStatus,
+  activeModelId,
+  isSwitchingModel,
+  onModelChange,
+  isSaving,
+  onSaveSettings,
+}: SettingsPanelProps) {
+  const [replyLanguage, setReplyLanguage] = useState(
+    settings.chat.reply_language,
+  );
+  const [maxTokens, setMaxTokens] = useState(settings.chat.max_tokens);
+  const [maxTokenSliderIndex, setMaxTokenSliderIndex] = useState(
+    findPresetIndex(settings.chat.max_tokens),
+  );
+  const [error, setError] = useState<string | null>(null);
+  const [isSavingMaxTokens, setIsSavingMaxTokens] = useState(false);
+  const isCustomTokenValue = !TOKEN_PRESETS.includes(
+    maxTokens as (typeof TOKEN_PRESETS)[number],
+  );
+
+  useEffect(() => {
+    setReplyLanguage(settings.chat.reply_language);
+    setMaxTokens(settings.chat.max_tokens);
+    setMaxTokenSliderIndex(findPresetIndex(settings.chat.max_tokens));
+  }, [settings]);
+
+  const persistReplyLanguage = async (nextReplyLanguage: ReplyLanguage) => {
+    if (nextReplyLanguage === settings.chat.reply_language) {
+      return;
+    }
+
+    const previousReplyLanguage = replyLanguage;
+    setReplyLanguage(nextReplyLanguage);
+    setError(null);
+
+    try {
+      await onSaveSettings({
+        auto_start_backend: settings.auto_start_backend,
+        user_display_name: settings.user_display_name,
+        chat: {
+          reply_language: nextReplyLanguage,
+          max_tokens: settings.chat.max_tokens,
+          web_assist_enabled: settings.chat.web_assist_enabled,
+          generation: settings.chat.generation,
+        },
+      });
+    } catch (saveError) {
+      setReplyLanguage(previousReplyLanguage);
+      setError(
+        saveError instanceof Error ? saveError.message : String(saveError),
+      );
+    }
+  };
+
+  const persistMaxTokens = async (nextMaxTokens: number) => {
+    if (nextMaxTokens === settings.chat.max_tokens) {
+      return;
+    }
+
+    setError(null);
+    setIsSavingMaxTokens(true);
+    const persistedMaxTokens = settings.chat.max_tokens;
+
+    try {
+      await onSaveSettings({
+        auto_start_backend: settings.auto_start_backend,
+        user_display_name: settings.user_display_name,
+        chat: {
+          reply_language: replyLanguage,
+          max_tokens: nextMaxTokens,
+          web_assist_enabled: settings.chat.web_assist_enabled,
+          generation: settings.chat.generation,
+        },
+      });
+    } catch (saveError) {
+      setError(
+        saveError instanceof Error ? saveError.message : String(saveError),
+      );
+      setMaxTokens(persistedMaxTokens);
+      setMaxTokenSliderIndex(findPresetIndex(persistedMaxTokens));
+    } finally {
+      setIsSavingMaxTokens(false);
+    }
+  };
+
+  const persistAutoStartBackend = async (nextValue: boolean) => {
+    if (nextValue === settings.auto_start_backend) {
+      return;
+    }
+
+    setError(null);
+    try {
+      await onSaveSettings({
+        auto_start_backend: nextValue,
+        user_display_name: settings.user_display_name,
+        chat: {
+          reply_language: replyLanguage,
+          max_tokens: maxTokens,
+          web_assist_enabled: settings.chat.web_assist_enabled,
+          generation: settings.chat.generation,
+        },
+      });
+    } catch (saveError) {
+      setError(
+        saveError instanceof Error ? saveError.message : String(saveError),
+      );
+    }
+  };
+
+  return (
+    <div style={{ maxWidth: 760, margin: "0 auto" }}>
+      <Title level={3} style={{ marginTop: 0, marginBottom: 8 }}>
+        Settings
+      </Title>
+      <Paragraph type="secondary" style={{ marginBottom: 20 }}>
+        Tune conversation behavior, manage the local model, and choose how much
+        work Friday does on startup.
+      </Paragraph>
+
+      {error ? (
+        <Alert
+          type="error"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message={error}
+        />
+      ) : null}
+
+      <Collapse
+        defaultActiveKey={["conversation", "model", "app"]}
+        items={[
+          {
+            key: "conversation",
+            label: "Conversation",
+            children: (
+              <Space direction="vertical" style={{ width: "100%" }} size={20}>
+                <div>
+                  <Text strong style={{ display: "block", marginBottom: 8 }}>
+                    Reply language
+                  </Text>
+                  <Text type="secondary" style={{ display: "block", marginBottom: 10 }}>
+                    Friday defaults to this language unless a prompt explicitly
+                    asks for translation or quoted text in another one.
+                  </Text>
+                  <Select
+                    value={replyLanguage}
+                    onChange={(value) => void persistReplyLanguage(value)}
+                    style={{ width: 220, maxWidth: "100%" }}
+                    options={REPLY_LANGUAGE_OPTIONS}
+                    loading={isSaving}
+                  />
+                </div>
+
+                <div>
+                  <Text strong style={{ display: "block", marginBottom: 8 }}>
+                    Response budget
+                  </Text>
+                  <Text type="secondary" style={{ display: "block", marginBottom: 10 }}>
+                    Higher budgets allow longer answers, but they can increase
+                    latency and memory use.
+                  </Text>
+                  <Slider
+                    min={0}
+                    max={TOKEN_PRESETS.length - 1}
+                    step={null}
+                    marks={Object.fromEntries(
+                      TOKEN_PRESET_LABELS.map((label, index) => [index, label]),
+                    )}
+                    value={maxTokenSliderIndex}
+                    onChange={(value) => {
+                      const nextIndex = Array.isArray(value) ? value[0] : value;
+                      const nextValue = TOKEN_PRESETS[nextIndex] ?? TOKEN_PRESETS[0];
+                      setMaxTokenSliderIndex(nextIndex);
+                      setMaxTokens(nextValue);
+                    }}
+                    onChangeComplete={(value) => {
+                      const nextIndex = Array.isArray(value) ? value[0] : value;
+                      void persistMaxTokens(
+                        TOKEN_PRESETS[nextIndex] ?? TOKEN_PRESETS[0],
+                      );
+                    }}
+                    tooltip={{ open: false }}
+                  />
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    Current budget: {formatTokenCount(maxTokens)}
+                    {isCustomTokenValue ? " (custom saved value)" : ""}
+                    {isSaving || isSavingMaxTokens ? " · Applying..." : ""}
+                  </Text>
+                </div>
+              </Space>
+            ),
+          },
+          {
+            key: "model",
+            label: "Model",
+            children: (
+              <Space direction="vertical" style={{ width: "100%" }} size={12}>
+                <Paragraph type="secondary" style={{ marginBottom: 0 }}>
+                  Keep only the models you need. Switching models may restart
+                  the local runtime before the next reply.
+                </Paragraph>
+                <ModelCard
+                  totalRamGb={backendStatus.total_ram_gb}
+                  activeModelId={activeModelId}
+                  isSwitchingModel={isSwitchingModel}
+                  onModelChange={onModelChange}
+                />
+              </Space>
+            ),
+          },
+          {
+            key: "app",
+            label: "App",
+            children: (
+              <Space direction="vertical" style={{ width: "100%" }} size={18}>
+                <div>
+                  <Text strong style={{ display: "block", marginBottom: 8 }}>
+                    Pre-warm local model on startup
+                  </Text>
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "flex-start",
+                      gap: 14,
+                      flexWrap: "wrap",
+                      padding: "14px 16px",
+                      border: "2px solid #E8E8E8",
+                      borderRadius: 14,
+                      background: "#FFFFFF",
+                    }}
+                  >
+                    <Switch
+                      checked={settings.auto_start_backend}
+                      onChange={(checked) => void persistAutoStartBackend(checked)}
+                      loading={isSaving}
+                      style={{ marginTop: 2 }}
+                    />
+                    <div style={{ flex: "1 1 260px", minWidth: 220 }}>
+                      <Text strong style={{ display: "block", marginBottom: 4 }}>
+                        Faster first reply
+                      </Text>
+                      <Text type="secondary" style={{ fontSize: 12, lineHeight: 1.7 }}>
+                        Start the runtime during launch so the first reply
+                        arrives faster.
+                      </Text>
+                    </div>
+                  </div>
+                </div>
+
+                <div
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))",
+                    gap: 12,
+                  }}
+                >
+                  {[
+                    {
+                      label: "App",
+                      value: "Friday v0.1.0",
+                    },
+                    {
+                      label: "System RAM",
+                      value: `${backendStatus.total_ram_gb.toFixed(1)} GB`,
+                    },
+                    {
+                      label: "Privacy",
+                      value: "On-device by default",
+                    },
+                  ].map((item) => (
+                    <div
+                      key={item.label}
+                      style={{
+                        border: "2px solid #2C2C2C",
+                        borderRadius: 14,
+                        background: "#FFFDF7",
+                        padding: "14px 16px",
+                        boxShadow: "3px 3px 0 #2C2C2C",
+                      }}
+                    >
+                      <Text
+                        type="secondary"
+                        style={{
+                          display: "block",
+                          fontSize: 11,
+                          textTransform: "uppercase",
+                          letterSpacing: 0.6,
+                          marginBottom: 6,
+                        }}
+                      >
+                        {item.label}
+                      </Text>
+                      <Text strong style={{ fontSize: 16, lineHeight: 1.4 }}>
+                        {item.value}
+                      </Text>
+                    </div>
+                  ))}
+                </div>
+              </Space>
+            ),
+          },
+        ]}
+      />
+    </div>
+  );
+}

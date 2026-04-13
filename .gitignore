@@ -1,0 +1,36 @@
+# Created by https://www.toptal.com/developers/gitignore/api/node,rust,svelte,tauri
+# Edit at https://www.toptal.com/developers/gitignore?templates=node,rust,svelte,tauri
+
+### Node ###
+node_modules/
+dist/
+
+### Rust ###
+target/
+**/*.rs.bk
+Cargo.lock
+
+### Tauri ###
+src-tauri/target/
+
+### OS ###
+.DS_Store
+Thumbs.db
+
+### Env ###
+.env
+.env.local
+
+### IDE ###
+.vscode/
+.idea/
+*.swp
+*.swo
+
+### Build ###
+*.log
+default.profraw
+
+src-tauri/resources/litert-runtime/**
+!src-tauri/resources/litert-runtime/
+!src-tauri/resources/litert-runtime/README.md
