@@ -22,6 +22,16 @@ describe("normalizeAssistantMarkdown", () => {
     );
   });
 
+  it("does not corrupt later bold spans on the same line when fixing spacing", () => {
+    expect(
+      normalizeAssistantMarkdown(
+        "This document is a certificate for Sandipan Kundu, associated with the ID ** NISM20250000312171**, dated ** November 18, 2025**.",
+      ),
+    ).toBe(
+      "This document is a certificate for Sandipan Kundu, associated with the ID **NISM20250000312171**, dated **November 18, 2025**.",
+    );
+  });
+
   it("trims stray whitespace inside bold markers", () => {
     expect(
       normalizeAssistantMarkdown(
