@@ -1215,7 +1215,7 @@ impl SidecarManager {
                     let delta = downloaded_bytes.saturating_sub(last_bytes);
                     let speed_bps = (delta as f64 / elapsed) as u64;
                     let eta_seconds = if total_bytes > downloaded_bytes && speed_bps > 0 {
-                        ((total_bytes - downloaded_bytes) / speed_bps) as u64
+                        (total_bytes - downloaded_bytes) / speed_bps
                     } else {
                         0
                     };
