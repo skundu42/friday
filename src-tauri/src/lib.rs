@@ -957,7 +957,7 @@ async fn send_message(
     let mut chat_messages: Vec<models::ChatMessage> =
         vec![models::ChatMessage::text("system", system_prompt)];
     for msg in &trimmed_history {
-        chat_messages.push(message_to_chat_message(msg)?);
+        chat_messages.push(message_to_history_chat_message(msg));
     }
     chat_messages.push(prompt_message);
 
@@ -1453,6 +1453,7 @@ fn message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
     })
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn message_to_chat_message(message: &Message) -> Result<models::ChatMessage, String> {
     let content = if message.role == "user" {
         normalized_user_chat_content(message)?
@@ -1469,6 +1470,10 @@ fn message_to_chat_message(message: &Message) -> Result<models::ChatMessage, Str
         role: message.role.clone(),
         content,
     })
+}
+
+fn message_to_history_chat_message(message: &Message) -> models::ChatMessage {
+    models::ChatMessage::text(message.role.clone(), message.content.clone())
 }
 
 fn serialize_chat_content(content: Option<&models::ChatContent>) -> Result<Option<String>, String> {
@@ -1754,42 +1759,8 @@ fn system_prompt_for_preferences(reply_language: &str, thinking_enabled: bool) -
     )
 }
 
-fn estimate_audio_prompt_cost(path: &str) -> usize {
-    std::fs::metadata(path)
-        .ok()
-        .and_then(|metadata| usize::try_from(metadata.len()).ok())
-        .map(|bytes| bytes.div_ceil(3) * 4)
-        .unwrap_or_else(|| path.chars().count())
-}
-
-fn estimate_chat_content_prompt_cost(content: &models::ChatContent) -> usize {
-    match content {
-        models::ChatContent::Text(text) => text.chars().count(),
-        models::ChatContent::Parts(parts) => parts
-            .iter()
-            .map(|part| match part {
-                models::ChatContentPart::Text { text } => text.chars().count(),
-                models::ChatContentPart::Image { blob } => blob.chars().count(),
-                models::ChatContentPart::Audio { path } => estimate_audio_prompt_cost(path),
-            })
-            .sum(),
-    }
-}
-
-fn estimate_message_prompt_cost(message: &Message) -> Result<usize, String> {
-    let content = if message.role == "user" {
-        normalized_user_chat_content(message)?
-    } else {
-        message
-            .content_parts
-            .clone()
-            .and_then(|value| serde_json::from_value::<models::ChatContent>(value).ok())
-    };
-
-    Ok(content
-        .as_ref()
-        .map(estimate_chat_content_prompt_cost)
-        .unwrap_or_else(|| message.content.chars().count()))
+fn estimate_message_prompt_cost(message: &Message) -> usize {
+    message.content.chars().count()
 }
 
 fn trim_history_for_prompt(history: &[Message]) -> Result<Vec<Message>, String> {
@@ -1797,7 +1768,7 @@ fn trim_history_for_prompt(history: &[Message]) -> Result<Vec<Message>, String> 
     let mut total_chars = 0usize;
 
     for message in history.iter().rev() {
-        let message_chars = estimate_message_prompt_cost(message)?;
+        let message_chars = estimate_message_prompt_cost(message);
         let would_exceed_budget = !selected.is_empty()
             && (selected.len() >= MAX_PROMPT_HISTORY_MESSAGES
                 || total_chars + message_chars > MAX_PROMPT_HISTORY_CHARS);
@@ -2103,7 +2074,34 @@ mod tests {
     }
 
     #[test]
-    fn trim_history_for_prompt_accounts_for_multimodal_payloads() {
+    fn message_to_history_chat_message_uses_persisted_text_only() {
+        let message = Message {
+            id: "m-image".to_string(),
+            session_id: "session-a".to_string(),
+            role: "user".to_string(),
+            content: "[Attached image: photo.png (image/png)]\n\nWhat is in this image?"
+                .to_string(),
+            content_parts: Some(serde_json::json!([
+                { "type": "text", "text": "What is in this image?" },
+                { "type": "image", "blob": "data:image/png;base64,ZmFrZQ==" }
+            ])),
+            model_used: None,
+            tokens_used: None,
+            latency_ms: None,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+        };
+
+        let history_message = message_to_history_chat_message(&message);
+
+        assert_eq!(history_message.role, "user");
+        assert_eq!(
+            history_message.content,
+            models::ChatContent::Text(message.content.clone())
+        );
+    }
+
+    #[test]
+    fn trim_history_for_prompt_uses_persisted_text_cost_for_multimodal_turns() {
         let history = vec![
             Message {
                 id: "1".to_string(),
@@ -2126,12 +2124,13 @@ mod tests {
 
         let trimmed = trim_history_for_prompt(&history).unwrap();
 
-        assert_eq!(trimmed.len(), 1);
-        assert_eq!(trimmed[0].id, "2");
+        assert_eq!(trimmed.len(), 2);
+        assert_eq!(trimmed[0].id, "1");
+        assert_eq!(trimmed[1].id, "2");
     }
 
     #[test]
-    fn trim_history_for_prompt_rejects_malformed_user_content_parts() {
+    fn trim_history_for_prompt_ignores_malformed_user_content_parts() {
         let history = vec![Message {
             id: "broken".to_string(),
             session_id: "session-a".to_string(),
@@ -2144,10 +2143,10 @@ mod tests {
             created_at: "2026-01-01T00:00:00Z".to_string(),
         }];
 
-        let error = trim_history_for_prompt(&history).unwrap_err();
+        let trimmed = trim_history_for_prompt(&history).unwrap();
 
-        assert!(error.contains("malformed multimodal content"));
-        assert!(error.contains("broken"));
+        assert_eq!(trimmed.len(), 1);
+        assert_eq!(trimmed[0].id, "broken");
     }
 
     #[test]
