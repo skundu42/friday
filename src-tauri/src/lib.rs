@@ -5,13 +5,15 @@ mod settings;
 mod sidecar;
 mod storage;
 
-use models::litert::StreamEvent;
+use models::python_worker::StreamEvent;
 use serde::Serialize;
 use session::{Message, Session};
 use sidecar::SidecarManager;
-use std::io::{Cursor, Read};
+use std::fs::OpenOptions;
+use std::io::{Cursor, Read, Write};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, OnceLock};
 use tauri::Emitter;
 use tauri::Manager;
 use tauri::State;
@@ -26,6 +28,8 @@ const MAX_ATTACHMENT_TEXT_CHARS_TOTAL: usize = 80_000;
 const DEFAULT_SESSION_TITLE: &str = "New chat";
 const SESSION_TITLE_PREVIEW_CHARS: usize = 48;
 
+static OBSERVABILITY_INIT: OnceLock<Result<(), String>> = OnceLock::new();
+
 pub struct AppState {
     pub db: Mutex<Option<rusqlite::Connection>>,
     pub current_session: Mutex<Option<String>>,
@@ -34,6 +38,35 @@ pub struct AppState {
     // RAG remains ephemeral until Friday has a dedicated persisted RAG UI.
     pub rag_enabled: AtomicBool,
     pub tools_enabled: AtomicBool,
+}
+
+#[derive(Clone)]
+struct SharedLogWriter {
+    file: Arc<Mutex<std::fs::File>>,
+}
+
+struct SharedLogWriterGuard<'a> {
+    guard: std::sync::MutexGuard<'a, std::fs::File>,
+}
+
+impl<'a> tracing_subscriber::fmt::writer::MakeWriter<'a> for SharedLogWriter {
+    type Writer = SharedLogWriterGuard<'a>;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        SharedLogWriterGuard {
+            guard: self.file.lock().unwrap(),
+        }
+    }
+}
+
+impl Write for SharedLogWriterGuard<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.guard.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.guard.flush()
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -108,6 +141,59 @@ fn emit_chat_error(app: &tauri::AppHandle, session_id: Option<&str>, message: &s
             "message": message,
         }),
     );
+}
+
+fn io_error(message: impl Into<String>) -> std::io::Error {
+    std::io::Error::other(message.into())
+}
+
+fn initialize_local_observability(logs_dir: &Path) -> Result<(), String> {
+    OBSERVABILITY_INIT
+        .get_or_init(|| {
+            std::fs::create_dir_all(logs_dir)
+                .map_err(|e| format!("Failed to create logs directory: {}", e))?;
+
+            let log_path = logs_dir.join("friday.log");
+            let file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log_path)
+                .map_err(|e| format!("Failed to open log file {}: {}", log_path.display(), e))?;
+
+            let writer = SharedLogWriter {
+                file: Arc::new(Mutex::new(file)),
+            };
+
+            tracing_subscriber::fmt()
+                .with_ansi(false)
+                .with_writer(writer)
+                .with_target(true)
+                .with_thread_ids(true)
+                .with_thread_names(true)
+                .with_file(true)
+                .with_line_number(true)
+                .init();
+
+            let default_hook = std::panic::take_hook();
+            std::panic::set_hook(Box::new(move |panic_info| {
+                let location = panic_info
+                    .location()
+                    .map(|loc| format!("{}:{}", loc.file(), loc.line()))
+                    .unwrap_or_else(|| "unknown".to_string());
+                let payload = panic_info
+                    .payload()
+                    .downcast_ref::<&str>()
+                    .map(|value| (*value).to_string())
+                    .or_else(|| panic_info.payload().downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "non-string panic payload".to_string());
+                tracing::error!(target: "panic", %location, %payload, "Unhandled panic");
+                default_hook(panic_info);
+            }));
+
+            tracing::info!("Local observability initialized at {}", log_path.display());
+            Ok(())
+        })
+        .clone()
 }
 
 fn validate_requested_session_id(session_id: &str) -> Result<&str, String> {
@@ -250,11 +336,7 @@ fn ensure_session_deletable(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
-        .plugin(tauri_plugin_shell::init())
-        .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_http::init())
-        .plugin(tauri_plugin_store::Builder::new().build())
         .manage(SidecarManager::new())
         .manage(AppState {
             db: Mutex::new(None),
@@ -298,34 +380,54 @@ pub fn run() {
             sidecar::warm_backend,
         ])
         .setup(|app| {
-            let data_dir = app.path().app_data_dir().expect("no data dir");
-            std::fs::create_dir_all(&data_dir).ok();
+            let data_dir = app
+                .path()
+                .app_data_dir()
+                .map_err(|e| io_error(format!("Failed to resolve app data directory: {}", e)))?;
             let temp_dir = data_dir.join("temp");
-            std::fs::create_dir_all(&temp_dir).ok();
+            let models_dir = data_dir.join("models");
+            let rag_dir = data_dir.join("rag");
+            let lit_home_dir = data_dir.join("lit-home");
+            let logs_dir = data_dir.join("logs");
+
+            for dir in [
+                &data_dir,
+                &temp_dir,
+                &models_dir,
+                &rag_dir,
+                &lit_home_dir,
+                &logs_dir,
+            ] {
+                std::fs::create_dir_all(dir).map_err(|e| {
+                    io_error(format!(
+                        "Failed to create app directory {}: {}",
+                        dir.display(),
+                        e
+                    ))
+                })?;
+            }
+
+            initialize_local_observability(&logs_dir).map_err(io_error)?;
             if let Err(error) = cleanup_temp_dir(&temp_dir) {
                 tracing::warn!("Temp cleanup failed during startup: {}", error);
             }
 
             // Set models dir on sidecar manager
             let sidecar: tauri::State<SidecarManager> = app.state();
-            sidecar.set_models_dir(data_dir.join("models"));
+            sidecar.set_models_dir(models_dir);
             if let Ok(resource_dir) = app.path().resource_dir() {
                 sidecar.set_resource_dir(resource_dir);
             }
 
             // Init DB
             let db_path = data_dir.join("friday.db");
-            match storage::init_db(&db_path) {
-                Ok(conn) => {
-                    if let Ok(Some(active_model_id)) = load_persisted_active_model_id(&conn) {
-                        sidecar.set_active_model_id(&active_model_id);
-                    }
-                    let state: tauri::State<AppState> = app.state();
-                    *state.db.lock().unwrap() = Some(conn);
-                    tracing::info!("Database initialized at {:?}", db_path);
-                }
-                Err(e) => tracing::error!("DB init failed: {}", e),
+            let conn = storage::init_db(&db_path).map_err(io_error)?;
+            if let Ok(Some(active_model_id)) = load_persisted_active_model_id(&conn) {
+                sidecar.set_active_model_id(&active_model_id);
             }
+            let state: tauri::State<AppState> = app.state();
+            *state.db.lock().unwrap() = Some(conn);
+            tracing::info!("Database initialized at {:?}", db_path);
 
             tracing::info!("Friday initialized.");
             Ok(())
@@ -348,7 +450,7 @@ async fn bootstrap_app(
     state: State<'_, AppState>,
     sidecar: State<'_, SidecarManager>,
 ) -> Result<BootstrapPayload, String> {
-    let settings = with_db(&state, |conn| settings::load_settings(conn))?;
+    let settings = with_db(&state, settings::load_settings)?;
     sidecar.set_max_tokens(settings.chat.max_tokens);
     state
         .tools_enabled
@@ -380,10 +482,19 @@ struct FileContext {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 enum FileContent {
-    Text { text: String },
-    Image { data_url: String },
-    Audio { path: String },
-    Unsupported { note: String },
+    Text {
+        text: String,
+    },
+    Image {
+        #[serde(rename = "dataUrl")]
+        data_url: String,
+    },
+    Audio {
+        path: String,
+    },
+    Unsupported {
+        note: String,
+    },
 }
 
 #[tauri::command]
@@ -787,7 +898,7 @@ async fn send_message(
     let _generation_guard = acquire_generation_guard(state.inner(), &session_id)?;
     let _daemon_use = sidecar.begin_daemon_use();
 
-    let app_settings = with_db(&state, |conn| settings::load_settings(conn))?;
+    let app_settings = with_db(&state, settings::load_settings)?;
     sidecar.set_max_tokens(app_settings.chat.max_tokens);
     let attachment_count = attachments.as_ref().map(Vec::len).unwrap_or(0);
 
@@ -799,13 +910,15 @@ async fn send_message(
     // Save user message (with enriched content)
     if let Err(error) = save_message_inner(
         &state,
-        &session_id,
-        "user",
-        &enriched_message,
-        content_parts.as_ref(),
-        None,
-        None,
-        Some(&message),
+        PersistMessage {
+            session_id: &session_id,
+            role: "user",
+            content: &enriched_message,
+            content_parts: content_parts.as_ref(),
+            model_used: None,
+            latency_ms: None,
+            title_source: Some(&message),
+        },
     ) {
         emit_chat_error(&app, Some(&session_id), &error);
         return Err(error);
@@ -844,7 +957,7 @@ async fn send_message(
     let mut chat_messages: Vec<models::ChatMessage> =
         vec![models::ChatMessage::text("system", system_prompt)];
     for msg in &trimmed_history {
-        chat_messages.push(message_to_chat_message(msg)?);
+        chat_messages.push(message_to_history_chat_message(msg));
     }
     chat_messages.push(prompt_message);
 
@@ -973,13 +1086,15 @@ async fn send_message(
 
         if let Err(error) = save_message_json_inner(
             &state,
-            &session_id,
-            "assistant",
-            &full_response,
-            assistant_parts.as_ref(),
-            Some(model_name),
-            None,
-            None,
+            PersistMessageJson {
+                session_id: &session_id,
+                role: "assistant",
+                content: &full_response,
+                content_parts: assistant_parts.as_ref(),
+                model_used: Some(model_name),
+                latency_ms: None,
+                title_source: None,
+            },
         ) {
             let persisted_error = format!("Assistant response could not be saved: {}", error);
             persist_assistant_error_message(
@@ -1037,7 +1152,7 @@ fn select_session(
 
 #[tauri::command]
 fn load_settings(state: State<'_, AppState>) -> Result<settings::AppSettings, String> {
-    with_db(&state, |conn| settings::load_settings(conn))
+    with_db(&state, settings::load_settings)
 }
 
 #[tauri::command]
@@ -1338,6 +1453,7 @@ fn message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
     })
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn message_to_chat_message(message: &Message) -> Result<models::ChatMessage, String> {
     let content = if message.role == "user" {
         normalized_user_chat_content(message)?
@@ -1354,6 +1470,10 @@ fn message_to_chat_message(message: &Message) -> Result<models::ChatMessage, Str
         role: message.role.clone(),
         content,
     })
+}
+
+fn message_to_history_chat_message(message: &Message) -> models::ChatMessage {
+    models::ChatMessage::text(message.role.clone(), message.content.clone())
 }
 
 fn serialize_chat_content(content: Option<&models::ChatContent>) -> Result<Option<String>, String> {
@@ -1455,59 +1575,70 @@ fn load_recent_messages_for_prompt_inner(
     })
 }
 
+struct PersistMessage<'a> {
+    session_id: &'a str,
+    role: &'a str,
+    content: &'a str,
+    content_parts: Option<&'a models::ChatContent>,
+    model_used: Option<&'a str>,
+    latency_ms: Option<i64>,
+    title_source: Option<&'a str>,
+}
+
+struct PersistMessageJson<'a> {
+    session_id: &'a str,
+    role: &'a str,
+    content: &'a str,
+    content_parts: Option<&'a serde_json::Value>,
+    model_used: Option<&'a str>,
+    latency_ms: Option<i64>,
+    title_source: Option<&'a str>,
+}
+
 fn save_message_inner(
     state: &State<'_, AppState>,
-    session_id: &str,
-    role: &str,
-    content: &str,
-    content_parts: Option<&models::ChatContent>,
-    model_used: Option<&str>,
-    latency_ms: Option<i64>,
-    title_source: Option<&str>,
+    params: PersistMessage<'_>,
 ) -> Result<(), String> {
-    let serialized_parts = serialize_chat_content(content_parts)?;
+    let serialized_parts = serialize_chat_content(params.content_parts)?;
     save_message_json_inner(
         state,
-        session_id,
-        role,
-        content,
-        serialized_parts
-            .as_deref()
-            .map(|payload| serde_json::from_str(payload))
-            .transpose()
-            .map_err(|e| format!("Failed to decode serialized message parts: {}", e))?
-            .as_ref(),
-        model_used,
-        latency_ms,
-        title_source,
+        PersistMessageJson {
+            session_id: params.session_id,
+            role: params.role,
+            content: params.content,
+            content_parts: serialized_parts
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()
+                .map_err(|e| format!("Failed to decode serialized message parts: {}", e))?
+                .as_ref(),
+            model_used: params.model_used,
+            latency_ms: params.latency_ms,
+            title_source: params.title_source,
+        },
     )
 }
 
 fn save_message_json_conn(
     conn: &rusqlite::Connection,
-    session_id: &str,
-    role: &str,
-    content: &str,
-    content_parts: Option<&serde_json::Value>,
-    model_used: Option<&str>,
-    latency_ms: Option<i64>,
-    title_source: Option<&str>,
+    params: PersistMessageJson<'_>,
 ) -> Result<(), String> {
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
-    let serialized_parts = content_parts
+    let serialized_parts = params
+        .content_parts
         .map(serde_json::to_string)
         .transpose()
         .map_err(|e| format!("Failed to serialize message content parts: {}", e))?;
-    let title_candidate = if role == "user" {
-        session_title_candidate(title_source.unwrap_or(content))
+    let title_candidate = if params.role == "user" {
+        session_title_candidate(params.title_source.unwrap_or(params.content))
     } else {
         None
     };
 
     conn.execute(
         "INSERT INTO messages (id, session_id, role, content, content_parts, model_used, latency_ms, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-        rusqlite::params![id, session_id, role, content, serialized_parts, model_used, latency_ms, now],
+        rusqlite::params![id, params.session_id, params.role, params.content, serialized_parts, params.model_used, params.latency_ms, now],
     )
     .map_err(|e| e.to_string())?;
 
@@ -1517,13 +1648,13 @@ fn save_message_json_conn(
              SET title = CASE WHEN title = ?1 THEN ?2 ELSE title END,
                  updated_at = ?3
              WHERE id = ?4",
-            rusqlite::params![DEFAULT_SESSION_TITLE, title, now, session_id],
+            rusqlite::params![DEFAULT_SESSION_TITLE, title, now, params.session_id],
         )
         .map_err(|e| e.to_string())?;
     } else {
         conn.execute(
             "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
-            rusqlite::params![now, session_id],
+            rusqlite::params![now, params.session_id],
         )
         .map_err(|e| e.to_string())?;
     }
@@ -1533,26 +1664,9 @@ fn save_message_json_conn(
 
 fn save_message_json_inner(
     state: &State<'_, AppState>,
-    session_id: &str,
-    role: &str,
-    content: &str,
-    content_parts: Option<&serde_json::Value>,
-    model_used: Option<&str>,
-    latency_ms: Option<i64>,
-    title_source: Option<&str>,
+    params: PersistMessageJson<'_>,
 ) -> Result<(), String> {
-    with_db(state, |conn| {
-        save_message_json_conn(
-            conn,
-            session_id,
-            role,
-            content,
-            content_parts,
-            model_used,
-            latency_ms,
-            title_source,
-        )
-    })
+    with_db(state, |conn| save_message_json_conn(conn, params))
 }
 
 fn persist_assistant_error_message(
@@ -1561,15 +1675,18 @@ fn persist_assistant_error_message(
     message: &str,
     model_used: Option<&str>,
 ) {
+    let content = format!("⚠️ {}", message);
     let _ = save_message_inner(
         state,
-        session_id,
-        "assistant",
-        &format!("⚠️ {}", message),
-        None,
-        model_used,
-        None,
-        None,
+        PersistMessage {
+            session_id,
+            role: "assistant",
+            content: &content,
+            content_parts: None,
+            model_used,
+            latency_ms: None,
+            title_source: None,
+        },
     );
 }
 
@@ -1642,42 +1759,8 @@ fn system_prompt_for_preferences(reply_language: &str, thinking_enabled: bool) -
     )
 }
 
-fn estimate_audio_prompt_cost(path: &str) -> usize {
-    std::fs::metadata(path)
-        .ok()
-        .and_then(|metadata| usize::try_from(metadata.len()).ok())
-        .map(|bytes| ((bytes + 2) / 3) * 4)
-        .unwrap_or_else(|| path.chars().count())
-}
-
-fn estimate_chat_content_prompt_cost(content: &models::ChatContent) -> usize {
-    match content {
-        models::ChatContent::Text(text) => text.chars().count(),
-        models::ChatContent::Parts(parts) => parts
-            .iter()
-            .map(|part| match part {
-                models::ChatContentPart::Text { text } => text.chars().count(),
-                models::ChatContentPart::Image { blob } => blob.chars().count(),
-                models::ChatContentPart::Audio { path } => estimate_audio_prompt_cost(path),
-            })
-            .sum(),
-    }
-}
-
-fn estimate_message_prompt_cost(message: &Message) -> Result<usize, String> {
-    let content = if message.role == "user" {
-        normalized_user_chat_content(message)?
-    } else {
-        message
-            .content_parts
-            .clone()
-            .and_then(|value| serde_json::from_value::<models::ChatContent>(value).ok())
-    };
-
-    Ok(content
-        .as_ref()
-        .map(estimate_chat_content_prompt_cost)
-        .unwrap_or_else(|| message.content.chars().count()))
+fn estimate_message_prompt_cost(message: &Message) -> usize {
+    message.content.chars().count()
 }
 
 fn trim_history_for_prompt(history: &[Message]) -> Result<Vec<Message>, String> {
@@ -1685,7 +1768,7 @@ fn trim_history_for_prompt(history: &[Message]) -> Result<Vec<Message>, String> 
     let mut total_chars = 0usize;
 
     for message in history.iter().rev() {
-        let message_chars = estimate_message_prompt_cost(message)?;
+        let message_chars = estimate_message_prompt_cost(message);
         let would_exceed_budget = !selected.is_empty()
             && (selected.len() >= MAX_PROMPT_HISTORY_MESSAGES
                 || total_chars + message_chars > MAX_PROMPT_HISTORY_CHARS);
@@ -1888,6 +1971,24 @@ mod tests {
     }
 
     #[test]
+    fn file_content_image_serializes_data_url_in_camel_case() {
+        let payload = serde_json::to_value(FileContent::Image {
+            data_url: "data:image/png;base64,ZmFrZQ==".to_string(),
+        })
+        .unwrap();
+
+        assert_eq!(
+            payload.get("type").and_then(|value| value.as_str()),
+            Some("image")
+        );
+        assert_eq!(
+            payload.get("dataUrl").and_then(|value| value.as_str()),
+            Some("data:image/png;base64,ZmFrZQ==")
+        );
+        assert!(payload.get("data_url").is_none());
+    }
+
+    #[test]
     fn build_user_prompt_message_keeps_audio_parts_for_live_prompt() {
         let attachments = vec![serde_json::json!({
             "path": "/tmp/test-audio.wav",
@@ -1973,7 +2074,34 @@ mod tests {
     }
 
     #[test]
-    fn trim_history_for_prompt_accounts_for_multimodal_payloads() {
+    fn message_to_history_chat_message_uses_persisted_text_only() {
+        let message = Message {
+            id: "m-image".to_string(),
+            session_id: "session-a".to_string(),
+            role: "user".to_string(),
+            content: "[Attached image: photo.png (image/png)]\n\nWhat is in this image?"
+                .to_string(),
+            content_parts: Some(serde_json::json!([
+                { "type": "text", "text": "What is in this image?" },
+                { "type": "image", "blob": "data:image/png;base64,ZmFrZQ==" }
+            ])),
+            model_used: None,
+            tokens_used: None,
+            latency_ms: None,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+        };
+
+        let history_message = message_to_history_chat_message(&message);
+
+        assert_eq!(history_message.role, "user");
+        assert_eq!(
+            history_message.content,
+            models::ChatContent::Text(message.content.clone())
+        );
+    }
+
+    #[test]
+    fn trim_history_for_prompt_uses_persisted_text_cost_for_multimodal_turns() {
         let history = vec![
             Message {
                 id: "1".to_string(),
@@ -1996,12 +2124,13 @@ mod tests {
 
         let trimmed = trim_history_for_prompt(&history).unwrap();
 
-        assert_eq!(trimmed.len(), 1);
-        assert_eq!(trimmed[0].id, "2");
+        assert_eq!(trimmed.len(), 2);
+        assert_eq!(trimmed[0].id, "1");
+        assert_eq!(trimmed[1].id, "2");
     }
 
     #[test]
-    fn trim_history_for_prompt_rejects_malformed_user_content_parts() {
+    fn trim_history_for_prompt_ignores_malformed_user_content_parts() {
         let history = vec![Message {
             id: "broken".to_string(),
             session_id: "session-a".to_string(),
@@ -2014,10 +2143,10 @@ mod tests {
             created_at: "2026-01-01T00:00:00Z".to_string(),
         }];
 
-        let error = trim_history_for_prompt(&history).unwrap_err();
+        let trimmed = trim_history_for_prompt(&history).unwrap();
 
-        assert!(error.contains("malformed multimodal content"));
-        assert!(error.contains("broken"));
+        assert_eq!(trimmed.len(), 1);
+        assert_eq!(trimmed[0].id, "broken");
     }
 
     #[test]
@@ -2058,13 +2187,15 @@ mod tests {
 
         save_message_json_conn(
             &conn,
-            "session-a",
-            "user",
-            "[Attached file: report.md]\n\nStored content",
-            None,
-            None,
-            None,
-            Some(" \n First user prompt \nSecond line"),
+            PersistMessageJson {
+                session_id: "session-a",
+                role: "user",
+                content: "[Attached file: report.md]\n\nStored content",
+                content_parts: None,
+                model_used: None,
+                latency_ms: None,
+                title_source: Some(" \n First user prompt \nSecond line"),
+            },
         )
         .unwrap();
 
@@ -2080,13 +2211,15 @@ mod tests {
 
         save_message_json_conn(
             &conn,
-            "session-a",
-            "user",
-            "Stored content",
-            None,
-            None,
-            None,
-            Some("Replacement title"),
+            PersistMessageJson {
+                session_id: "session-a",
+                role: "user",
+                content: "Stored content",
+                content_parts: None,
+                model_used: None,
+                latency_ms: None,
+                title_source: Some("Replacement title"),
+            },
         )
         .unwrap();
 
@@ -2116,13 +2249,15 @@ mod tests {
 
         save_message_json_conn(
             &conn,
-            "session-a",
-            "user",
-            "Stored content",
-            None,
-            None,
-            None,
-            Some("Try replacing the title"),
+            PersistMessageJson {
+                session_id: "session-a",
+                role: "user",
+                content: "Stored content",
+                content_parts: None,
+                model_used: None,
+                latency_ms: None,
+                title_source: Some("Try replacing the title"),
+            },
         )
         .unwrap();
 

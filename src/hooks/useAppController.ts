@@ -383,15 +383,28 @@ export function useAppController() {
     return { models, activeModel, downloadedIds };
   };
 
-  const refreshBackendStatus = async () => {
-    const [status] = await Promise.all([
-      invoke<BackendStatus>("detect_backend"),
-      refreshModelInventory(),
-    ]);
+  const detectBackendStatus = async () => {
+    const status = await invoke<BackendStatus>("detect_backend");
     setBackendStatus(status);
     if (status.models[0]) {
       setCurrentModel(formatModelLabel(status.models[0]));
     }
+    return status;
+  };
+
+  const refreshBackendStatus = async ({
+    includeModelInventory = true,
+  }: {
+    includeModelInventory?: boolean;
+  } = {}) => {
+    if (!includeModelInventory) {
+      return detectBackendStatus();
+    }
+
+    const [status] = await Promise.all([
+      detectBackendStatus(),
+      refreshModelInventory(),
+    ]);
     return status;
   };
 
@@ -494,7 +507,9 @@ export function useAppController() {
         }
 
         clearPendingGenerationState();
-        void refreshBackendStatus().catch(() => undefined);
+        void refreshBackendStatus({ includeModelInventory: false }).catch(
+          () => undefined,
+        );
       });
 
       const unlistenActivity = await listen<{ model?: string }>(
@@ -556,7 +571,9 @@ export function useAppController() {
             clearPendingGenerationState();
             appendAssistantError(payload.message);
           }
-          void refreshBackendStatus().catch(() => undefined);
+          void refreshBackendStatus({ includeModelInventory: false }).catch(
+            () => undefined,
+          );
         },
       );
 
@@ -634,7 +651,9 @@ export function useAppController() {
     attachments?: FileAttachment[],
   ) => {
     const trimmed = content.trim();
-    const hasAttachments = attachments && attachments.length > 0;
+    const readyAttachments =
+      attachments?.filter((attachment) => attachment.status === "ready") ?? [];
+    const hasAttachments = readyAttachments.length > 0;
     if ((!trimmed && !hasAttachments) || isGenerating || !activeSession) return;
     const sessionId = activeSession.id;
     const effectiveThinkingEnabled =
@@ -643,9 +662,7 @@ export function useAppController() {
     // Build display content for the user bubble
     let displayContent = trimmed;
     if (hasAttachments) {
-      const fileNames = attachments!
-        .filter((a) => a.status === "ready")
-        .map((a) => a.name);
+      const fileNames = readyAttachments.map((attachment) => attachment.name);
       if (fileNames.length > 0) {
         const fileTag = `📎 ${fileNames.join(", ")}`;
         displayContent = trimmed ? `${fileTag}\n${trimmed}` : fileTag;
@@ -654,8 +671,7 @@ export function useAppController() {
 
     // Build serializable attachments for the backend
     const serializedAttachments = hasAttachments
-      ? attachments!
-          .filter((a) => a.status === "ready")
+      ? readyAttachments
           .map((a) => ({
             path: a.path,
             name: a.name,
@@ -703,9 +719,11 @@ export function useAppController() {
         attachments: serializedAttachments,
         thinkingEnabled: effectiveThinkingEnabled,
       });
-      flushBufferedTokens();
-      setIsGenerating(false);
-      setGenerationStatus(null);
+      if (pendingSessionIdRef.current === sessionId) {
+        flushBufferedTokens();
+        setIsGenerating(false);
+        setGenerationStatus(null);
+      }
       await refreshSessionState(sessionId);
     } catch (error) {
       flushBufferedTokens();
@@ -756,7 +774,7 @@ export function useAppController() {
           desiredSettingsRef.current = savedInput;
           applySavedSettingsState(saved);
         }
-        await refreshBackendStatus();
+        await refreshBackendStatus({ includeModelInventory: false });
         return saved;
       });
 
@@ -774,7 +792,7 @@ export function useAppController() {
     });
   };
 
-  const setReplyLanguage = async (lang: string) => {
+  const setReplyLanguage = async (lang: ReplyLanguage) => {
     if (!settings || settings.chat.reply_language === lang) return;
     try {
       await saveAppSettings({

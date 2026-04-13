@@ -24,7 +24,8 @@ const { Text } = Typography;
 // Detect file markers in enriched messages
 const FILE_MARKER_RE = /^--- File: (.+) ---$/m;
 const MISPLACED_BOLD_RE = /(^|[\s([{"'`])([^\s*]+)\*\*([—:-][^\n]*?)\*\*/g;
-const CLOSED_BOLD_NO_SPACE_RE = /(\*\*[^*\n]+?\*\*)(?=[A-Za-z0-9])/g;
+const CLOSED_BOLD_NO_SPACE_RE =
+  /(^|[\s([{"'`])(\*\*[^\s*](?:[^*\n]*?[^\s*])?\*\*)(?=[A-Za-z0-9])/g;
 const BOLD_MARKER_RE = /\*\*/g;
 const BOLD_INNER_WHITESPACE_RE = /\*\*([ \t]+)([^*\n][^*\n]*?)([ \t]+)?\*\*/g;
 
@@ -70,7 +71,7 @@ export function normalizeAssistantMarkdown(content: string): string {
         },
       );
 
-      normalized = normalized.replace(CLOSED_BOLD_NO_SPACE_RE, "$1 ");
+      normalized = normalized.replace(CLOSED_BOLD_NO_SPACE_RE, "$1$2 ");
 
       const markerCount = normalized.match(BOLD_MARKER_RE)?.length ?? 0;
       if (markerCount % 2 === 1) {

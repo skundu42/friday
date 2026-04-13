@@ -28,7 +28,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: lts/*
+          node-version-file: .nvmrc
 
       - name: Ensure tagged commit is on main
         shell: bash
@@ -81,20 +81,35 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: lts/*
+          node-version-file: .nvmrc
           cache: npm
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.0
+          components: clippy
 
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Run frontend typecheck
+        run: npm run typecheck
+
       - name: Run frontend tests
         run: npm run test:run
 
+      - name: Run frontend build
+        run: npm run build
+
       - name: Run Rust checks
-        run: cargo check --manifest-path src-tauri/Cargo.toml
+        run: npm run cargo:check
+
+      - name: Run Rust tests
+        run: npm run cargo:test
+
+      - name: Run Rust clippy
+        run: npm run cargo:clippy
 
   publish-macos:
     name: Publish macOS (${{ matrix.label }})
@@ -122,16 +137,41 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: lts/*
+          node-version-file: .nvmrc
           cache: npm
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: 1.94.0
           targets: ${{ matrix.target }}
 
       - name: Install frontend dependencies
         run: npm ci
+
+      - name: Require signing secrets for production releases
+        if: needs.verify-tag.outputs.prerelease == 'false'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          missing=0
+          for secret_name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD KEYCHAIN_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            if [ -z "${!secret_name}" ]; then
+              echo "Missing required production signing secret: $secret_name" >&2
+              missing=1
+            fi
+          done
+
+          if [ "$missing" -ne 0 ]; then
+            echo "Stable release tags require full signing and notarization secrets." >&2
+            exit 1
+          fi
 
       - name: Configure macOS signing
         shell: bash
@@ -171,7 +211,7 @@ jobs:
             rm -f certificate.p12
           else
             echo "APPLE_SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
-            echo "Apple signing secrets are not configured. Falling back to ad-hoc signing."
+            echo "Apple signing secrets are not configured. Falling back to ad-hoc signing for a prerelease build."
           fi
 
       - name: Build and upload release assets
@@ -195,3 +235,28 @@ jobs:
           args: --target ${{ matrix.target }}
           uploadWorkflowArtifacts: true
           workflowArtifactNamePattern: daksha-[target]-[bundle]
+
+      - name: Verify bundle artifacts
+        shell: bash
+        run: |
+          BUNDLE_DIR="src-tauri/target/${{ matrix.target }}/release/bundle"
+          APP_PATH="$(find "$BUNDLE_DIR" -name '*.app' | head -n 1)"
+          DMG_PATH="$(find "$BUNDLE_DIR" -name '*.dmg' | head -n 1)"
+
+          if [ -z "$APP_PATH" ] || [ -z "$DMG_PATH" ]; then
+            echo "Expected .app and .dmg artifacts under $BUNDLE_DIR." >&2
+            exit 1
+          fi
+
+          codesign --verify --deep --strict "$APP_PATH"
+
+      - name: Validate notarization staples
+        if: needs.verify-tag.outputs.prerelease == 'false'
+        shell: bash
+        run: |
+          BUNDLE_DIR="src-tauri/target/${{ matrix.target }}/release/bundle"
+          APP_PATH="$(find "$BUNDLE_DIR" -name '*.app' | head -n 1)"
+          DMG_PATH="$(find "$BUNDLE_DIR" -name '*.dmg' | head -n 1)"
+
+          xcrun stapler validate "$APP_PATH"
+          xcrun stapler validate "$DMG_PATH"

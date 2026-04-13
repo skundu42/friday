@@ -149,7 +149,6 @@ export default function SetupWizard({
   useEffect(() => {
     invoke<SetupStatus>("get_setup_status")
       .then((status) => {
-        console.log("[SetupWizard] setup status:", status);
         setSetupStatus(status);
       })
       .catch((err) => {
@@ -162,7 +161,6 @@ export default function SetupWizard({
     listen<DownloadProgress>("model-download-progress", (event) => {
       setDownloadProgress((previous) => {
         const next = mergeDownloadProgress(previous, event.payload, setupStatus);
-        console.log("[SetupWizard] progress event:", next.state, next.percentage + "%");
 
         if (next.state === "complete") {
           setIsDownloading(false);
@@ -204,8 +202,7 @@ export default function SetupWizard({
     });
 
     try {
-      const result = await invoke<string>("pull_model");
-      console.log("[SetupWizard] pull_model returned:", result);
+      await invoke<string>("pull_model");
       const status = await invoke<SetupStatus>("get_setup_status");
       setSetupStatus(status);
       if (status.modelDownloaded) {

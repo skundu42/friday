@@ -26,9 +26,6 @@ export default defineConfig({
           ) {
             return 'ui-settings-vendor';
           }
-          if (id.includes('/antd/') || id.includes('/rc-') || id.includes('@ant-design/icons')) {
-            return 'ui-vendor';
-          }
           if (
             id.includes('react-markdown') ||
             id.includes('remark-gfm') ||

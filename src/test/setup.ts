@@ -16,16 +16,31 @@ if (!globalThis.crypto) {
 if (!window.matchMedia) {
   Object.defineProperty(window, "matchMedia", {
     writable: true,
-    value: (query: string) => ({
-      matches: false,
-      media: query,
-      onchange: null,
-      addListener: () => {},
-      removeListener: () => {},
-      addEventListener: () => {},
-      removeEventListener: () => {},
-      dispatchEvent: () => false,
-    }),
+    value: (query: string) => {
+      const maxWidthMatch = /max-width:\s*([0-9.]+)px/i.exec(query);
+      const minWidthMatch = /min-width:\s*([0-9.]+)px/i.exec(query);
+      const maxWidth = maxWidthMatch ? Number(maxWidthMatch[1]) : null;
+      const minWidth = minWidthMatch ? Number(minWidthMatch[1]) : null;
+
+      return {
+        get matches() {
+          if (maxWidth !== null && window.innerWidth > maxWidth) {
+            return false;
+          }
+          if (minWidth !== null && window.innerWidth < minWidth) {
+            return false;
+          }
+          return true;
+        },
+        media: query,
+        onchange: null,
+        addListener: () => {},
+        removeListener: () => {},
+        addEventListener: () => {},
+        removeEventListener: () => {},
+        dispatchEvent: () => false,
+      };
+    },
   });
 }
 
