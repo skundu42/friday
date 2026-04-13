@@ -21,10 +21,13 @@
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-dialog": "^2",
     "antd": "^5",
+    "katex": "^0.16.45",
     "react": "^19",
     "react-dom": "^19",
     "react-markdown": "^9",
-    "remark-gfm": "^4"
+    "rehype-katex": "^7.0.1",
+    "remark-gfm": "^4",
+    "remark-math": "^6.0.0"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",

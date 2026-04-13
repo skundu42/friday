@@ -15,7 +15,9 @@ import {
   UpOutlined,
 } from "@ant-design/icons";
 import ReactMarkdown from "react-markdown";
+import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
 import type { Message } from "../types";
 import AppLogo from "./AppLogo";
 
@@ -28,6 +30,8 @@ const CLOSED_BOLD_NO_SPACE_RE =
   /(^|[\s([{"'`])(\*\*[^\s*](?:[^*\n]*?[^\s*])?\*\*)(?=[A-Za-z0-9])/g;
 const BOLD_MARKER_RE = /\*\*/g;
 const BOLD_INNER_WHITESPACE_RE = /\*\*([ \t]+)([^*\n][^*\n]*?)([ \t]+)?\*\*/g;
+const MARKDOWN_REMARK_PLUGINS = [remarkGfm, remarkMath];
+const MARKDOWN_REHYPE_PLUGINS = [rehypeKatex];
 
 interface Props {
   message: Pick<Message, "id" | "role" | "content" | "content_parts">;
@@ -331,7 +335,8 @@ function MessageBubble({
             style={{ fontSize: 14, lineHeight: 1.7, maxWidth: "72ch" }}
           >
             <ReactMarkdown
-              remarkPlugins={[remarkGfm]}
+              remarkPlugins={MARKDOWN_REMARK_PLUGINS}
+              rehypePlugins={MARKDOWN_REHYPE_PLUGINS}
               components={markdownComponents}
             >
               {assistantContent}
@@ -370,7 +375,10 @@ function MessageBubble({
                   className="markdown-body"
                   style={{ fontSize: 13, lineHeight: 1.6, marginTop: 8 }}
                 >
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                  <ReactMarkdown
+                    remarkPlugins={MARKDOWN_REMARK_PLUGINS}
+                    rehypePlugins={MARKDOWN_REHYPE_PLUGINS}
+                  >
                     {thinkingContent}
                   </ReactMarkdown>
                 </div>

@@ -52,6 +52,22 @@ describe("normalizeAssistantMarkdown", () => {
 });
 
 describe("MessageBubble", () => {
+  it("renders LaTeX-style math with KaTeX instead of showing raw dollar delimiters", () => {
+    const { container } = render(
+      <MessageBubble
+        message={{
+          id: "m0",
+          role: "assistant",
+          content:
+            "The formula is $A = P(1 + r)^n$ and the result is $$10{,}000(1.1)^3 = 13{,}310$$.",
+        }}
+      />,
+    );
+
+    expect(container.querySelector(".katex")).not.toBeNull();
+    expect(screen.queryByText(/\$A = P\(1 \+ r\)\^n\$/)).toBeNull();
+  });
+
   it("shows copy actions without requiring hover when the reply is complete", () => {
     render(
       <MessageBubble
