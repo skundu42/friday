@@ -16,13 +16,15 @@ Friday is a local-first desktop AI assistant with no manual setup. It runs Gemma
 
 - Streaming local chat with persistent sessions
 - First-run setup wizard for model download and runtime readiness
+- Responsive chat layout with a sidebar drawer on narrow screens
 - Two built-in local models: `Gemma 4 E2B` and `Gemma 4 E4B`
 - File attachments for text/code files, PDFs, DOCX, images, and audio
 - In-app microphone recording for audio prompts when the environment supports it
 - Reply language control for English, Hindi, Bengali, Marathi, Tamil, and Punjabi
 - Optional thinking mode for supported models
+- Assistant reasoning disclosure for replies that include thought content
 - Optional web-assisted replies from the chat composer
-- Model download, switching, RAM checks, and startup pre-warming controls
+- Model download, switching, RAM checks, token-budget controls, and startup pre-warming controls
 - Backend RAG ingestion/search commands and prompt-time RAG augmentation hooks
 
 Not fully productized yet:
@@ -82,6 +84,11 @@ Responsibilities:
 - `src-tauri/resources/litert-python/macos-aarch64/worker/friday_litert_worker.py`: LiteRT-LM Python engine integration, tool hooks, and streaming worker protocol
 - `src-tauri/src/rag/mod.rs`: local RAG ingestion and search
 
+Persistence details:
+
+- SQLite stores sessions, messages, settings, and RAG metadata locally.
+- `messages.content_parts` persists multimodal user content and assistant thinking traces alongside the plain-text message body.
+
 ## Tech Stack
 
 Frontend:
@@ -91,6 +98,9 @@ Frontend:
 - Vite 6
 - Ant Design 5
 - `@tauri-apps/api` v2
+- `@tauri-apps/plugin-dialog` v2
+- `react-markdown` + `remark-gfm`
+- Vitest + Testing Library
 
 Backend:
 
@@ -148,9 +158,14 @@ npm run tauri build
 
 ```bash
 npm run test:run
+npm run typecheck
 cargo check --manifest-path src-tauri/Cargo.toml
 cargo test --manifest-path src-tauri/Cargo.toml
+npm run cargo:clippy
+npm run check
 ```
+
+`npm run cargo:clippy` requires the Rust `clippy` component. The CI and release workflows install it explicitly.
 
 ## First-Run Setup
 
@@ -168,12 +183,14 @@ The setup wizard listens to `model-download-progress` events to drive the UI.
 
 - Setup wizard with user display-name capture
 - Session sidebar with create/select/delete flows
+- Drawer-based session navigation on narrow layouts
 - Streaming chat pane with assistant answer and thought streaming
 - Drag-and-drop and file-picker attachment flow
 - Audio recording button when microphone capture is available
 - Reply language selector
 - Web search toggle
 - Thinking toggle
+- Connection/privacy status pills and inline tool-activity status text
 - Settings drawer for token budget, model switching, downloads, and startup pre-warm behavior
 
 ## Project Layout
@@ -182,15 +199,21 @@ The setup wizard listens to `model-download-progress` events to drive the UI.
 daksha-ai/
 ├── README.md
 ├── AGENTS.md
+├── vite.config.ts
+├── .github/
+│   └── workflows/
 ├── package.json
 ├── src/
 │   ├── App.tsx
+│   ├── assets/
 │   ├── components/
 │   ├── hooks/
+│   ├── test/
 │   ├── theme/
 │   └── types.ts
 └── src-tauri/
     ├── Cargo.toml
+    ├── resources/
     ├── migrations/
     ├── tauri.conf.json
     └── src/
@@ -203,6 +226,8 @@ Important files:
 - [`src/components/ChatPane.tsx`](src/components/ChatPane.tsx): chat UI, attachments, web/thinking/audio controls
 - [`src/components/SettingsPanel.tsx`](src/components/SettingsPanel.tsx): model management, token budget, startup pre-warm settings
 - [`src/components/SetupWizard.tsx`](src/components/SetupWizard.tsx): first-run onboarding and download flow
+- [`src/test/setup.ts`](src/test/setup.ts): shared Vitest/jsdom setup
+- [`vite.config.ts`](vite.config.ts): Vite build and test configuration, including vendor chunking
 - [`src-tauri/src/lib.rs`](src-tauri/src/lib.rs): IPC surface and persistence/prompt pipeline
 - [`src-tauri/src/sidecar.rs`](src-tauri/src/sidecar.rs): model/runtime lifecycle
 - [`src-tauri/src/models/python_worker.rs`](src-tauri/src/models/python_worker.rs): Rust-side worker protocol and prompt normalization
@@ -228,17 +253,18 @@ Important paths:
 
 ## Release Workflow
 
-The repo includes a tag-driven macOS release workflow in [`.github/workflows/release.yml`](.github/workflows/release.yml).
+The repo includes a PR/main CI workflow in [`.github/workflows/ci.yml`](.github/workflows/ci.yml) and a tag-driven macOS release workflow in [`.github/workflows/release.yml`](.github/workflows/release.yml).
 
 Current release behavior:
 
 - any pushed tag triggers the workflow
 - the tag must point to a commit reachable from `main`
 - the tag must match `package.json` and `src-tauri/tauri.conf.json`
-- frontend tests and `cargo check` run before publishing
+- frontend typecheck, tests, build, `cargo check`, `cargo test`, and `cargo clippy` run before publishing
 - macOS builds are produced for Apple Silicon and Intel
 - GitHub release notes are generated automatically
-- if Apple signing secrets are missing, the workflow falls back to ad-hoc signing
+- prereleases can fall back to ad-hoc signing when Apple signing secrets are missing
+- stable releases require the full macOS signing and notarization secret set
 
 Accepted tag formats:
 
@@ -258,6 +284,7 @@ Accepted tag formats:
 - RAG is implemented in the backend but not exposed as a complete end-user document workflow.
 - The chat footer still frames the product as local-first even though enabling web assist allows outbound requests.
 - Changing the model or some generation settings can cause the local runtime to restart before the next reply.
+- Tool-call results are emitted internally, but the conversation UI still shows them only as status text rather than a first-class transcript artifact.
 - Tool permissions are conservative in the shipped UI path.
 
 ## License

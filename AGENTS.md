@@ -8,12 +8,15 @@ Current user-facing app capabilities:
 
 - Streaming local chat with persistent sessions
 - First-run setup wizard with display-name capture and model download progress
+- Responsive layout with a docked sidebar on wide screens and a drawer-based sidebar on narrow screens
 - File attachments in chat, including text/code files, PDFs, DOCX, images, and audio
 - Microphone recording for audio prompts when the environment supports `MediaRecorder`
 - Model management for `Gemma 4 E2B` and `Gemma 4 E4B`
 - Reply language control for English, Hindi, Bengali, Marathi, Tamil, and Punjabi
 - Optional thinking mode for supported models
+- Assistant reasoning disclosure UI for replies that include thinking content
 - Optional web-assisted replies via the chat composer
+- Connection/privacy status pills and inline tool-activity status text during assisted replies
 - Settings for token budget, model downloads/switching, and startup pre-warming
 
 Current backend-only or partially surfaced capabilities:
@@ -92,17 +95,22 @@ Friday defaults to `Gemma 4 E2B` on most systems and to `Gemma 4 E4B` on systems
 daksha-ai/
 ├── AGENTS.md
 ├── README.md
+├── vite.config.ts
 ├── package.json
+├── .github/
+│   └── workflows/
 ├── src/
 │   ├── App.tsx
 │   ├── main.tsx
 │   ├── styles.css
 │   ├── types.ts
+│   ├── test/
 │   ├── components/
 │   ├── hooks/
 │   └── theme/
 └── src-tauri/
     ├── Cargo.toml
+    ├── resources/
     ├── tauri.conf.json
     ├── migrations/
     └── src/
@@ -115,6 +123,8 @@ Key files:
 - [`src/components/ChatPane.tsx`](src/components/ChatPane.tsx): chat UI, attachments, web/thinking toggles, microphone recording
 - [`src/components/SettingsPanel.tsx`](src/components/SettingsPanel.tsx): reply language, token presets, model downloads/switching, startup pre-warm toggle
 - [`src/components/SetupWizard.tsx`](src/components/SetupWizard.tsx): first-run onboarding and model download flow
+- [`src/test/setup.ts`](src/test/setup.ts): shared Vitest/jsdom test shims
+- [`vite.config.ts`](vite.config.ts): Vite build config, test environment, and vendor chunk strategy
 - [`src-tauri/src/lib.rs`](src-tauri/src/lib.rs): Tauri commands, app state, prompt assembly, persistence flow, streaming event emission
 - [`src-tauri/src/sidecar.rs`](src-tauri/src/sidecar.rs): runtime bootstrap, model downloads, native runtime lifecycle, model registry, warmup
 - [`src-tauri/src/models/python_worker.rs`](src-tauri/src/models/python_worker.rs): Rust bridge to the bundled Friday LiteRT-LM Python worker
@@ -164,6 +174,7 @@ Backend responsibilities:
 - Setup/runtime bootstrapping
 - Model registry and active-model selection
 - Prompt building and history trimming
+- Persisting multimodal/user attachment context and assistant thinking traces in `messages.content_parts`
 - Attachment normalization for text, image, and audio inputs
 - Optional RAG lookup
 - Optional tool-enabled chat rounds
@@ -188,6 +199,7 @@ Current behavior worth remembering:
 
 - default max tokens is `4096`
 - systems with higher RAM get a higher default token budget in settings bootstrap logic
+- the settings UI uses token presets from `1K` through `128K`
 - `temperature` must be between `0.0` and `2.0`
 - `top_p` must be between `0.0` and `1.0`
 - the settings UI currently exposes reply language, token presets, and `auto_start_backend`
@@ -200,7 +212,7 @@ The sidecar daemon has an idle shutdown policy:
 
 ## Current Database Shape
 
-Migrations live in [`src-tauri/migrations/001_initial.sql`](src-tauri/migrations/001_initial.sql) and [`src-tauri/migrations/002_rag.sql`](src-tauri/migrations/002_rag.sql).
+Migrations live in [`src-tauri/migrations/001_initial.sql`](src-tauri/migrations/001_initial.sql), [`src-tauri/migrations/002_rag.sql`](src-tauri/migrations/002_rag.sql), and [`src-tauri/migrations/003_message_content_parts.sql`](src-tauri/migrations/003_message_content_parts.sql).
 
 Primary tables:
 
@@ -218,6 +230,7 @@ Notes:
 - current session id is persisted under the `current_session` setting key
 - app settings are stored as JSON under `app_settings`
 - active model id is persisted separately and reloaded during startup
+- the `messages` table now includes a `content_parts` JSON column for multimodal user content and assistant thinking traces
 
 ## Current IPC Surface
 
@@ -277,9 +290,14 @@ From repo root:
 
 ```bash
 npm install
+npm run typecheck
 npm run tauri dev
 npm run build
 npm run test:run
+npm run cargo:check
+npm run cargo:test
+npm run cargo:clippy
+npm run check
 cargo check --manifest-path src-tauri/Cargo.toml
 cargo test --manifest-path src-tauri/Cargo.toml
 ```
@@ -288,6 +306,7 @@ Notes:
 
 - Use `npm run tauri dev` and `npm run tauri build` to stay aligned with the configured frontend hooks in [`src-tauri/tauri.conf.json`](src-tauri/tauri.conf.json)
 - There is no root `Cargo.toml`; use `--manifest-path src-tauri/Cargo.toml`
+- `npm run cargo:clippy` requires the Rust `clippy` component; CI installs it explicitly
 
 ## Implementation Notes For Contributors
 
@@ -298,6 +317,7 @@ Notes:
 - Attachment-flow changes can require coordinated updates across [`src/components/ChatPane.tsx`](src/components/ChatPane.tsx), `read_file_context`, `save_temp_file`, and `delete_temp_file`
 - If model capability metadata changes, update both Rust model structs and the mirrored TypeScript types/UI consumers
 - RAG behavior lives in [`src-tauri/src/rag/mod.rs`](src-tauri/src/rag/mod.rs)
+- CI and release behavior live in [`.github/workflows/ci.yml`](.github/workflows/ci.yml) and [`.github/workflows/release.yml`](.github/workflows/release.yml)
 
 ## Current Caveats
 
