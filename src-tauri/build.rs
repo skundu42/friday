@@ -2,11 +2,14 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use sha2::{Digest, Sha256};
+
 const LITERT_LM_VERSION: &str = "0.10.1";
 
 struct RuntimeSpec {
     relative_resource_path: &'static str,
     download_url: &'static str,
+    sha256: &'static str,
 }
 
 fn main() {
@@ -42,18 +45,22 @@ fn runtime_spec(target_os: &str, target_arch: &str) -> Option<RuntimeSpec> {
         ("macos", "aarch64") => Some(RuntimeSpec {
             relative_resource_path: "litert-runtime/macos-aarch64/lit",
             download_url: "https://github.com/google-ai-edge/LiteRT-LM/releases/download/v0.10.1/lit_macos_arm64",
+            sha256: "311ac22de765402adbba8fb04e4a70d0ed1263ff75d104b063453449651006bb",
         }),
         ("linux", "x86_64") => Some(RuntimeSpec {
             relative_resource_path: "litert-runtime/linux-x86_64/lit",
             download_url: "https://github.com/google-ai-edge/LiteRT-LM/releases/download/v0.10.1/lit_linux_x86_64",
+            sha256: "d8461038fc1ce523975f8a2ef8cf403cae30b85e469116f9bee186a3a8fe1f54",
         }),
         ("linux", "aarch64") => Some(RuntimeSpec {
             relative_resource_path: "litert-runtime/linux-aarch64/lit",
             download_url: "https://github.com/google-ai-edge/LiteRT-LM/releases/download/v0.10.1/lit_linux_arm64",
+            sha256: "d7016a38ad63689c8f8facd0eac6b4cd6bd6be8325918af46ee54df9c677dd9c",
         }),
         ("windows", "x86_64") => Some(RuntimeSpec {
             relative_resource_path: "litert-runtime/windows-x86_64/lit.exe",
             download_url: "https://github.com/google-ai-edge/LiteRT-LM/releases/download/v0.10.1/lit_windows_x86_64.exe",
+            sha256: "ea55d6357a1348a081dfb26c31bc2ffc4b383a139201dc5ac25a5d9c745bb753",
         }),
         _ => None,
     }
@@ -61,11 +68,12 @@ fn runtime_spec(target_os: &str, target_arch: &str) -> Option<RuntimeSpec> {
 
 fn ensure_bundled_runtime(resource_path: &Path, spec: RuntimeSpec) {
     if let Some(local_override) = env::var_os("FRIDAY_LITERT_RUNTIME_PATH") {
-        copy_local_runtime(Path::new(&local_override), resource_path);
+        copy_local_runtime(Path::new(&local_override), resource_path, spec.sha256);
         return;
     }
 
     if resource_path.exists() {
+        verify_runtime_sha256(resource_path, spec.sha256);
         return;
     }
 
@@ -79,10 +87,10 @@ fn ensure_bundled_runtime(resource_path: &Path, spec: RuntimeSpec) {
         );
     }
 
-    download_runtime(spec.download_url, resource_path);
+    download_runtime(spec.download_url, resource_path, spec.sha256);
 }
 
-fn copy_local_runtime(source_path: &Path, target_path: &Path) {
+fn copy_local_runtime(source_path: &Path, target_path: &Path, expected_sha256: &str) {
     if !source_path.exists() {
         panic!(
             "FRIDAY_LITERT_RUNTIME_PATH points to a missing file: {}",
@@ -102,9 +110,10 @@ fn copy_local_runtime(source_path: &Path, target_path: &Path) {
             error
         )
     });
+    verify_runtime_sha256(target_path, expected_sha256);
 }
 
-fn download_runtime(url: &str, target_path: &Path) {
+fn download_runtime(url: &str, target_path: &Path, expected_sha256: &str) {
     if let Some(parent) = target_path.parent() {
         fs::create_dir_all(parent).expect("failed to create bundled runtime directory");
     }
@@ -141,4 +150,24 @@ fn download_runtime(url: &str, target_path: &Path) {
             error
         )
     });
+    verify_runtime_sha256(target_path, expected_sha256);
+}
+
+fn verify_runtime_sha256(path: &Path, expected_sha256: &str) {
+    let bytes = fs::read(path).unwrap_or_else(|error| {
+        panic!(
+            "Failed to read LiteRT-LM runtime from {} for checksum verification: {}",
+            path.display(),
+            error
+        )
+    });
+    let actual_sha256 = format!("{:x}", Sha256::digest(&bytes));
+    if actual_sha256 != expected_sha256 {
+        panic!(
+            "LiteRT-LM runtime checksum mismatch for {}. Expected {}, got {}.",
+            path.display(),
+            expected_sha256,
+            actual_sha256
+        );
+    }
 }

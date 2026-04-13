@@ -126,7 +126,7 @@ describe("App", () => {
         return {
           getPropertyValue: () => "",
           overflow: "auto",
-        } as CSSStyleDeclaration;
+        } as unknown as CSSStyleDeclaration;
       }
       return nativeGetComputedStyle(element);
     });

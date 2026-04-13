@@ -10,7 +10,6 @@
     "beforeBuildCommand": "npm run build"
   },
   "app": {
-    "withGlobalTauri": true,
     "windows": [
       {
         "title": "Friday — Local AI Assistant",
@@ -23,7 +22,7 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self' asset: data: blob:; img-src 'self' asset: data: blob:; media-src 'self' asset: data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' asset: data:; connect-src ipc: http://ipc.localhost https://ipc.localhost http://127.0.0.1:* ws://127.0.0.1:* http://localhost:* ws://localhost:*;"
     }
   },
   "bundle": {
@@ -39,10 +38,5 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
-  },
-  "plugins": {
-    "shell": {
-      "open": true
-    }
   }
 }

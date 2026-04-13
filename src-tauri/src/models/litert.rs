@@ -2,9 +2,11 @@ use crate::models::{ChatContent, ChatContentPart, ChatMessage};
 use crate::settings::GenerationRequestConfig;
 use futures_util::StreamExt;
 use serde_json::{json, Value};
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::str;
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
@@ -12,6 +14,10 @@ use tokio::sync::mpsc;
 const GEMMA_THINKING_TRIGGER: &str = "<|think|>";
 const GEMMA_THINKING_CHANNEL_START: &str = "<|channel>thought\n";
 const GEMMA_THINKING_CHANNEL_END: &str = "<channel|>";
+const WEB_FETCH_TIMEOUT: Duration = Duration::from_secs(15);
+const WEB_FETCH_MAX_BYTES: usize = 1_000_000;
+const WEB_FETCH_MAX_CHARS: usize = 20_000;
+const WEB_FETCH_MAX_REDIRECTS: usize = 5;
 
 #[derive(Debug)]
 pub enum StreamEvent {
@@ -119,23 +125,18 @@ impl DaemonClient {
         rag_context: Option<serde_json::Value>,
     ) -> Result<mpsc::Receiver<StreamEvent>, String> {
         let client = self.client.clone();
-        let base_url = self.base_url.clone();
-        let model_id = self.model_id.clone();
-        let input_messages = messages.to_vec();
+        let request = ChatRoundtripRequest {
+            base_url: self.base_url.clone(),
+            model_id: self.model_id.clone(),
+            generation_config,
+            messages: messages.to_vec(),
+            tools_enabled,
+            rag_context,
+        };
 
         let (tx, rx) = mpsc::channel(128);
         tokio::spawn(async move {
-            let result = run_chat_roundtrip(
-                client,
-                &base_url,
-                &model_id,
-                generation_config,
-                input_messages,
-                tools_enabled,
-                rag_context,
-                &tx,
-            )
-            .await;
+            let result = run_chat_roundtrip(client, request, &tx).await;
 
             if let Err(error) = result {
                 let _ = tx.send(StreamEvent::Error(error)).await;
@@ -167,6 +168,16 @@ impl Drop for DaemonClient {
     }
 }
 
+#[derive(Clone)]
+struct ChatRoundtripRequest {
+    base_url: String,
+    model_id: String,
+    generation_config: GenerationRequestConfig,
+    messages: Vec<ChatMessage>,
+    tools_enabled: bool,
+    rag_context: Option<Value>,
+}
+
 async fn wait_for_health(client: &reqwest::Client, base_url: &str) -> Result<(), String> {
     for _ in 0..480 {
         if let Ok(response) = client.get(format!("{base_url}/health")).send().await {
@@ -182,16 +193,11 @@ async fn wait_for_health(client: &reqwest::Client, base_url: &str) -> Result<(),
 
 async fn run_chat_roundtrip(
     client: reqwest::Client,
-    base_url: &str,
-    model_id: &str,
-    generation_config: GenerationRequestConfig,
-    messages: Vec<ChatMessage>,
-    tools_enabled: bool,
-    rag_context: Option<Value>,
+    request: ChatRoundtripRequest,
     tx: &mpsc::Sender<StreamEvent>,
 ) -> Result<(), String> {
-    let tool_permissions = ToolPermissions::web_assist_enabled(tools_enabled);
-    let mut request_state = build_request_state(messages, rag_context)?;
+    let tool_permissions = ToolPermissions::web_assist_enabled(request.tools_enabled);
+    let mut request_state = build_request_state(request.messages, request.rag_context)?;
 
     if tool_permissions.web && should_force_web_search(&request_state.user_text) {
         let args = json!({
@@ -218,11 +224,13 @@ async fn run_chat_roundtrip(
         let body = build_generate_content_request(
             &request_state.system_instruction,
             &request_state.contents,
-            &generation_config,
+            &request.generation_config,
             tool_permissions,
         );
-        let stream_url =
-            format!("{base_url}/v1beta/models/{model_id}:streamGenerateContent?alt=sse");
+        let stream_url = format!(
+            "{}/v1beta/models/{}:streamGenerateContent?alt=sse",
+            request.base_url, request.model_id
+        );
         let streamed = stream_generate_content(&client, &stream_url, &body, tx).await;
         let StreamedRound {
             function_calls,
@@ -234,7 +242,14 @@ async fn run_chat_roundtrip(
                     "LiteRT-LM streaming failed, falling back to generateContent: {}",
                     stream_error
                 );
-                complete_generate_content_round(&client, base_url, model_id, &body, tx).await?
+                complete_generate_content_round(
+                    &client,
+                    &request.base_url,
+                    &request.model_id,
+                    &body,
+                    tx,
+                )
+                .await?
             }
         };
 
@@ -246,7 +261,6 @@ async fn run_chat_roundtrip(
                         "role": "model",
                         "parts": function_calls
                             .iter()
-                            .cloned()
                             .map(|function_call| json!({ "functionCall": function_call }))
                             .collect::<Vec<_>>(),
                     })
@@ -669,7 +683,6 @@ fn function_calls_to_model_content(function_calls: &[Value]) -> Option<Value> {
         "role": "model",
         "parts": function_calls
             .iter()
-            .cloned()
             .map(|function_call| json!({ "functionCall": function_call }))
             .collect::<Vec<_>>(),
     }))
@@ -1271,7 +1284,7 @@ async fn web_search(query: &str, max_results: usize) -> Value {
     let encoded = urlencoding::encode(query);
     let client = match reqwest::Client::builder()
         .user_agent("Friday/0.1")
-        .timeout(std::time::Duration::from_secs(15))
+        .timeout(WEB_FETCH_TIMEOUT)
         .build()
     {
         Ok(client) => client,
@@ -1329,25 +1342,84 @@ async fn web_fetch(url: &str, max_chars: usize) -> Value {
         return json!({ "error": "URL is required." });
     }
 
+    let validated_url = match validate_remote_web_url(url).await {
+        Ok(validated_url) => validated_url,
+        Err(error) => return json!({ "error": error }),
+    };
+    let max_chars = max_chars.clamp(1, WEB_FETCH_MAX_CHARS);
+
     let client = match reqwest::Client::builder()
         .user_agent("Friday/0.1")
-        .timeout(std::time::Duration::from_secs(15))
+        .timeout(WEB_FETCH_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::limited(WEB_FETCH_MAX_REDIRECTS))
         .build()
     {
         Ok(client) => client,
         Err(error) => return json!({ "error": error.to_string() }),
     };
 
-    let response = match client.get(url).send().await {
+    let response = match client.get(validated_url.clone()).send().await {
         Ok(response) => response,
         Err(error) => return json!({ "error": error.to_string() }),
     };
+    if !response.status().is_success() {
+        return json!({
+            "error": format!("Fetch failed with HTTP {}", response.status())
+        });
+    }
 
-    let html = match response.text().await {
-        Ok(html) => html,
-        Err(error) => return json!({ "error": error.to_string() }),
+    if response
+        .content_length()
+        .is_some_and(|content_length| content_length as usize > WEB_FETCH_MAX_BYTES)
+    {
+        return json!({
+            "error": format!("Response exceeds {} bytes.", WEB_FETCH_MAX_BYTES)
+        });
+    }
+
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if !is_supported_web_fetch_content_type(&content_type) {
+        return json!({
+            "error": format!(
+                "Unsupported content type: {}",
+                if content_type.is_empty() {
+                    "unknown"
+                } else {
+                    &content_type
+                }
+            )
+        });
+    }
+
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(next_chunk) = stream.next().await {
+        let chunk = match next_chunk {
+            Ok(chunk) => chunk,
+            Err(error) => return json!({ "error": error.to_string() }),
+        };
+        if body.len().saturating_add(chunk.len()) > WEB_FETCH_MAX_BYTES {
+            return json!({
+                "error": format!("Response exceeds {} bytes.", WEB_FETCH_MAX_BYTES)
+            });
+        }
+        body.extend_from_slice(&chunk);
+    }
+
+    let body_text = match String::from_utf8(body) {
+        Ok(body_text) => body_text,
+        Err(error) => {
+            return json!({
+                "error": format!("Response was not valid UTF-8: {}", error)
+            });
+        }
     };
-    let content = strip_tags(&html);
+    let content = strip_tags(&body_text);
     let (snippet, was_truncated) = truncate_to_char_limit(&content, max_chars);
     let truncated = if was_truncated {
         format!("{snippet}... [truncated]")
@@ -1356,10 +1428,103 @@ async fn web_fetch(url: &str, max_chars: usize) -> Value {
     };
 
     json!({
-        "url": url,
+        "url": validated_url.as_str(),
         "content": truncated,
         "length": truncated.chars().count(),
+        "contentType": content_type,
     })
+}
+
+async fn validate_remote_web_url(url: &str) -> Result<reqwest::Url, String> {
+    let parsed = reqwest::Url::parse(url).map_err(|e| format!("Invalid URL: {}", e))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err("Only http and https URLs are allowed.".to_string());
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("Authenticated URLs are not allowed.".to_string());
+    }
+
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "A hostname is required.".to_string())?;
+    if is_disallowed_web_host(host) {
+        return Err("Local and private network hosts are blocked.".to_string());
+    }
+
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        if is_disallowed_ip(ip) {
+            return Err("Local and private network hosts are blocked.".to_string());
+        }
+        return Ok(parsed);
+    }
+
+    let port = parsed
+        .port_or_known_default()
+        .ok_or_else(|| "Unable to determine URL port.".to_string())?;
+    let mut resolved_any = false;
+    let resolved_addrs = tokio::net::lookup_host((host, port))
+        .await
+        .map_err(|e| format!("Failed to resolve host {}: {}", host, e))?;
+    for addr in resolved_addrs {
+        resolved_any = true;
+        if is_disallowed_ip(addr.ip()) {
+            return Err("Local and private network hosts are blocked.".to_string());
+        }
+    }
+    if !resolved_any {
+        return Err(format!(
+            "Host {} did not resolve to a public address.",
+            host
+        ));
+    }
+
+    Ok(parsed)
+}
+
+fn is_disallowed_web_host(host: &str) -> bool {
+    let lowered = host.trim().to_ascii_lowercase();
+    lowered == "localhost"
+        || lowered == "local"
+        || lowered == "localdomain"
+        || lowered.ends_with(".localhost")
+        || lowered.ends_with(".local")
+}
+
+fn is_disallowed_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ipv4) => {
+            ipv4.is_private()
+                || ipv4.is_loopback()
+                || ipv4.is_link_local()
+                || ipv4.is_multicast()
+                || ipv4.is_unspecified()
+                || ipv4.is_broadcast()
+                || ipv4.is_documentation()
+        }
+        IpAddr::V6(ipv6) => {
+            ipv6.is_loopback()
+                || ipv6.is_unique_local()
+                || ipv6.is_unicast_link_local()
+                || ipv6.is_unspecified()
+                || ipv6.is_multicast()
+                || matches!(ipv6.segments(), [0x2001, 0x0db8, ..])
+        }
+    }
+}
+
+fn is_supported_web_fetch_content_type(content_type: &str) -> bool {
+    let mime = content_type.split(';').next().unwrap_or("").trim();
+    matches!(
+        mime,
+        "text/plain"
+            | "text/html"
+            | "text/markdown"
+            | "text/csv"
+            | "application/json"
+            | "application/xml"
+            | "application/xhtml+xml"
+            | "application/rss+xml"
+    ) || mime.starts_with("text/")
 }
 
 fn file_read(path: &str) -> Value {
@@ -1775,5 +1940,41 @@ mod tests {
 
         assert_eq!(truncated.chars().count(), 3);
         assert!(was_truncated);
+    }
+
+    #[tokio::test]
+    async fn validate_remote_web_url_rejects_localhost_targets() {
+        let result = validate_remote_web_url("http://localhost:8080/health").await;
+
+        assert_eq!(
+            result.unwrap_err(),
+            "Local and private network hosts are blocked."
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_remote_web_url_rejects_private_ip_targets() {
+        let result = validate_remote_web_url("http://127.0.0.1:8080/health").await;
+
+        assert_eq!(
+            result.unwrap_err(),
+            "Local and private network hosts are blocked."
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_remote_web_url_rejects_non_http_schemes() {
+        let result = validate_remote_web_url("file:///tmp/secret.txt").await;
+
+        assert_eq!(result.unwrap_err(), "Only http and https URLs are allowed.");
+    }
+
+    #[test]
+    fn supported_web_fetch_content_types_are_allowlisted() {
+        assert!(is_supported_web_fetch_content_type(
+            "text/html; charset=utf-8"
+        ));
+        assert!(is_supported_web_fetch_content_type("application/json"));
+        assert!(!is_supported_web_fetch_content_type("image/png"));
     }
 }

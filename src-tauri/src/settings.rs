@@ -43,7 +43,7 @@ pub struct ChatSettingsInput {
     pub generation: GenerationSettingsInput,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(default)]
 pub struct GenerationSettings {
     pub temperature: Option<f32>,
@@ -51,7 +51,7 @@ pub struct GenerationSettings {
     pub thinking_enabled: Option<bool>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(default)]
 pub struct GenerationSettingsInput {
     pub temperature: Option<f32>,
@@ -84,7 +84,7 @@ struct StoredChatSettings {
     generation: StoredGenerationSettings,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(default)]
 struct StoredGenerationSettings {
     temperature: Option<f32>,
@@ -134,26 +134,6 @@ impl Default for ChatSettingsInput {
     }
 }
 
-impl Default for GenerationSettings {
-    fn default() -> Self {
-        Self {
-            temperature: None,
-            top_p: None,
-            thinking_enabled: None,
-        }
-    }
-}
-
-impl Default for GenerationSettingsInput {
-    fn default() -> Self {
-        Self {
-            temperature: None,
-            top_p: None,
-            thinking_enabled: None,
-        }
-    }
-}
-
 impl Default for StoredAppSettings {
     fn default() -> Self {
         Self {
@@ -171,16 +151,6 @@ impl Default for StoredChatSettings {
             max_tokens: DEFAULT_MAX_TOKENS,
             web_assist_enabled: false,
             generation: StoredGenerationSettings::default(),
-        }
-    }
-}
-
-impl Default for StoredGenerationSettings {
-    fn default() -> Self {
-        Self {
-            temperature: None,
-            top_p: None,
-            thinking_enabled: None,
         }
     }
 }

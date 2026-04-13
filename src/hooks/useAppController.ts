@@ -774,7 +774,7 @@ export function useAppController() {
     });
   };
 
-  const setReplyLanguage = async (lang: string) => {
+  const setReplyLanguage = async (lang: ReplyLanguage) => {
     if (!settings || settings.chat.reply_language === lang) return;
     try {
       await saveAppSettings({

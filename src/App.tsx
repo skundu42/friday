@@ -73,7 +73,8 @@ export default function App() {
   };
 
   useEffect(() => {
-    if (controller.isBootstrapping || wizardChecked || !controller.settings) {
+    const settings = controller.settings;
+    if (controller.isBootstrapping || wizardChecked || !settings) {
       return;
     }
 
@@ -85,7 +86,7 @@ export default function App() {
         }
         if (
           !status.readyToChat ||
-          !controller.settings.user_display_name.trim()
+          !settings.user_display_name.trim()
         ) {
           setShowWizard(true);
         }

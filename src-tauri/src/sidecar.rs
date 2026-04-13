@@ -214,6 +214,17 @@ struct ParsedDownloadProgress {
     percentage: u64,
 }
 
+struct DownloadProgressPayload<'a> {
+    state: &'a str,
+    display_name: &'a str,
+    downloaded_bytes: u64,
+    total_bytes: u64,
+    speed_bps: u64,
+    eta_seconds: u64,
+    percentage: u64,
+    error: Option<&'a str>,
+}
+
 #[derive(Debug, Clone, Copy)]
 enum ProcessStream {
     Stdout,
@@ -692,8 +703,21 @@ impl SidecarManager {
             model.display_name,
         )
         .await
-        .inspect_err(|_| {
+        .inspect_err(|error| {
             stop_progress.store(true, Ordering::SeqCst);
+            Self::emit_download_progress(
+                Some(app),
+                &DownloadProgressPayload {
+                    state: "error",
+                    display_name: model.display_name,
+                    downloaded_bytes: self.partial_model_download_bytes(model),
+                    total_bytes: model.size_bytes,
+                    speed_bps: 0,
+                    eta_seconds: 0,
+                    percentage: 0,
+                    error: Some(error),
+                },
+            );
         })?;
         stop_progress.store(true, Ordering::SeqCst);
         if let Some(handle) = progress_handle {
@@ -986,14 +1010,16 @@ impl SidecarManager {
                 last_progress = Some(progress.clone());
                 Self::emit_download_progress(
                     app,
-                    "downloading",
-                    display_name,
-                    progress.downloaded_bytes,
-                    progress.total_bytes,
-                    progress.speed_bps,
-                    progress.eta_seconds,
-                    normalize_incomplete_download_percentage(progress.percentage),
-                    None,
+                    &DownloadProgressPayload {
+                        state: "downloading",
+                        display_name,
+                        downloaded_bytes: progress.downloaded_bytes,
+                        total_bytes: progress.total_bytes,
+                        speed_bps: progress.speed_bps,
+                        eta_seconds: progress.eta_seconds,
+                        percentage: normalize_incomplete_download_percentage(progress.percentage),
+                        error: None,
+                    },
                 );
             }
         }
@@ -1008,14 +1034,16 @@ impl SidecarManager {
             last_progress = Some(progress.clone());
             Self::emit_download_progress(
                 app,
-                "downloading",
-                display_name,
-                progress.downloaded_bytes,
-                progress.total_bytes,
-                progress.speed_bps,
-                progress.eta_seconds,
-                normalize_incomplete_download_percentage(progress.percentage),
-                None,
+                &DownloadProgressPayload {
+                    state: "downloading",
+                    display_name,
+                    downloaded_bytes: progress.downloaded_bytes,
+                    total_bytes: progress.total_bytes,
+                    speed_bps: progress.speed_bps,
+                    eta_seconds: progress.eta_seconds,
+                    percentage: normalize_incomplete_download_percentage(progress.percentage),
+                    error: None,
+                },
             );
         }
 
@@ -1085,40 +1113,35 @@ impl SidecarManager {
     fn emit_progress(app: Option<&tauri::AppHandle>, state: &str, display_name: &str) {
         Self::emit_download_progress(
             app,
-            state,
-            display_name,
-            0,
-            0,
-            0,
-            0,
-            if state == "complete" { 100 } else { 0 },
-            None,
+            &DownloadProgressPayload {
+                state,
+                display_name,
+                downloaded_bytes: 0,
+                total_bytes: 0,
+                speed_bps: 0,
+                eta_seconds: 0,
+                percentage: if state == "complete" { 100 } else { 0 },
+                error: None,
+            },
         );
     }
 
     fn emit_download_progress(
         app: Option<&tauri::AppHandle>,
-        state: &str,
-        display_name: &str,
-        downloaded_bytes: u64,
-        total_bytes: u64,
-        speed_bps: u64,
-        eta_seconds: u64,
-        percentage: u64,
-        error: Option<&str>,
+        payload: &DownloadProgressPayload<'_>,
     ) {
         if let Some(app) = app {
             let _ = app.emit(
                 "model-download-progress",
                 serde_json::json!({
-                    "state": state,
-                    "displayName": display_name,
-                    "downloadedBytes": downloaded_bytes,
-                    "totalBytes": total_bytes,
-                    "speedBps": speed_bps,
-                    "etaSeconds": eta_seconds,
-                    "percentage": percentage,
-                    "error": error,
+                    "state": payload.state,
+                    "displayName": payload.display_name,
+                    "downloadedBytes": payload.downloaded_bytes,
+                    "totalBytes": payload.total_bytes,
+                    "speedBps": payload.speed_bps,
+                    "etaSeconds": payload.eta_seconds,
+                    "percentage": payload.percentage,
+                    "error": payload.error,
                 }),
             );
         }
@@ -1157,14 +1180,16 @@ impl SidecarManager {
 
                     SidecarManager::emit_download_progress(
                         Some(&app),
-                        "downloading",
-                        &display_name,
-                        downloaded_bytes,
-                        total_bytes,
-                        speed_bps,
-                        eta_seconds,
-                        normalize_incomplete_download_percentage(percentage),
-                        None,
+                        &DownloadProgressPayload {
+                            state: "downloading",
+                            display_name: &display_name,
+                            downloaded_bytes,
+                            total_bytes,
+                            speed_bps,
+                            eta_seconds,
+                            percentage: normalize_incomplete_download_percentage(percentage),
+                            error: None,
+                        },
                     );
 
                     last_bytes = downloaded_bytes;
