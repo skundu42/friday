@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Avatar, Button, Input, Select, Space, Typography, Tag } from "antd";
 import {
   SendOutlined,
@@ -261,6 +261,7 @@ export default function ChatPane({
 
   useEffect(() => {
     let cancelled = false;
+    let permissionStatus: PermissionStatus | null = null;
 
     const syncPermissionState = async () => {
       if (
@@ -275,6 +276,7 @@ export default function ChatPane({
         const status = await navigator.permissions.query({
           name: "microphone" as PermissionName,
         });
+        permissionStatus = status;
         if (!cancelled) {
           setMicrophonePermission(
             status.state as "granted" | "prompt" | "denied",
@@ -296,6 +298,9 @@ export default function ChatPane({
 
     return () => {
       cancelled = true;
+      if (permissionStatus) {
+        permissionStatus.onchange = null;
+      }
     };
   }, []);
 
@@ -459,7 +464,7 @@ export default function ChatPane({
     });
   };
 
-  const saveBrowserBinaryFile = async (
+  const saveBrowserBinaryFile = useCallback(async (
     file: globalThis.File,
   ): Promise<string> => {
     const arrayBuffer = await file.arrayBuffer();
@@ -468,41 +473,18 @@ export default function ChatPane({
       name: file.name,
       data: Array.from(bytes),
     });
-  };
-
-  // Drag & Drop handlers
-  const handleDragOver = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDragOver(true);
   }, []);
 
-  const handleDragLeave = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDragOver(false);
+  const readFileAsDataUrl = useCallback((file: globalThis.File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(file);
+    });
   }, []);
 
-  const handleDrop = useCallback(
-    async (e: React.DragEvent) => {
-      e.preventDefault();
-      e.stopPropagation();
-      setIsDragOver(false);
-
-      const files = e.dataTransfer.files;
-      if (!files || files.length === 0) return;
-
-      const supportedFiles = Array.from(files).filter((file) =>
-        isSupportedAttachmentName(file.name),
-      );
-      void Promise.allSettled(
-        supportedFiles.map((file) => loadBrowserFile(file)),
-      );
-    },
-    [],
-  );
-
-  const loadBrowserFile = async (file: globalThis.File) => {
+  const loadBrowserFile = useCallback(async (file: globalThis.File) => {
     const attachmentId = makeBrowserAttachmentId(file.name);
     const name = file.name;
     const ext = name.split(".").pop()?.toLowerCase() || "";
@@ -592,7 +574,6 @@ export default function ChatPane({
         }
         tempPathToCleanup = null;
       } else if (!isPdf && !isDocx) {
-        // Read as text
         const text = await file.text();
         setAttachments((prev) =>
           prev.map((a) =>
@@ -602,7 +583,6 @@ export default function ChatPane({
           ),
         );
       } else {
-        // For PDF/DOCX dropped files, we need to save temporarily and use the Rust command
         const tempPath = await saveBrowserBinaryFile(file);
         tempPathToCleanup = tempPath;
         const result = await invoke<{
@@ -652,7 +632,44 @@ export default function ChatPane({
         ),
       );
     }
-  };
+  }, [
+    cleanupTempAttachments,
+    imageInputAvailable,
+    readFileAsDataUrl,
+    saveBrowserBinaryFile,
+  ]);
+
+  // Drag & Drop handlers
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragOver(true);
+  }, []);
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragOver(false);
+  }, []);
+
+  const handleDrop = useCallback(
+    async (e: React.DragEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      setIsDragOver(false);
+
+      const files = e.dataTransfer.files;
+      if (!files || files.length === 0) return;
+
+      const supportedFiles = Array.from(files).filter((file) =>
+        isSupportedAttachmentName(file.name),
+      );
+      void Promise.allSettled(
+        supportedFiles.map((file) => loadBrowserFile(file)),
+      );
+    },
+    [loadBrowserFile],
+  );
 
   const bestRecordingMimeType = () => {
     const candidates = [
@@ -770,15 +787,6 @@ export default function ChatPane({
       viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
     shouldAutoScrollRef.current = distanceFromBottom < 80;
   }, []);
-
-  const readFileAsDataUrl = (file: globalThis.File): Promise<string> => {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(reader.result as string);
-      reader.onerror = () => reject(reader.error);
-      reader.readAsDataURL(file);
-    });
-  };
 
   const waitingForFirstToken =
     isGenerating && messages[messages.length - 1]?.role !== "assistant";

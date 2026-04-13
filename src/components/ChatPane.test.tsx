@@ -280,4 +280,85 @@ describe("ChatPane", () => {
       true,
     );
   });
+
+  it("uses the latest image capability state for dropped files after rerender", async () => {
+    class FileReaderMock {
+      result: string | ArrayBuffer | null = null;
+      error: DOMException | null = null;
+      onload: ((this: FileReader, ev: ProgressEvent<FileReader>) => unknown) | null =
+        null;
+      onerror: ((this: FileReader, ev: ProgressEvent<FileReader>) => unknown) | null =
+        null;
+
+      readAsDataURL(file: Blob) {
+        this.result = `data:${file.type};base64,ZmFrZQ==`;
+        this.onload?.call(this as unknown as FileReader, {} as ProgressEvent<FileReader>);
+      }
+    }
+
+    const originalFileReader = globalThis.FileReader;
+    vi.stubGlobal("FileReader", FileReaderMock);
+
+    try {
+      const { container, rerender } = renderChatPane({
+        backendStatus: {
+          ...backendStatus,
+          supports_image_input: false,
+        },
+      });
+
+      rerender(
+        <ChatPane
+          messages={[]}
+          isGenerating={false}
+          activeSessionTitle="New chat"
+          userDisplayName="Asha"
+          replyLanguage="english"
+          backendStatus={backendStatus}
+          onLanguageChange={() => undefined}
+          onToggleSidebar={() => undefined}
+          isSidebarOpen
+          onSendMessage={() => undefined}
+          onCancelGeneration={() => undefined}
+          webSearchAvailable
+          thinkingAvailable
+        />,
+      );
+
+      const root = container.firstElementChild as HTMLElement;
+      const image = new File(["img"], "photo.png", {
+        type: "image/png",
+      });
+
+      fireEvent.drop(root, {
+        dataTransfer: {
+          files: [image],
+        },
+      });
+
+      await waitFor(() => expect(screen.getByText("photo.png")).not.toBeNull());
+      expect(
+        screen.queryByText(
+          "Image attachments are unavailable with the current local backend.",
+        ),
+      ).toBeNull();
+
+      const composer = screen.getByPlaceholderText(
+        "Ask about the attached files or audio...",
+      );
+      fireEvent.change(composer, {
+        target: { value: "Describe this image" },
+      });
+
+      await waitFor(() =>
+        expect(
+          (screen.getByRole("button", { name: /send/i }) as HTMLButtonElement)
+            .disabled,
+        ).toBe(false),
+      );
+    } finally {
+      vi.unstubAllGlobals();
+      globalThis.FileReader = originalFileReader;
+    }
+  });
 });

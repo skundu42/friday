@@ -865,6 +865,105 @@ describe("useAppController", () => {
     expect(result.current.nativeToolSupportAvailable).toBe(true);
   });
 
+  it("refreshes backend status without reloading model inventory after chat completion", async () => {
+    let resolveSend: (() => void) | undefined;
+
+    invokeMock.mockImplementation(
+      (command: string, args?: { sessionId?: string }) => {
+        if (command === "bootstrap_app") return Promise.resolve(bootstrapPayload);
+        if (command === "detect_backend") return Promise.resolve(backendStatus);
+        if (command === "list_models") {
+          return Promise.resolve([
+            {
+              id: "gemma-4-e2b-it",
+              display_name: "Gemma 4 E2B",
+            },
+          ]);
+        }
+        if (command === "get_active_model") {
+          return Promise.resolve({
+            id: "gemma-4-e2b-it",
+            display_name: "Gemma 4 E2B",
+          });
+        }
+        if (command === "list_downloaded_model_ids") {
+          return Promise.resolve(["gemma-4-e2b-it"]);
+        }
+        if (command === "send_message") {
+          return new Promise<void>((resolve) => {
+            resolveSend = resolve;
+          });
+        }
+        if (command === "select_session" && args?.sessionId === "session-a") {
+          return Promise.resolve({
+            session: bootstrapPayload.currentSession,
+            messages: [
+              {
+                id: "m-user",
+                session_id: "session-a",
+                role: "user",
+                content: "Hello Friday",
+                created_at: "2026-04-09T12:01:00Z",
+              },
+              {
+                id: "m-assistant",
+                session_id: "session-a",
+                role: "assistant",
+                content: "Done",
+                created_at: "2026-04-09T12:01:05Z",
+              },
+            ],
+          });
+        }
+        if (command === "list_sessions") {
+          return Promise.resolve(bootstrapPayload.sessions);
+        }
+        return Promise.resolve(undefined);
+      },
+    );
+
+    const { result } = renderHook(() => useAppController());
+    await waitFor(() =>
+      expect(result.current.activeSession?.id).toBe("session-a"),
+    );
+
+    invokeMock.mockClear();
+
+    await act(async () => {
+      void result.current.sendMessage("Hello Friday");
+    });
+
+    await waitFor(() => expect(result.current.isGenerating).toBe(true));
+
+    act(() => {
+      emitEvent("chat-done", {
+        sessionId: "session-a",
+        model: "gemma-4-e2b-it.litertlm",
+        hasContent: true,
+      });
+    });
+
+    await act(async () => {
+      resolveSend?.();
+    });
+
+    await waitFor(() => expect(result.current.isGenerating).toBe(false));
+    expect(
+      invokeMock.mock.calls.filter(([command]) => command === "detect_backend"),
+    ).toHaveLength(1);
+    expect(
+      invokeMock.mock.calls.some(([command]) => command === "list_models"),
+    ).toBe(false);
+    expect(
+      invokeMock.mock.calls.some(([command]) => command === "get_active_model"),
+    ).toBe(false);
+    expect(
+      invokeMock.mock.calls.some(
+        ([command]) => command === "list_downloaded_model_ids",
+      ),
+    ).toBe(false);
+  });
+
   it("hydrates persisted thinking after bootstrap", async () => {
     const payload: BootstrapPayload = {
       ...bootstrapPayload,

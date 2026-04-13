@@ -383,15 +383,28 @@ export function useAppController() {
     return { models, activeModel, downloadedIds };
   };
 
-  const refreshBackendStatus = async () => {
-    const [status] = await Promise.all([
-      invoke<BackendStatus>("detect_backend"),
-      refreshModelInventory(),
-    ]);
+  const detectBackendStatus = async () => {
+    const status = await invoke<BackendStatus>("detect_backend");
     setBackendStatus(status);
     if (status.models[0]) {
       setCurrentModel(formatModelLabel(status.models[0]));
     }
+    return status;
+  };
+
+  const refreshBackendStatus = async ({
+    includeModelInventory = true,
+  }: {
+    includeModelInventory?: boolean;
+  } = {}) => {
+    if (!includeModelInventory) {
+      return detectBackendStatus();
+    }
+
+    const [status] = await Promise.all([
+      detectBackendStatus(),
+      refreshModelInventory(),
+    ]);
     return status;
   };
 
@@ -494,7 +507,9 @@ export function useAppController() {
         }
 
         clearPendingGenerationState();
-        void refreshBackendStatus().catch(() => undefined);
+        void refreshBackendStatus({ includeModelInventory: false }).catch(
+          () => undefined,
+        );
       });
 
       const unlistenActivity = await listen<{ model?: string }>(
@@ -556,7 +571,9 @@ export function useAppController() {
             clearPendingGenerationState();
             appendAssistantError(payload.message);
           }
-          void refreshBackendStatus().catch(() => undefined);
+          void refreshBackendStatus({ includeModelInventory: false }).catch(
+            () => undefined,
+          );
         },
       );
 
@@ -702,9 +719,11 @@ export function useAppController() {
         attachments: serializedAttachments,
         thinkingEnabled: effectiveThinkingEnabled,
       });
-      flushBufferedTokens();
-      setIsGenerating(false);
-      setGenerationStatus(null);
+      if (pendingSessionIdRef.current === sessionId) {
+        flushBufferedTokens();
+        setIsGenerating(false);
+        setGenerationStatus(null);
+      }
       await refreshSessionState(sessionId);
     } catch (error) {
       flushBufferedTokens();
@@ -755,7 +774,7 @@ export function useAppController() {
           desiredSettingsRef.current = savedInput;
           applySavedSettingsState(saved);
         }
-        await refreshBackendStatus();
+        await refreshBackendStatus({ includeModelInventory: false });
         return saved;
       });
 

@@ -22,10 +22,25 @@ function useNarrowLayout(breakpoint = 1080) {
       return;
     }
 
-    const sync = () => {
-      setIsNarrow(window.innerWidth < breakpoint);
-    };
+    if (typeof window.matchMedia === "function") {
+      const mediaQuery = window.matchMedia(
+        `(max-width: ${breakpoint - 0.02}px)`,
+      );
+      const sync = (event?: MediaQueryListEvent) => {
+        setIsNarrow(event?.matches ?? mediaQuery.matches);
+      };
 
+      sync();
+      if (typeof mediaQuery.addEventListener === "function") {
+        mediaQuery.addEventListener("change", sync);
+        return () => mediaQuery.removeEventListener("change", sync);
+      }
+
+      mediaQuery.addListener(sync);
+      return () => mediaQuery.removeListener(sync);
+    }
+
+    const sync = () => setIsNarrow(window.innerWidth < breakpoint);
     sync();
     window.addEventListener("resize", sync);
     return () => window.removeEventListener("resize", sync);
