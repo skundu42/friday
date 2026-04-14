@@ -532,6 +532,7 @@ export default function SettingsPanel({
                     {isSaving || isSavingMaxTokens ? " · Applying..." : ""}
                   </Text>
                 </div>
+
               </Space>
             ),
           },
@@ -575,6 +576,7 @@ export default function SettingsPanel({
                     }}
                   >
                     <Switch
+                      aria-label="Pre-warm local model on startup"
                       checked={settings.auto_start_backend}
                       onChange={(checked) => void persistAutoStartBackend(checked)}
                       loading={isSaving}

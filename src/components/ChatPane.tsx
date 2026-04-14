@@ -407,7 +407,7 @@ export default function ChatPane({
                 ? { dataUrl: imageDataUrl }
                 : result.content.type === "audio"
                   ? { path: result.content.path }
-                : null,
+                  : null,
         };
 
         setAttachments((prev) =>
@@ -803,6 +803,9 @@ export default function ChatPane({
   const backendLabel = backendStatus?.connected
     ? "Connected"
     : humanizeBackendState(backendStatus?.state);
+  const headerSubtitle = activeSessionTitle
+    ? `${activeSessionTitle} · ${backendLabel}`
+    : backendLabel;
   const privacyStatus = isWebSearchActive
     ? "Web enabled for this message; Friday may contact external sites"
     : "On-device only for this message";
@@ -902,7 +905,7 @@ export default function ChatPane({
                 textOverflow: "ellipsis",
               }}
             >
-              {activeSessionTitle} · On-device by default
+              {headerSubtitle}
             </Text>
           </div>
         </div>
@@ -940,21 +943,23 @@ export default function ChatPane({
           >
             {backendLabel}
           </Tag>
-          <Tag
-            color={isWebSearchActive ? "warning" : "success"}
-            style={{
-              margin: 0,
-              minHeight: 30,
-              display: "inline-flex",
-              alignItems: "center",
-              paddingInline: 10,
-              border: "2px solid #2C2C2C",
-              borderRadius: 999,
-              fontWeight: 600,
-            }}
-          >
-            {isWebSearchActive ? "Web On" : "On-device"}
-          </Tag>
+          {isWebSearchActive ? (
+            <Tag
+              color="warning"
+              style={{
+                margin: 0,
+                minHeight: 30,
+                display: "inline-flex",
+                alignItems: "center",
+                paddingInline: 10,
+                border: "2px solid #2C2C2C",
+                borderRadius: 999,
+                fontWeight: 600,
+              }}
+            >
+              Web On
+            </Tag>
+          ) : null}
         </div>
       </div>
 
@@ -984,8 +989,7 @@ export default function ChatPane({
                 type="secondary"
                 style={{ display: "block", fontSize: 14, lineHeight: 1.6 }}
               >
-                Friday runs on-device by default. Ask a question, attach a file,
-                or turn on web search only when you want outside context.
+                How can I help you today?
               </Text>
               <div
                 style={{
@@ -1157,9 +1161,8 @@ export default function ChatPane({
               aria-pressed={isWebSearchActive}
               style={{
                 borderRadius: 999,
-                border: `2px solid ${
-                  isWebSearchActive ? "#52C41A" : "#2C2C2C"
-                }`,
+                border: `2px solid ${isWebSearchActive ? "#52C41A" : "#2C2C2C"
+                  }`,
                 boxShadow: "1px 1px 0 #2C2C2C",
                 height: 32,
                 paddingInline: 10,

@@ -25,6 +25,10 @@ const { Text } = Typography;
 
 // Detect file markers in enriched messages
 const FILE_MARKER_RE = /^--- File: (.+) ---$/m;
+const LEGACY_REFERENCE_ATTACHMENT_RE =
+  /\[Reference attachment: ([^\]\n]+)\][\s\S]*?--- End extracted text from \1 ---/g;
+const LEGACY_INLINE_ATTACHMENT_RE =
+  /\[Attached (?:image|audio|file): ([^\]\n]+?)(?: \([^)]+\))?\]/g;
 const MISPLACED_BOLD_RE = /(^|[\s([{"'`])([^\s*]+)\*\*([—:-][^\n]*?)\*\*/g;
 const CLOSED_BOLD_NO_SPACE_RE =
   /(^|[\s([{"'`])(\*\*[^\s*](?:[^*\n]*?[^\s*])?\*\*)(?=[A-Za-z0-9])/g;
@@ -57,6 +61,34 @@ function getAssistantThinking(contentParts: unknown): string {
 
   const thinking = (contentParts as { thinking?: unknown }).thinking;
   return typeof thinking === "string" ? thinking : "";
+}
+
+export function summarizeUserMessageForDisplay(content: string): string {
+  const attachmentNames: string[] = [];
+  let normalized = content;
+
+  normalized = normalized.replace(
+    LEGACY_REFERENCE_ATTACHMENT_RE,
+    (_match, name: string) => {
+      attachmentNames.push(name.trim());
+      return "";
+    },
+  );
+  normalized = normalized.replace(
+    LEGACY_INLINE_ATTACHMENT_RE,
+    (_match, name: string) => {
+      attachmentNames.push(name.trim());
+      return "";
+    },
+  );
+
+  const remaining = normalized.replace(/\n{3,}/g, "\n\n").trim();
+  if (attachmentNames.length === 0) {
+    return content;
+  }
+
+  const attachmentTag = `📎 ${Array.from(new Set(attachmentNames)).join(", ")}`;
+  return remaining ? `${attachmentTag}\n${remaining}` : attachmentTag;
 }
 
 export function normalizeAssistantMarkdown(content: string): string {
@@ -234,8 +266,11 @@ function MessageBubble({
   }, [isStreaming, thinkingContent]);
 
   // Detect attached file indicators in user messages
+  const renderedUserContent = isUser
+    ? summarizeUserMessageForDisplay(message.content)
+    : message.content;
   const hasFileMarkers = FILE_MARKER_RE.test(message.content);
-  const hasAttachmentTag = message.content.includes("📎");
+  const hasAttachmentTag = renderedUserContent.includes("📎");
 
   if (isUser) {
     return (
@@ -277,7 +312,7 @@ function MessageBubble({
             <Text
               style={{ color: "#FFF", whiteSpace: "pre-wrap", fontSize: 14 }}
             >
-              {message.content}
+              {renderedUserContent}
             </Text>
             {(hasFileMarkers || hasAttachmentTag) && (
               <div style={{ marginTop: 6, fontSize: 11, opacity: 0.8 }}>

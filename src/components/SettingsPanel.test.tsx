@@ -312,7 +312,9 @@ describe("SettingsPanel", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("switch"));
+    fireEvent.click(
+      screen.getByRole("switch", { name: /pre-warm local model on startup/i }),
+    );
 
     await waitFor(() => expect(onSaveSettings).toHaveBeenCalledTimes(1));
     expect(onSaveSettings.mock.calls[0]?.[0]).toEqual({

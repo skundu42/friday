@@ -23,6 +23,43 @@ _SPEC.loader.exec_module(_MODULE)
 
 
 class WorkerProtocolTests(unittest.TestCase):
+    def test_ensure_engine_keeps_audio_on_cpu_when_main_backend_is_gpu(self) -> None:
+        class FakeBackend:
+            GPU = "gpu"
+            CPU = "cpu"
+
+        class FakeEngine:
+            created_with: dict[str, object] | None = None
+
+            def __init__(self, model_path: str, **kwargs: object) -> None:
+                FakeEngine.created_with = {"model_path": model_path, **kwargs}
+
+            def __enter__(self) -> "FakeEngine":
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> None:
+                return None
+
+        class FakeLiteRtLm:
+            Backend = FakeBackend
+            Engine = FakeEngine
+
+        worker = _MODULE.LiteRtWorker()
+        worker._load_litert_module = lambda: FakeLiteRtLm  # type: ignore[method-assign]
+
+        worker.ensure_engine("/tmp/model.litertlm", 4096, "gpu")
+
+        self.assertEqual(
+            FakeEngine.created_with,
+            {
+                "model_path": "/tmp/model.litertlm",
+                "backend": FakeBackend.GPU,
+                "max_num_tokens": 4096,
+                "vision_backend": FakeBackend.GPU,
+                "audio_backend": FakeBackend.CPU,
+            },
+        )
+
     def test_split_messages_uses_last_user_turn_as_prompt(self) -> None:
         preface, prompt = _MODULE.split_messages_for_conversation(
             [

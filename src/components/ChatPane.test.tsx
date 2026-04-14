@@ -63,6 +63,7 @@ describe("ChatPane", () => {
     renderChatPane();
 
     expect(screen.getByText("Welcome back, Asha.")).not.toBeNull();
+    expect(screen.getByText("New chat · Connected")).not.toBeNull();
     expect(screen.getByRole("button", { name: "Attach files" })).not.toBeNull();
     expect(screen.getByRole("button", { name: /Voice/ })).not.toBeNull();
     expect(screen.getByRole("button", { name: /Web/ })).not.toBeNull();

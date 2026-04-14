@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import copy
+import datetime
 import html
 import ipaddress
 import json
@@ -70,6 +71,7 @@ def chunk_to_events(
 class EngineConfig:
     model_path: str
     max_num_tokens: int
+    backend: str
 
 
 @dataclass(frozen=True)
@@ -77,6 +79,7 @@ class ToolPermissions:
     web: bool = False
     local_files: bool = False
     calculate: bool = False
+    current_datetime: bool = False
 
     @classmethod
     def from_command(cls, command: dict[str, Any]) -> ToolPermissions:
@@ -85,6 +88,7 @@ class ToolPermissions:
             web=bool(raw.get("web")),
             local_files=bool(raw.get("local_files")),
             calculate=bool(raw.get("calculate")),
+            current_datetime=bool(raw.get("current_datetime")),
         )
 
 
@@ -424,6 +428,30 @@ def calculate_impl(expression: str) -> dict[str, Any]:
     return {"result": str(result)}
 
 
+def get_current_datetime_impl() -> dict[str, Any]:
+    now = datetime.datetime.now().astimezone()
+    raw_offset = now.strftime("%z")
+    if len(raw_offset) == 5:
+        formatted_offset = f"{raw_offset[:3]}:{raw_offset[3:]}"
+    else:
+        formatted_offset = raw_offset
+
+    utc_offset = f"UTC{formatted_offset}" if formatted_offset else "UTC"
+    timezone_name = now.tzname() or "local"
+    return {
+        "local_iso": now.isoformat(timespec="seconds"),
+        "local_datetime": (
+            f"{now.strftime('%Y-%m-%d %H:%M:%S')} "
+            f"({utc_offset}, {now.strftime('%A')})"
+        ),
+        "local_date": now.strftime("%Y-%m-%d"),
+        "local_time": now.strftime("%H:%M:%S"),
+        "weekday": now.strftime("%A"),
+        "timezone": timezone_name,
+        "utc_offset": utc_offset,
+    }
+
+
 def file_read_impl(path: str) -> dict[str, Any]:
     file_path = pathlib.Path(path)
     if not file_path.exists():
@@ -460,6 +488,19 @@ def list_directory_impl(path: str) -> dict[str, Any]:
 
 def build_tools(tool_permissions: ToolPermissions) -> list[Any]:
     tools: list[Any] = []
+
+    if tool_permissions.current_datetime:
+
+        def get_current_datetime() -> dict[str, Any]:
+            """Get the device's current local date and time.
+
+            Use this whenever the user asks about the current date or time,
+            what day it is, or relative dates like today, yesterday, and tomorrow.
+            """
+
+            return get_current_datetime_impl()
+
+        tools.append(get_current_datetime)
 
     if tool_permissions.web:
 
@@ -562,21 +603,41 @@ class LiteRtWorker:
         self._active_request_id = None
         self._cancelled_request_id = None
 
-    def ensure_engine(self, model_path: str, max_num_tokens: int) -> None:
-        next_config = EngineConfig(model_path=model_path, max_num_tokens=max_num_tokens)
+    def _resolve_backend(self, backend: str, litert_lm: Any) -> Any:
+        normalized = backend.strip().lower()
+        if normalized == "gpu":
+            return litert_lm.Backend.GPU
+        if normalized == "cpu":
+            return litert_lm.Backend.CPU
+        raise ValueError(f"Unsupported LiteRT backend: {backend}")
+
+    def ensure_engine(
+        self,
+        model_path: str,
+        max_num_tokens: int,
+        backend: str,
+    ) -> None:
+        next_config = EngineConfig(
+            model_path=model_path,
+            max_num_tokens=max_num_tokens,
+            backend=backend,
+        )
         if self._engine is not None and self._engine_config == next_config:
             return
 
         self.close_engine()
         litert_lm = self._load_litert_module()
+        main_backend = self._resolve_backend(backend, litert_lm)
         engine = litert_lm.Engine(
             model_path,
-            backend=litert_lm.Backend.CPU,
+            backend=main_backend,
             max_num_tokens=max_num_tokens,
             # Gemma 4 image prompts require the Metal-backed vision encoder on
             # macOS; CPU vision initialization accepts images but does not
             # actually ground responses in them.
             vision_backend=litert_lm.Backend.GPU,
+            # Gemma 4 audio inputs currently require the CPU audio backend even
+            # when the main model executor runs on GPU.
             audio_backend=litert_lm.Backend.CPU,
         )
         engine.__enter__()
@@ -586,7 +647,12 @@ class LiteRtWorker:
     def handle_warm(self, command: dict[str, Any]) -> None:
         model_path = str(command["model_path"])
         max_num_tokens = int(command["max_num_tokens"])
-        self.ensure_engine(model_path, max_num_tokens)
+        backend = str(command.get("backend") or "cpu")
+        self.ensure_engine(
+            model_path,
+            max_num_tokens,
+            backend,
+        )
         write_event(
             "ready",
             model_path=model_path,

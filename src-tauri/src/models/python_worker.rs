@@ -34,6 +34,7 @@ pub enum StreamEvent {
 struct WorkerEngineConfig {
     model_path: PathBuf,
     max_num_tokens: u32,
+    backend: String,
 }
 
 #[derive(Debug)]
@@ -55,6 +56,7 @@ enum WorkerCommand {
     Warm {
         model_path: String,
         max_num_tokens: u32,
+        backend: String,
     },
     Chat {
         request_id: String,
@@ -80,14 +82,16 @@ struct WorkerToolPermissions {
     web: bool,
     local_files: bool,
     calculate: bool,
+    current_datetime: bool,
 }
 
 impl WorkerToolPermissions {
-    fn web_assist_enabled(enabled: bool) -> Self {
+    fn for_chat(web_enabled: bool) -> Self {
         Self {
-            web: enabled,
+            web: web_enabled,
             local_files: false,
-            calculate: enabled,
+            calculate: web_enabled,
+            current_datetime: true,
         }
     }
 }
@@ -161,6 +165,7 @@ impl PythonWorkerClient {
         worker_script: &Path,
         model_path: &Path,
         max_num_tokens: u32,
+        backend: &str,
         python_site_packages: &Path,
         python_runtime_lib_dir: &Path,
     ) -> Result<Self, String> {
@@ -211,6 +216,7 @@ impl PythonWorkerClient {
             config: WorkerEngineConfig {
                 model_path: model_path.to_path_buf(),
                 max_num_tokens,
+                backend: backend.to_string(),
             },
         };
 
@@ -220,8 +226,10 @@ impl PythonWorkerClient {
         Ok(client)
     }
 
-    pub fn matches(&self, model_path: &Path, max_num_tokens: u32) -> bool {
-        self.config.model_path == model_path && self.config.max_num_tokens == max_num_tokens
+    pub fn matches(&self, model_path: &Path, max_num_tokens: u32, backend: &str) -> bool {
+        self.config.model_path == model_path
+            && self.config.max_num_tokens == max_num_tokens
+            && self.config.backend == backend
     }
 
     pub async fn send_chat_with_options(
@@ -265,7 +273,7 @@ impl PythonWorkerClient {
                 model_path: self.config.model_path.display().to_string(),
                 max_num_tokens: self.config.max_num_tokens,
                 generation_config: worker_generation_config,
-                tool_permissions: WorkerToolPermissions::web_assist_enabled(tools_enabled),
+                tool_permissions: WorkerToolPermissions::for_chat(tools_enabled),
                 messages: normalized_messages,
             })
             .await
@@ -373,6 +381,7 @@ impl PythonWorkerClient {
         self.send_command(&WorkerCommand::Warm {
             model_path: self.config.model_path.display().to_string(),
             max_num_tokens: self.config.max_num_tokens,
+            backend: self.config.backend.clone(),
         })
         .await?;
 
@@ -795,6 +804,28 @@ mod tests {
         let (preface, prompt) = split_preface_and_prompt(&messages).expect("split messages");
         assert_eq!(preface.len(), 2);
         assert_eq!(prompt.role, "user");
+    }
+
+    #[test]
+    fn chat_tool_permissions_always_include_current_datetime() {
+        assert_eq!(
+            WorkerToolPermissions::for_chat(false),
+            WorkerToolPermissions {
+                web: false,
+                local_files: false,
+                calculate: false,
+                current_datetime: true,
+            }
+        );
+        assert_eq!(
+            WorkerToolPermissions::for_chat(true),
+            WorkerToolPermissions {
+                web: true,
+                local_files: false,
+                calculate: true,
+                current_datetime: true,
+            }
+        );
     }
 
     #[test]

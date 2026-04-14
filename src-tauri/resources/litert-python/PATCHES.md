@@ -8,10 +8,8 @@ Patch summary:
 Why this exists:
 - Upstream LiteRT-LM 0.10.1 disables image slots by default in `LlmExecutorSettings::CreateDefault()`
 - Friday's Python conversation worker needs image grounding for Gemma 4
-- On macOS arm64, the working configuration is:
-  - main backend: CPU
-  - vision backend: GPU
-  - audio backend: CPU
+- Friday prefers a GPU main backend and falls back to CPU if warmup fails
+- The worker keeps vision on GPU, while audio stays on CPU to satisfy Gemma 4 audio backend constraints
 
 Build note:
 - `src-tauri/build.rs` treats this wheel as a vendored artifact

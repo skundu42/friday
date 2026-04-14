@@ -157,6 +157,39 @@ describe("useAppController", () => {
     );
   });
 
+  it("warms the backend when refreshing a ready-but-idle backend", async () => {
+    const readyBackendStatus: BackendStatus = {
+      ...backendStatus,
+      connected: false,
+      state: "ready",
+      message: "LiteRT-LM is ready to start.",
+    };
+
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "bootstrap_app") return Promise.resolve(bootstrapPayload);
+      if (command === "detect_backend") return Promise.resolve(readyBackendStatus);
+      if (command === "warm_backend") return Promise.resolve(backendStatus);
+      return Promise.resolve(undefined);
+    });
+
+    const { result } = renderHook(() => useAppController());
+
+    await waitFor(() =>
+      expect(result.current.activeSession?.id).toBe("session-a"),
+    );
+
+    invokeMock.mockClear();
+
+    await act(async () => {
+      await result.current.refreshBackendStatus({ includeModelInventory: false });
+    });
+
+    expect(
+      invokeMock.mock.calls.some(([command]) => command === "warm_backend"),
+    ).toBe(true);
+    expect(result.current.backendStatus?.connected).toBe(true);
+  });
+
   it("selects a different session without reloading", async () => {
     const selection: SessionSelectionResult = {
       session: makeSession("session-b", "Second chat", "2026-04-09T11:00:00Z"),

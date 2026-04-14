@@ -394,18 +394,21 @@ export function useAppController() {
 
   const refreshBackendStatus = async ({
     includeModelInventory = true,
+    settingsValue = settings,
   }: {
     includeModelInventory?: boolean;
+    settingsValue?: AppSettings | null;
   } = {}) => {
     if (!includeModelInventory) {
-      return detectBackendStatus();
+      const status = await detectBackendStatus();
+      return (await warmBackendIfNeeded(settingsValue, status)) ?? status;
     }
 
     const [status] = await Promise.all([
       detectBackendStatus(),
       refreshModelInventory(),
     ]);
-    return status;
+    return (await warmBackendIfNeeded(settingsValue, status)) ?? status;
   };
 
   const warmBackendIfNeeded = async (
@@ -413,10 +416,10 @@ export function useAppController() {
     statusValue: BackendStatus | null | undefined,
   ) => {
     if (!settingsValue?.auto_start_backend) {
-      return;
+      return statusValue;
     }
     if (!statusValue || statusValue.connected || statusValue.state !== "ready") {
-      return;
+      return statusValue;
     }
 
     try {
@@ -425,8 +428,10 @@ export function useAppController() {
       if (warmed.models[0]) {
         setCurrentModel(formatModelLabel(warmed.models[0]));
       }
+      return warmed;
     } catch {
       // Warmup is opportunistic; the regular send path will still start the daemon.
+      return statusValue;
     }
   };
 
@@ -529,6 +534,9 @@ export function useAppController() {
           }
 
           switch (event.payload.name) {
+            case "get_current_datetime":
+              setGenerationStatus("Checking the date and time…");
+              break;
             case "web_search":
               setGenerationStatus("Searching the web…");
               break;
@@ -774,7 +782,10 @@ export function useAppController() {
           desiredSettingsRef.current = savedInput;
           applySavedSettingsState(saved);
         }
-        await refreshBackendStatus({ includeModelInventory: false });
+        await refreshBackendStatus({
+          includeModelInventory: false,
+          settingsValue: saved,
+        });
         return saved;
       });
 
