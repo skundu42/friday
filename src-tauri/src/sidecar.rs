@@ -597,6 +597,30 @@ impl SidecarManager {
         self.start_daemon_inner().await
     }
 
+    async fn spawn_daemon_worker(
+        &self,
+        model_path: &Path,
+        max_tokens: u32,
+        backend: &str,
+        web_search_base_url: Option<&str>,
+        python_binary: &Path,
+        worker_script: &Path,
+        python_site_packages: &Path,
+        python_runtime_lib_dir: &Path,
+    ) -> Result<PythonWorkerClient, String> {
+        PythonWorkerClient::spawn(
+            python_binary,
+            worker_script,
+            model_path,
+            max_tokens,
+            backend,
+            web_search_base_url,
+            python_site_packages,
+            python_runtime_lib_dir,
+        )
+        .await
+    }
+
     async fn start_daemon_inner(&self) -> Result<(), String> {
         self.ensure_ready().await?;
 
