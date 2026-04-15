@@ -30,10 +30,18 @@ const LEGACY_REFERENCE_ATTACHMENT_RE =
 const LEGACY_INLINE_ATTACHMENT_RE =
   /\[Attached (?:image|audio|file): ([^\]\n]+?)(?: \([^)]+\))?\]/g;
 const MISPLACED_BOLD_RE = /(^|[\s([{"'`])([^\s*]+)\*\*([—:-][^\n]*?)\*\*/g;
+const OPENING_BOLD_SPAN_NO_SPACE_RE =
+  /([A-Za-z0-9])(\*\*[^\s*](?:[^*\n]*?[^\s*])?\*\*)/g;
 const CLOSED_BOLD_NO_SPACE_RE =
   /(^|[\s([{"'`])(\*\*[^\s*](?:[^*\n]*?[^\s*])?\*\*)(?=[A-Za-z0-9])/g;
 const BOLD_MARKER_RE = /\*\*/g;
 const BOLD_INNER_WHITESPACE_RE = /\*\*([ \t]+)([^*\n][^*\n]*?)([ \t]+)?\*\*/g;
+const EMPTY_LIST_ITEM_RE = /^\s*[*-]\s*$/;
+const BROKEN_BOLD_LABEL_LIST_ITEM_RE = /^(\s*[*-]\s+)\*\*([^*\n]+?:)\s*(.+)$/;
+const ATX_HEADING_NO_SPACE_RE = /^(#{1,6})(?=\S)/;
+const ORDERED_LIST_MARKER_NO_SPACE_RE = /^(\s*\d+\.)(?=\S)/;
+const PLAIN_SECTION_HEADING_RE =
+  /^([A-Z][A-Za-z0-9/&()'" -]{1,80}:)$/;
 const MARKDOWN_REMARK_PLUGINS = [remarkGfm, remarkMath];
 const MARKDOWN_REHYPE_PLUGINS = [rehypeKatex];
 
@@ -91,11 +99,88 @@ export function summarizeUserMessageForDisplay(content: string): string {
   return remaining ? `${attachmentTag}\n${remaining}` : attachmentTag;
 }
 
+function isSingleCharacterFragment(text: string): boolean {
+  return /^[A-Za-z0-9≤≥=+\-−×÷/().,%]$/.test(text);
+}
+
+function collapseFragmentedMarkdownLines(lines: string[]): string[] {
+  const collapsed: string[] = [];
+  let insideCodeFence = false;
+
+  for (let index = 0; index < lines.length; ) {
+    const line = lines[index];
+    if (line.trimStart().startsWith("```")) {
+      insideCodeFence = !insideCodeFence;
+      collapsed.push(line);
+      index += 1;
+      continue;
+    }
+
+    if (insideCodeFence) {
+      collapsed.push(line);
+      index += 1;
+      continue;
+    }
+
+    const currentTrimmed = line.trim();
+    const nextTrimmed = lines[index + 1]?.trim() ?? "";
+    const nextNextTrimmed = lines[index + 2]?.trim() ?? "";
+
+    if (
+      /^[≤≥=+\-−]$/.test(currentTrimmed) &&
+      /^[A-Za-z0-9.,]{1,8}$/.test(nextTrimmed) &&
+      nextNextTrimmed.startsWith(`${currentTrimmed}${nextTrimmed}`)
+    ) {
+      index += 2;
+      continue;
+    }
+
+    if (isSingleCharacterFragment(currentTrimmed)) {
+      let runEnd = index;
+      let merged = "";
+      while (
+        runEnd < lines.length &&
+        isSingleCharacterFragment(lines[runEnd]?.trim() ?? "")
+      ) {
+        merged += lines[runEnd]!.trim();
+        runEnd += 1;
+      }
+
+      if (runEnd - index >= 4) {
+        const followingTrimmed = lines[runEnd]?.trim() ?? "";
+        if (!followingTrimmed.startsWith(merged)) {
+          collapsed.push(merged);
+        }
+        index = runEnd;
+        continue;
+      }
+    }
+
+    collapsed.push(line);
+    index += 1;
+  }
+
+  return collapsed;
+}
+
 export function normalizeAssistantMarkdown(content: string): string {
-  return content
-    .split("\n")
+  let insideCodeFence = false;
+  const normalizedLines = collapseFragmentedMarkdownLines(content.split("\n"))
     .map((line) => {
+      if (line.trimStart().startsWith("```")) {
+        insideCodeFence = !insideCodeFence;
+        return line;
+      }
+      if (insideCodeFence) {
+        return line;
+      }
+
       let normalized = line.replace(MISPLACED_BOLD_RE, "$1**$2$3**");
+      normalized = normalized.replace(ATX_HEADING_NO_SPACE_RE, "$1 ");
+      normalized = normalized.replace(
+        ORDERED_LIST_MARKER_NO_SPACE_RE,
+        "$1 ",
+      );
       normalized = normalized.replace(
         BOLD_INNER_WHITESPACE_RE,
         (_match, _leadingWhitespace, text) => {
@@ -108,15 +193,40 @@ export function normalizeAssistantMarkdown(content: string): string {
       );
 
       normalized = normalized.replace(CLOSED_BOLD_NO_SPACE_RE, "$1$2 ");
+      normalized = normalized.replace(OPENING_BOLD_SPAN_NO_SPACE_RE, "$1 $2");
+      normalized = normalized.replace(CLOSED_BOLD_NO_SPACE_RE, "$1$2 ");
+      normalized = normalized.replace(
+        BROKEN_BOLD_LABEL_LIST_ITEM_RE,
+        "$1**$2** $3",
+      );
 
       const markerCount = normalized.match(BOLD_MARKER_RE)?.length ?? 0;
       if (markerCount % 2 === 1) {
         normalized = normalized.replace(/\*\*(?!.*\*\*)/, "");
       }
 
+      if (EMPTY_LIST_ITEM_RE.test(normalized)) {
+        return "";
+      }
+
+      const trimmed = normalized.trim();
+      if (
+        trimmed &&
+        !trimmed.startsWith("**") &&
+        !trimmed.startsWith("#") &&
+        !trimmed.startsWith("* ") &&
+        !trimmed.startsWith("- ") &&
+        PLAIN_SECTION_HEADING_RE.test(trimmed)
+      ) {
+        return `**${trimmed}**`;
+      }
+
       return normalized;
     })
-    .join("\n");
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n");
+
+  return normalizedLines;
 }
 
 function CopyButton({

@@ -22,6 +22,7 @@ import type {
   FileAttachment,
   Message,
   ReplyLanguage,
+  WebSearchStatus,
 } from "../types";
 
 const { TextArea } = Input;
@@ -80,6 +81,36 @@ const SPECIAL_ATTACHMENT_NAMES = [".env", ".gitignore", "dockerfile", "makefile"
 const IMAGE_INPUT_UNAVAILABLE_MESSAGE =
   "Image attachments are unavailable with the current local backend.";
 
+function userFacingWebSearchStatusMessage(
+  backendStatus: BackendStatus | null,
+  webSearchAvailable: boolean,
+  isWebSearchActive: boolean,
+  webSearchStatus: WebSearchStatus | null,
+): string | null {
+  if (!backendStatus?.supports_native_tools) {
+    return "Web search is unavailable with the current local backend.";
+  }
+
+  const state = webSearchStatus?.state;
+  const message = webSearchStatus?.message;
+
+  if (!webSearchAvailable) {
+    if (state === "stopped" || state === "needs_install") {
+      return null;
+    }
+    return message ?? "Local web search is unavailable.";
+  }
+
+  if (isWebSearchActive && state !== "ready") {
+    if (state === "stopped" || state === "needs_install") {
+      return null;
+    }
+    return message ?? "Local web search is preparing.";
+  }
+
+  return null;
+}
+
 interface ChatPaneProps {
   messages: Message[];
   isGenerating: boolean;
@@ -100,6 +131,7 @@ interface ChatPaneProps {
   webSearchEnabled?: boolean;
   thinkingEnabled?: boolean;
   webSearchAvailable?: boolean;
+  webSearchStatus?: WebSearchStatus | null;
   thinkingAvailable?: boolean;
   audioInputAvailable?: boolean;
   onToggleWebSearch?: () => void;
@@ -161,10 +193,12 @@ function humanizeBackendState(state?: string) {
       return "Setup required";
     case "model_missing":
       return "Model missing";
+    case "insufficient_ram":
+      return "Insufficient RAM";
     case "start_failed":
       return "Unavailable";
     default:
-      return "Connected";
+      return "Disconnected";
   }
 }
 
@@ -191,6 +225,7 @@ export default function ChatPane({
   webSearchEnabled = false,
   thinkingEnabled = false,
   webSearchAvailable = false,
+  webSearchStatus = null,
   thinkingAvailable = false,
   audioInputAvailable = false,
   onToggleWebSearch,
@@ -812,6 +847,12 @@ export default function ChatPane({
   const capabilityStatus = imageInputAvailable
     ? null
     : IMAGE_INPUT_UNAVAILABLE_MESSAGE;
+  const webSearchStatusMessage = userFacingWebSearchStatusMessage(
+    backendStatus,
+    webSearchAvailable,
+    isWebSearchActive,
+    webSearchStatus,
+  );
 
   return (
     <div
@@ -1318,6 +1359,7 @@ export default function ChatPane({
             }}
           >
             <span>{privacyStatus}</span>
+            {webSearchStatusMessage ? <span>{webSearchStatusMessage}</span> : null}
             {capabilityStatus ? <span>{capabilityStatus}</span> : null}
             <span>{isRecordingAudio ? "Recording…" : "Enter to send"}</span>
           </div>

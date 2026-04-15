@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useState } from "react";
-import { Drawer, Layout, Spin, Typography } from "antd";
+import { Alert, Button, Drawer, Layout, Spin, Typography } from "antd";
 import { invoke } from "@tauri-apps/api/core";
 import Sidebar from "./components/Sidebar";
 import ChatPane from "./components/ChatPane";
@@ -89,7 +89,12 @@ export default function App() {
 
   useEffect(() => {
     const settings = controller.settings;
-    if (controller.isBootstrapping || wizardChecked || !settings) {
+    if (
+      controller.isBootstrapping ||
+      controller.bootstrapError ||
+      wizardChecked ||
+      !settings
+    ) {
       return;
     }
 
@@ -116,7 +121,36 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [controller.isBootstrapping, controller.settings, wizardChecked]);
+  }, [controller.bootstrapError, controller.isBootstrapping, controller.settings, wizardChecked]);
+
+  if (controller.bootstrapError) {
+    return (
+      <div
+        style={{
+          minHeight: "100vh",
+          background: "#FFF9F0",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          padding: 24,
+        }}
+      >
+        <div style={{ width: "100%", maxWidth: 560 }}>
+          <Alert
+            type="error"
+            showIcon
+            message="Friday could not start"
+            description={controller.bootstrapError}
+            action={
+              <Button onClick={() => window.location.reload()} size="small">
+                Retry
+              </Button>
+            }
+          />
+        </div>
+      </div>
+    );
+  }
 
   if (!controller.isBootstrapping && !wizardChecked) {
     return (
@@ -202,7 +236,8 @@ export default function App() {
                 onCancelGeneration={() => controller.cancelGeneration()}
                 webSearchEnabled={controller.webSearchEnabled}
                 thinkingEnabled={controller.thinkingEnabled}
-                webSearchAvailable={controller.nativeToolSupportAvailable}
+                webSearchAvailable={controller.webSearchToggleAvailable}
+                webSearchStatus={controller.webSearchStatus}
                 thinkingAvailable={controller.thinkingAvailable}
                 audioInputAvailable={controller.audioInputAvailable}
                 onToggleWebSearch={() => controller.toggleWebSearch()}

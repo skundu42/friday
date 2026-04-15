@@ -2,7 +2,7 @@ import type { ComponentProps } from "react";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import ChatPane from "./ChatPane";
-import type { BackendStatus } from "../types";
+import type { BackendStatus, WebSearchStatus } from "../types";
 
 const invokeMock = vi.fn();
 const openMock = vi.fn();
@@ -32,6 +32,16 @@ const backendStatus: BackendStatus = {
   recommended_max_output_tokens: 4096,
 };
 
+const webSearchStatus: WebSearchStatus = {
+  provider: "searxng",
+  available: true,
+  running: false,
+  healthy: false,
+  state: "stopped",
+  message: "Local web search is installed and will start on demand.",
+  base_url: "http://127.0.0.1:8091",
+};
+
 function renderChatPane(overrides: Partial<ComponentProps<typeof ChatPane>> = {}) {
   return render(
     <ChatPane
@@ -47,6 +57,7 @@ function renderChatPane(overrides: Partial<ComponentProps<typeof ChatPane>> = {}
       onSendMessage={() => undefined}
       onCancelGeneration={() => undefined}
       webSearchAvailable
+      webSearchStatus={webSearchStatus}
       thinkingAvailable
       {...overrides}
     />,
@@ -71,6 +82,30 @@ describe("ChatPane", () => {
     expect(screen.getByText("On-device only for this message")).not.toBeNull();
   });
 
+  it("shows insufficient RAM directly in the header state", () => {
+    renderChatPane({
+      backendStatus: {
+        ...backendStatus,
+        connected: false,
+        state: "insufficient_ram",
+      },
+    });
+
+    expect(screen.getByText("New chat · Insufficient RAM")).not.toBeNull();
+  });
+
+  it("falls back to disconnected for unknown backend states", () => {
+    renderChatPane({
+      backendStatus: {
+        ...backendStatus,
+        connected: false,
+        state: "mystery_state",
+      },
+    });
+
+    expect(screen.getByText("New chat · Disconnected")).not.toBeNull();
+  });
+
   it("updates the trust copy when web search is enabled", () => {
     renderChatPane({ webSearchEnabled: true });
 
@@ -81,13 +116,46 @@ describe("ChatPane", () => {
     ).not.toBeNull();
   });
 
-  it("keeps the trust copy on-device when web search is saved but unavailable", () => {
+  it("keeps the trust copy on-device without surfacing idle web-search standby copy", () => {
     renderChatPane({
       webSearchEnabled: true,
       webSearchAvailable: false,
     });
 
     expect(screen.getByText("On-device only for this message")).not.toBeNull();
+    expect(
+      screen.queryByText("Local web search is installed and will start on demand."),
+    ).toBeNull();
+  });
+
+  it("does not surface idle web-search standby copy when the toggle is enabled", () => {
+    renderChatPane({
+      webSearchEnabled: true,
+      webSearchAvailable: true,
+    });
+
+    expect(
+      screen.queryByText("Local web search is installed and will start on demand."),
+    ).toBeNull();
+  });
+
+  it("surfaces broken web search configuration directly in the composer", () => {
+    renderChatPane({
+      webSearchEnabled: true,
+      webSearchAvailable: false,
+      webSearchStatus: {
+        ...webSearchStatus,
+        state: "config_error",
+        message: "Local SearXNG config is invalid; JSON output is disabled.",
+      },
+    });
+
+    expect(
+      screen.getByText("Local SearXNG config is invalid; JSON output is disabled."),
+    ).not.toBeNull();
+    expect(
+      (screen.getByRole("button", { name: /Web/ }) as HTMLButtonElement).disabled,
+    ).toBe(true);
   });
 
   it("cleans up temp files when browser PDF ingestion fails", async () => {

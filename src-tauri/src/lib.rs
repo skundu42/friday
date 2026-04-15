@@ -1,11 +1,14 @@
 mod models;
+mod python_runtime;
 mod rag;
+mod searxng;
 mod session;
 mod settings;
 mod sidecar;
 mod storage;
 
 use models::python_worker::StreamEvent;
+use searxng::SearXNGManager;
 use serde::Serialize;
 use session::{Message, Session};
 use sidecar::SidecarManager;
@@ -27,6 +30,7 @@ const MAX_ATTACHMENT_TEXT_CHARS_PER_FILE: usize = 40_000;
 const MAX_ATTACHMENT_TEXT_CHARS_TOTAL: usize = 80_000;
 const DEFAULT_SESSION_TITLE: &str = "New chat";
 const SESSION_TITLE_PREVIEW_CHARS: usize = 48;
+const MAIN_WINDOW_LABEL: &str = "main";
 
 static OBSERVABILITY_INIT: OnceLock<Result<(), String>> = OnceLock::new();
 
@@ -77,6 +81,7 @@ struct BootstrapPayload {
     messages: Vec<Message>,
     settings: settings::AppSettings,
     backend_status: sidecar::BackendStatus,
+    web_search_status: searxng::WebSearchStatus,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -87,7 +92,7 @@ struct SessionSelectionResult {
 }
 
 // Helper to run DB operations with a callback (avoids cloning Connection)
-fn with_db<F, R>(state: &State<'_, AppState>, f: F) -> Result<R, String>
+fn with_db<F, R>(state: &AppState, f: F) -> Result<R, String>
 where
     F: FnOnce(&rusqlite::Connection) -> Result<R, String>,
 {
@@ -143,8 +148,28 @@ fn emit_chat_error(app: &tauri::AppHandle, session_id: Option<&str>, message: &s
     );
 }
 
+fn persist_and_emit_assistant_error(
+    app: &tauri::AppHandle,
+    state: &State<'_, AppState>,
+    session_id: &str,
+    message: &str,
+    model_used: Option<&str>,
+) {
+    persist_assistant_error_message(state, session_id, message, model_used);
+    emit_chat_error(app, Some(session_id), message);
+}
+
 fn io_error(message: impl Into<String>) -> std::io::Error {
     std::io::Error::other(message.into())
+}
+
+fn shutdown_managed_services(app_handle: &tauri::AppHandle) {
+    let sidecar: tauri::State<'_, SidecarManager> = app_handle.state();
+    let searxng: tauri::State<'_, SearXNGManager> = app_handle.state();
+    tauri::async_runtime::block_on(async move {
+        let _ = sidecar.shutdown_daemon().await;
+        let _ = searxng.stop().await;
+    });
 }
 
 fn initialize_local_observability(logs_dir: &Path) -> Result<(), String> {
@@ -338,6 +363,7 @@ pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(SidecarManager::new())
+        .manage(SearXNGManager::new())
         .manage(AppState {
             db: Mutex::new(None),
             current_session: Mutex::new(None),
@@ -378,6 +404,7 @@ pub fn run() {
             sidecar::get_active_model,
             sidecar::select_model,
             sidecar::warm_backend,
+            searxng::get_web_search_status,
         ])
         .setup(|app| {
             let data_dir = app
@@ -419,6 +446,14 @@ pub fn run() {
                 sidecar.set_resource_dir(resource_dir);
             }
 
+            let searxng: tauri::State<SearXNGManager> = app.state();
+            searxng.set_app_handle(app.handle().clone());
+            searxng.set_app_data_dir(data_dir.clone());
+            if let Ok(resource_dir) = app.path().resource_dir() {
+                searxng.set_resource_dir(resource_dir);
+            }
+            sidecar.set_web_search_base_url(&searxng.base_url());
+
             // Init DB
             let db_path = data_dir.join("friday.db");
             let conn = storage::init_db(&db_path).map_err(io_error)?;
@@ -429,6 +464,12 @@ pub fn run() {
             *state.db.lock().unwrap() = Some(conn);
             tracing::info!("Database initialized at {:?}", db_path);
 
+            if let Err(error) =
+                tauri::async_runtime::block_on(async { searxng.reconcile_existing_stack().await })
+            {
+                tracing::warn!("SearXNG reconciliation failed during startup: {}", error);
+            }
+
             tracing::info!("Friday initialized.");
             Ok(())
         })
@@ -436,11 +477,17 @@ pub fn run() {
         .expect("error while building Friday");
 
     app.run(|app_handle, event| {
-        if matches!(event, tauri::RunEvent::Exit) {
-            let sidecar: tauri::State<'_, SidecarManager> = app_handle.state();
-            tauri::async_runtime::block_on(async move {
-                let _ = sidecar.shutdown_daemon().await;
-            });
+        match event {
+            tauri::RunEvent::WindowEvent { label, event, .. }
+                if label == MAIN_WINDOW_LABEL
+                    && matches!(event, tauri::WindowEvent::CloseRequested { .. }) =>
+            {
+                app_handle.exit(0);
+            }
+            tauri::RunEvent::Exit => {
+                shutdown_managed_services(app_handle);
+            }
+            _ => {}
         }
     });
 }
@@ -449,6 +496,15 @@ pub fn run() {
 async fn bootstrap_app(
     state: State<'_, AppState>,
     sidecar: State<'_, SidecarManager>,
+    searxng: State<'_, SearXNGManager>,
+) -> Result<BootstrapPayload, String> {
+    bootstrap_payload_inner(&state, &sidecar, &searxng).await
+}
+
+async fn bootstrap_payload_inner(
+    state: &AppState,
+    sidecar: &SidecarManager,
+    searxng: &SearXNGManager,
 ) -> Result<BootstrapPayload, String> {
     let settings = with_db(&state, settings::load_settings)?;
     sidecar.set_max_tokens(settings.chat.max_tokens);
@@ -470,6 +526,7 @@ async fn bootstrap_app(
     let current_session = ensure_active_session(&state)?;
     let sessions = list_sessions_inner(&state)?;
     let messages = load_messages_inner(&state, &current_session.id)?;
+    let web_search_status = searxng.status().await;
 
     Ok(BootstrapPayload {
         sessions,
@@ -477,6 +534,7 @@ async fn bootstrap_app(
         messages,
         settings,
         backend_status,
+        web_search_status,
     })
 }
 
@@ -817,7 +875,11 @@ fn build_user_prompt_message(
     } else if trimmed_message.is_empty() {
         format!("📎 {}", display_attachment_names.join(", "))
     } else {
-        format!("📎 {}\n{}", display_attachment_names.join(", "), trimmed_message)
+        format!(
+            "📎 {}\n{}",
+            display_attachment_names.join(", "),
+            trimmed_message
+        )
     };
 
     let prompt_text = if prompt_text_parts.is_empty() {
@@ -895,10 +957,12 @@ async fn send_message(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     sidecar: State<'_, SidecarManager>,
+    searxng: State<'_, SearXNGManager>,
     session_id: String,
     message: String,
     attachments: Option<Vec<serde_json::Value>>,
     thinking_enabled: Option<bool>,
+    web_assist_enabled: Option<bool>,
 ) -> Result<(), String> {
     let session_id = match validate_requested_session_id(&session_id) {
         Ok(value) => value.to_string(),
@@ -955,9 +1019,11 @@ async fn send_message(
     let effective_thinking_enabled = thinking_enabled
         .or(app_settings.chat.generation.thinking_enabled)
         .unwrap_or(false);
+    let tools_enabled = web_assist_enabled.unwrap_or(app_settings.chat.web_assist_enabled);
     let system_prompt = system_prompt_for_preferences(
         &app_settings.chat.reply_language,
         effective_thinking_enabled,
+        tools_enabled,
     );
     if matches!(trimmed_history.last(), Some(msg) if msg.role == "user") {
         trimmed_history.pop();
@@ -997,7 +1063,13 @@ async fn send_message(
         None
     };
 
-    let tools_enabled = state.tools_enabled.load(Ordering::SeqCst);
+    if tools_enabled {
+        if let Err(error) = searxng.ensure_ready().await {
+            persist_and_emit_assistant_error(&app, &state, &session_id, &error, Some(model_name));
+            return Err(error);
+        }
+    }
+
     let mut generation_config = app_settings.chat.generation_request_config();
     generation_config.thinking_enabled = Some(effective_thinking_enabled);
 
@@ -1013,8 +1085,7 @@ async fn send_message(
     {
         Ok(rx) => rx,
         Err(error) => {
-            persist_assistant_error_message(&state, &session_id, &error, Some(model_name));
-            emit_chat_error(&app, Some(&session_id), &error);
+            persist_and_emit_assistant_error(&app, &state, &session_id, &error, Some(model_name));
             return Err(error);
         }
     };
@@ -1087,8 +1158,7 @@ async fn send_message(
     }
 
     if let Some(error) = stream_error {
-        persist_assistant_error_message(&state, &session_id, &error, Some(model_name));
-        emit_chat_error(&app, Some(&session_id), &error);
+        persist_and_emit_assistant_error(&app, &state, &session_id, &error, Some(model_name));
         return Err(error);
     }
 
@@ -1112,13 +1182,13 @@ async fn send_message(
             },
         ) {
             let persisted_error = format!("Assistant response could not be saved: {}", error);
-            persist_assistant_error_message(
+            persist_and_emit_assistant_error(
+                &app,
                 &state,
                 &session_id,
                 &persisted_error,
                 Some(model_name),
             );
-            emit_chat_error(&app, Some(&session_id), &persisted_error);
             return Err(persisted_error);
         }
     }
@@ -1331,6 +1401,10 @@ async fn set_tools_enabled(state: State<'_, AppState>, enabled: bool) -> Result<
 // --- Internal helpers ---
 
 fn create_session_inner(state: &State<'_, AppState>, title: &str) -> Result<Session, String> {
+    create_session_inner_for_state(state, title)
+}
+
+fn create_session_inner_for_state(state: &AppState, title: &str) -> Result<Session, String> {
     with_db(state, |conn| {
         let id = uuid::Uuid::new_v4().to_string();
         let now = chrono::Utc::now().to_rfc3339();
@@ -1362,12 +1436,16 @@ pub(crate) fn persist_active_model_id(
     storage::save_string_setting(conn, ACTIVE_MODEL_KEY, model_id)
 }
 
-fn parse_message_content_parts(raw: Option<String>) -> Result<Option<serde_json::Value>, String> {
+fn parse_message_content_parts(raw: Option<String>) -> Option<serde_json::Value> {
     match raw {
-        Some(payload) if !payload.trim().is_empty() => serde_json::from_str(&payload)
-            .map(Some)
-            .map_err(|e| format!("Failed to deserialize message content parts: {}", e)),
-        _ => Ok(None),
+        Some(payload) if !payload.trim().is_empty() => match serde_json::from_str(&payload) {
+            Ok(value) => Some(value),
+            Err(error) => {
+                tracing::warn!("Ignoring malformed stored message content parts: {}", error);
+                None
+            }
+        },
+        _ => None,
     }
 }
 
@@ -1403,12 +1481,17 @@ fn normalized_user_chat_content(message: &Message) -> Result<Option<models::Chat
         return Ok(None);
     };
 
-    let parsed = serde_json::from_value::<models::ChatContent>(content_parts).map_err(|error| {
-        format!(
-            "Message {} has malformed multimodal content: {}",
-            message.id, error
-        )
-    })?;
+    let parsed = match serde_json::from_value::<models::ChatContent>(content_parts) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            tracing::warn!(
+                "Ignoring malformed multimodal content for message {}: {}",
+                message.id,
+                error
+            );
+            return Ok(None);
+        }
+    };
 
     let normalized = match parsed {
         models::ChatContent::Text(text) => models::ChatContent::Text(text),
@@ -1435,28 +1518,16 @@ fn normalized_user_chat_content(message: &Message) -> Result<Option<models::Chat
 }
 
 fn validate_loaded_message(message: &Message) -> Result<(), String> {
-    if message.role == "user" {
-        let _ = normalized_user_chat_content(message)?;
-    }
+    let _ = message;
     Ok(())
 }
 
 fn message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
-    let id: String = row.get(0)?;
     let raw_parts: Option<String> = row.get(4)?;
-    let content_parts = parse_message_content_parts(raw_parts).map_err(|err| {
-        rusqlite::Error::FromSqlConversionFailure(
-            4,
-            rusqlite::types::Type::Text,
-            Box::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("Message {}: {}", id, err),
-            )),
-        )
-    })?;
+    let content_parts = parse_message_content_parts(raw_parts);
 
     Ok(Message {
-        id,
+        id: row.get(0)?,
         session_id: row.get(1)?,
         role: row.get(2)?,
         content: row.get(3)?,
@@ -1508,7 +1579,7 @@ fn serialize_chat_content(content: Option<&models::ChatContent>) -> Result<Optio
         .map_err(|e| format!("Failed to serialize message content parts: {}", e))
 }
 
-fn list_sessions_inner(state: &State<'_, AppState>) -> Result<Vec<Session>, String> {
+fn list_sessions_inner(state: &AppState) -> Result<Vec<Session>, String> {
     with_db(state, |conn| {
         let mut stmt = conn
             .prepare(
@@ -1531,7 +1602,7 @@ fn list_sessions_inner(state: &State<'_, AppState>) -> Result<Vec<Session>, Stri
     })
 }
 
-fn load_session_inner(state: &State<'_, AppState>, session_id: &str) -> Result<Session, String> {
+fn load_session_inner(state: &AppState, session_id: &str) -> Result<Session, String> {
     with_db(state, |conn| {
         let mut stmt = conn
             .prepare("SELECT id, title, created_at, updated_at FROM sessions WHERE id = ?1 LIMIT 1")
@@ -1549,10 +1620,7 @@ fn load_session_inner(state: &State<'_, AppState>, session_id: &str) -> Result<S
     })
 }
 
-fn load_messages_inner(
-    state: &State<'_, AppState>,
-    session_id: &str,
-) -> Result<Vec<Message>, String> {
+fn load_messages_inner(state: &AppState, session_id: &str) -> Result<Vec<Message>, String> {
     with_db(state, |conn| {
         let mut stmt = conn
             .prepare("SELECT id, session_id, role, content, content_parts, model_used, tokens_used, latency_ms, created_at FROM messages WHERE session_id = ?1 ORDER BY created_at ASC")
@@ -1570,7 +1638,7 @@ fn load_messages_inner(
 }
 
 fn load_recent_messages_for_prompt_inner(
-    state: &State<'_, AppState>,
+    state: &AppState,
     session_id: &str,
     limit: usize,
 ) -> Result<Vec<Message>, String> {
@@ -1620,10 +1688,7 @@ struct PersistMessageJson<'a> {
     title_source: Option<&'a str>,
 }
 
-fn save_message_inner(
-    state: &State<'_, AppState>,
-    params: PersistMessage<'_>,
-) -> Result<(), String> {
+fn save_message_inner(state: &AppState, params: PersistMessage<'_>) -> Result<(), String> {
     let serialized_parts = serialize_chat_content(params.content_parts)?;
     save_message_json_inner(
         state,
@@ -1687,15 +1752,12 @@ fn save_message_json_conn(
     Ok(())
 }
 
-fn save_message_json_inner(
-    state: &State<'_, AppState>,
-    params: PersistMessageJson<'_>,
-) -> Result<(), String> {
+fn save_message_json_inner(state: &AppState, params: PersistMessageJson<'_>) -> Result<(), String> {
     with_db(state, |conn| save_message_json_conn(conn, params))
 }
 
 fn persist_assistant_error_message(
-    state: &State<'_, AppState>,
+    state: &AppState,
     session_id: &str,
     message: &str,
     model_used: Option<&str>,
@@ -1715,10 +1777,10 @@ fn persist_assistant_error_message(
     );
 }
 
-fn ensure_active_session(state: &State<'_, AppState>) -> Result<Session, String> {
+fn ensure_active_session(state: &AppState) -> Result<Session, String> {
     let sessions = list_sessions_inner(state)?;
     if sessions.is_empty() {
-        let session = create_session_inner(state, DEFAULT_SESSION_TITLE)?;
+        let session = create_session_inner_for_state(state, DEFAULT_SESSION_TITLE)?;
         set_current_session(state, Some(session.id.clone()))?;
         return Ok(session);
     }
@@ -1731,7 +1793,7 @@ fn ensure_active_session(state: &State<'_, AppState>) -> Result<Session, String>
     Ok(session)
 }
 
-fn preferred_session_id(state: &State<'_, AppState>) -> Result<Option<String>, String> {
+fn preferred_session_id(state: &AppState) -> Result<Option<String>, String> {
     if let Some(session_id) = state.current_session.lock().unwrap().clone() {
         return Ok(Some(session_id));
     }
@@ -1741,10 +1803,7 @@ fn preferred_session_id(state: &State<'_, AppState>) -> Result<Option<String>, S
     })
 }
 
-fn set_current_session(
-    state: &State<'_, AppState>,
-    session_id: Option<String>,
-) -> Result<(), String> {
+fn set_current_session(state: &AppState, session_id: Option<String>) -> Result<(), String> {
     *state.current_session.lock().unwrap() = session_id.clone();
 
     if let Some(session_id) = session_id {
@@ -1766,7 +1825,19 @@ fn current_local_datetime_tool_instruction() -> &'static str {
     "Use the get_current_datetime tool for questions about the current local date or time, what day it is, or relative-day references like today, yesterday, and tomorrow. Do not rely on memory for those answers. Prefer concrete calendar dates when clarifying relative dates."
 }
 
-fn system_prompt_for_preferences(reply_language: &str, thinking_enabled: bool) -> String {
+fn web_tools_unavailable_instruction() -> &'static str {
+    "Web tools are unavailable in this turn. Do not claim to have browsed, searched online, checked the internet, or verified current facts on the web. If the user asks for current, live, recent, or web-only information, explain that web assist is off for this reply."
+}
+
+fn native_web_tools_instruction() -> &'static str {
+    "Web tools are available in this turn. For current, live, recent, or otherwise time-sensitive public facts, use the available web tools before answering. Carry forward relevant chat context when the latest user message is a short correction or follow-up, and search for the concrete subject instead of the meta wording of the correction. If tool results are missing, inconclusive, or fail, say that verification was incomplete and avoid presenting uncertain current facts as certain."
+}
+
+fn system_prompt_for_preferences(
+    reply_language: &str,
+    thinking_enabled: bool,
+    web_tools_enabled: bool,
+) -> String {
     let language_instruction = match reply_language {
         "hindi" => "Reply in Hindi only. Do not switch to English unless the user explicitly asks for translation, quoted text, or code syntax that must stay in English.",
         "bengali" => "Reply in Bengali only. Do not switch to English unless the user explicitly asks for translation, quoted text, or code syntax that must stay in English.",
@@ -1782,15 +1853,44 @@ fn system_prompt_for_preferences(reply_language: &str, thinking_enabled: bool) -
         "Do not expose hidden scratchpad-style exposition, internal reasoning, or instruction summaries in the visible answer."
     };
     let datetime_instruction = current_local_datetime_tool_instruction();
+    let web_tools_instruction = if web_tools_enabled {
+        native_web_tools_instruction()
+    } else {
+        web_tools_unavailable_instruction()
+    };
+    let markdown_instruction = "When formatting with Markdown, emit valid CommonMark. Put a space after heading markers (#), bullet markers (-, *), and ordered list markers (1.). If a structured format would be malformed, prefer plain text over broken Markdown.";
 
     format!(
-        "You are Friday, a helpful local AI assistant. Be concise, clear, practical and useful. {} {} {}",
-        language_instruction, thinking_instruction, datetime_instruction
+        "You are Friday, a helpful local AI assistant. Be concise, clear, practical and useful. {} {} {} {} {}",
+        language_instruction,
+        thinking_instruction,
+        datetime_instruction,
+        web_tools_instruction,
+        markdown_instruction
     )
 }
 
 fn estimate_message_prompt_cost(message: &Message) -> usize {
-    message.content.chars().count()
+    let content = if message.role == "user" {
+        normalized_user_chat_content(message)
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| models::ChatContent::Text(message.content.clone()))
+    } else {
+        models::ChatContent::Text(message.content.clone())
+    };
+
+    match content {
+        models::ChatContent::Text(text) => text.chars().count(),
+        models::ChatContent::Parts(parts) => parts
+            .iter()
+            .map(|part| match part {
+                models::ChatContentPart::Text { text } => text.chars().count(),
+                models::ChatContentPart::Image { blob } => blob.chars().count(),
+                models::ChatContentPart::Audio { path } => path.chars().count(),
+            })
+            .sum(),
+    }
 }
 
 fn trim_history_for_prompt(history: &[Message]) -> Result<Vec<Message>, String> {
@@ -1923,14 +2023,53 @@ mod tests {
         conn
     }
 
+    fn test_app_state(conn: Connection) -> AppState {
+        AppState {
+            db: Mutex::new(Some(conn)),
+            current_session: Mutex::new(None),
+            active_generation_session: Mutex::new(None),
+            cancel_flag: AtomicBool::new(false),
+            rag_enabled: AtomicBool::new(false),
+            tools_enabled: AtomicBool::new(false),
+        }
+    }
+
+    fn insert_session(conn: &Connection, id: &str) {
+        conn.execute(
+            "INSERT INTO sessions (id, title, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![
+                id,
+                DEFAULT_SESSION_TITLE,
+                "2026-01-01T00:00:00Z",
+                "2026-01-01T00:00:00Z"
+            ],
+        )
+        .unwrap();
+    }
+
+    fn insert_message_with_raw_parts(
+        conn: &Connection,
+        session_id: &str,
+        id: &str,
+        role: &str,
+        content: &str,
+        content_parts: Option<&str>,
+    ) {
+        conn.execute(
+            "INSERT INTO messages (id, session_id, role, content, content_parts, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![id, session_id, role, content, content_parts, "2026-01-01T00:00:00Z"],
+        )
+        .unwrap();
+    }
+
     #[test]
     fn system_prompt_obeys_selected_reply_language() {
-        let english = system_prompt_for_preferences("english", false);
-        let hindi = system_prompt_for_preferences("hindi", false);
-        let bengali = system_prompt_for_preferences("bengali", false);
-        let marathi = system_prompt_for_preferences("marathi", false);
-        let tamil = system_prompt_for_preferences("tamil", false);
-        let punjabi = system_prompt_for_preferences("punjabi", false);
+        let english = system_prompt_for_preferences("english", false, false);
+        let hindi = system_prompt_for_preferences("hindi", false, false);
+        let bengali = system_prompt_for_preferences("bengali", false, false);
+        let marathi = system_prompt_for_preferences("marathi", false, false);
+        let tamil = system_prompt_for_preferences("tamil", false, false);
+        let punjabi = system_prompt_for_preferences("punjabi", false, false);
 
         assert!(english.contains("Reply in English only"));
         assert!(hindi.contains("Reply in Hindi only"));
@@ -1942,7 +2081,7 @@ mod tests {
 
     #[test]
     fn system_prompt_includes_thinking_instruction_when_enabled() {
-        let prompt = system_prompt_for_preferences("english", true);
+        let prompt = system_prompt_for_preferences("english", true, false);
 
         assert!(prompt.contains("Reason privately before answering"));
         assert!(prompt.contains("Never expose chain-of-thought"));
@@ -1950,11 +2089,39 @@ mod tests {
 
     #[test]
     fn system_prompt_instructs_model_to_use_current_datetime_tool() {
-        let prompt = system_prompt_for_preferences("english", false);
+        let prompt = system_prompt_for_preferences("english", false, false);
 
         assert!(prompt.contains("get_current_datetime"));
         assert!(prompt.contains("Do not rely on memory for those answers"));
         assert!(prompt.contains("Prefer concrete calendar dates"));
+    }
+
+    #[test]
+    fn system_prompt_explicitly_disallows_web_claims_when_disabled() {
+        let prompt = system_prompt_for_preferences("english", false, false);
+
+        assert!(prompt.contains("Web tools are unavailable in this turn"));
+        assert!(prompt.contains("Do not claim to have browsed"));
+        assert!(prompt.contains("web assist is off for this reply"));
+    }
+
+    #[test]
+    fn system_prompt_includes_native_web_tool_guidance_when_enabled() {
+        let prompt = system_prompt_for_preferences("english", false, true);
+
+        assert!(prompt.contains("Web tools are available in this turn"));
+        assert!(prompt.contains("use the available web tools before answering"));
+        assert!(prompt.contains("short correction or follow-up"));
+        assert!(prompt.contains("verification was incomplete"));
+    }
+
+    #[test]
+    fn system_prompt_includes_markdown_formatting_guidance() {
+        let prompt = system_prompt_for_preferences("english", false, false);
+
+        assert!(prompt.contains("emit valid CommonMark"));
+        assert!(prompt.contains("Put a space after heading markers"));
+        assert!(prompt.contains("prefer plain text over broken Markdown"));
     }
 
     #[test]
@@ -1969,7 +2136,10 @@ mod tests {
 
         let prepared = build_user_prompt_message("Summarize this paper.", Some(&attachments));
 
-        assert_eq!(prepared.display_message, "📎 paper.pdf\nSummarize this paper.");
+        assert_eq!(
+            prepared.display_message,
+            "📎 paper.pdf\nSummarize this paper."
+        );
         let prompt_text = match prepared.prompt_content.clone() {
             Some(models::ChatContent::Text(text)) => text,
             other => panic!("expected text prompt content, got {:?}", other),
@@ -2010,7 +2180,10 @@ mod tests {
 
         let prepared = build_user_prompt_message("What is in this image?", Some(&attachments));
 
-        assert_eq!(prepared.display_message, "📎 photo.png\nWhat is in this image?");
+        assert_eq!(
+            prepared.display_message,
+            "📎 photo.png\nWhat is in this image?"
+        );
         assert_eq!(prepared.prompt_message.role, "user");
         match prepared.prompt_message.content {
             models::ChatContent::Parts(parts) => {
@@ -2065,7 +2238,10 @@ mod tests {
 
         let prepared = build_user_prompt_message("Summarize this audio.", Some(&attachments));
 
-        assert_eq!(prepared.display_message, "📎 test-audio.wav\nSummarize this audio.");
+        assert_eq!(
+            prepared.display_message,
+            "📎 test-audio.wav\nSummarize this audio."
+        );
         match prepared.prompt_message.content {
             models::ChatContent::Parts(parts) => {
                 assert!(matches!(
@@ -2192,7 +2368,7 @@ mod tests {
     }
 
     #[test]
-    fn trim_history_for_prompt_uses_persisted_text_cost_for_multimodal_turns() {
+    fn trim_history_for_prompt_counts_multimodal_payload_size() {
         let history = vec![
             Message {
                 id: "1".to_string(),
@@ -2215,9 +2391,8 @@ mod tests {
 
         let trimmed = trim_history_for_prompt(&history).unwrap();
 
-        assert_eq!(trimmed.len(), 2);
-        assert_eq!(trimmed[0].id, "1");
-        assert_eq!(trimmed[1].id, "2");
+        assert_eq!(trimmed.len(), 1);
+        assert_eq!(trimmed[0].id, "2");
     }
 
     #[test]
@@ -2238,6 +2413,55 @@ mod tests {
 
         assert_eq!(trimmed.len(), 1);
         assert_eq!(trimmed[0].id, "broken");
+    }
+
+    #[test]
+    fn load_messages_inner_falls_back_when_user_content_parts_are_invalid() {
+        let conn = test_conn();
+        insert_session(&conn, "session-a");
+        insert_message_with_raw_parts(
+            &conn,
+            "session-a",
+            "broken",
+            "user",
+            "plain fallback",
+            Some("{not valid json"),
+        );
+
+        let state = test_app_state(conn);
+        let messages = load_messages_inner(&state, "session-a").unwrap();
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].id, "broken");
+        assert_eq!(messages[0].content, "plain fallback");
+        assert!(messages[0].content_parts.is_none());
+    }
+
+    #[test]
+    fn bootstrap_app_survives_malformed_user_content_parts() {
+        let conn = test_conn();
+        insert_session(&conn, "session-a");
+        insert_message_with_raw_parts(
+            &conn,
+            "session-a",
+            "broken",
+            "user",
+            "plain fallback",
+            Some(r#"{"thinking":"not multimodal user content"}"#),
+        );
+
+        let state = test_app_state(conn);
+        let sidecar = SidecarManager::new();
+        let searxng = SearXNGManager::new();
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let payload = runtime
+            .block_on(async { bootstrap_payload_inner(&state, &sidecar, &searxng).await })
+            .unwrap();
+
+        assert_eq!(payload.current_session.id, "session-a");
+        assert_eq!(payload.messages.len(), 1);
+        assert_eq!(payload.messages[0].content, "plain fallback");
     }
 
     #[test]

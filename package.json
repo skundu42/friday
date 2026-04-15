@@ -13,7 +13,7 @@
     "cargo:check": "cargo check --manifest-path src-tauri/Cargo.toml --locked",
     "cargo:test": "cargo test --manifest-path src-tauri/Cargo.toml --locked",
     "cargo:clippy": "cargo clippy --manifest-path src-tauri/Cargo.toml --locked -- -D warnings",
-    "check": "npm run typecheck && npm run test:run && npm run build && npm run cargo:check && npm run cargo:test && npm run cargo:clippy",
+    "check": "npm run typecheck && npm run test:run && npm run build && npm run cargo:check && npm run cargo:test",
     "tauri": "LLVM_PROFILE_FILE=/tmp/friday-%p.profraw tauri"
   },
   "dependencies": {

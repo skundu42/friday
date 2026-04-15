@@ -1,5 +1,9 @@
 use crate::models::python_worker::{PythonWorkerClient, StreamEvent};
 use crate::models::ChatMessage;
+use crate::python_runtime::{
+    bundled_resource_source_path, ensure_embedded_python_runtime, install_python_wheel,
+    sync_file_if_changed,
+};
 use crate::settings::GenerationRequestConfig;
 use crate::{persist_active_model_id, AppState};
 use serde::{Deserialize, Serialize};
@@ -16,8 +20,6 @@ use tokio::sync::{mpsc, Mutex as AsyncMutex};
 
 const LITERT_LM_VERSION: &str = "0.10.1";
 const BUNDLED_LITERT_RESOURCE_PATH: &str = env!("FRIDAY_BUNDLED_LITERT_RESOURCE_PATH");
-const BUNDLED_PYTHON_RUNTIME_RESOURCE_PATH: &str =
-    env!("FRIDAY_BUNDLED_PYTHON_RUNTIME_RESOURCE_PATH");
 const BUNDLED_PYTHON_WHEEL_RESOURCE_PATH: &str = env!("FRIDAY_BUNDLED_PYTHON_WHEEL_RESOURCE_PATH");
 const BUNDLED_PYTHON_WORKER_RESOURCE_PATH: &str =
     env!("FRIDAY_BUNDLED_PYTHON_WORKER_RESOURCE_PATH");
@@ -225,6 +227,7 @@ pub struct SidecarManager {
     daemon_activity: Arc<DaemonActivity>,
     selected_backend: Mutex<String>,
     downloaded_model_ids_cache: Mutex<Option<Vec<String>>>,
+    web_search_base_url: Mutex<Option<String>>,
 }
 
 struct DaemonActivity {
@@ -280,6 +283,7 @@ impl SidecarManager {
             daemon_activity: Arc::new(DaemonActivity::new()),
             selected_backend: Mutex::new(default_backend().to_string()),
             downloaded_model_ids_cache: Mutex::new(None),
+            web_search_base_url: Mutex::new(None),
         }
     }
 
@@ -299,6 +303,10 @@ impl SidecarManager {
 
     pub fn set_max_tokens(&self, max_tokens: u32) {
         self.max_tokens.store(max_tokens, Ordering::SeqCst);
+    }
+
+    pub fn set_web_search_base_url(&self, base_url: &str) {
+        *self.web_search_base_url.lock().unwrap() = Some(base_url.to_string());
     }
 
     fn selected_backend(&self) -> String {
@@ -594,6 +602,7 @@ impl SidecarManager {
         model_path: &Path,
         max_tokens: u32,
         backend: &str,
+        web_search_base_url: Option<&str>,
         python_binary: &Path,
         worker_script: &Path,
         python_site_packages: &Path,
@@ -605,6 +614,7 @@ impl SidecarManager {
             model_path,
             max_tokens,
             backend,
+            web_search_base_url,
             python_site_packages,
             python_runtime_lib_dir,
         )
@@ -622,6 +632,7 @@ impl SidecarManager {
         let python_site_packages = self.python_site_packages_path()?;
         let python_runtime_lib_dir = self.python_runtime_lib_dir_path()?;
         let preferred_backend = default_backend();
+        let web_search_base_url = self.web_search_base_url.lock().unwrap().clone();
 
         tracing::info!(
             "Starting Friday LiteRT Python worker (model={}, max_num_tokens={}, backend={})…",
@@ -635,6 +646,7 @@ impl SidecarManager {
                 &model_path,
                 max_tokens,
                 preferred_backend,
+                web_search_base_url.as_deref(),
                 &python_binary,
                 &worker_script,
                 &python_site_packages,
@@ -655,6 +667,7 @@ impl SidecarManager {
                         &model_path,
                         max_tokens,
                         "cpu",
+                        web_search_base_url.as_deref(),
                         &python_binary,
                         &worker_script,
                         &python_site_packages,
@@ -893,26 +906,14 @@ impl SidecarManager {
     }
 
     fn bundled_resource_source_path(&self, relative_path: &str) -> Result<PathBuf, String> {
-        let resource_dir = self.resource_dir_path()?;
-        let primary = resource_dir.join(relative_path);
-        if primary.exists() {
-            return Ok(primary);
-        }
-
-        let legacy = resource_dir.join("resources").join(relative_path);
-        if legacy.exists() {
-            return Ok(legacy);
-        }
-
-        Ok(primary)
+        Ok(bundled_resource_source_path(
+            &self.resource_dir_path()?,
+            relative_path,
+        ))
     }
 
     fn bundled_runtime_source_path(&self) -> Result<PathBuf, String> {
         self.bundled_resource_source_path(BUNDLED_LITERT_RESOURCE_PATH)
-    }
-
-    fn bundled_python_runtime_source_path(&self) -> Result<PathBuf, String> {
-        self.bundled_resource_source_path(BUNDLED_PYTHON_RUNTIME_RESOURCE_PATH)
     }
 
     fn bundled_python_wheel_source_path(&self) -> Result<PathBuf, String> {
@@ -1013,19 +1014,16 @@ impl SidecarManager {
         std::fs::create_dir_all(self.lit_home_dir_path()?)
             .map_err(|e| format!("Failed to create LiteRT home directory: {}", e))?;
         validate_bundled_python_asset_paths(
-            BUNDLED_PYTHON_RUNTIME_RESOURCE_PATH,
             BUNDLED_PYTHON_WHEEL_RESOURCE_PATH,
             BUNDLED_PYTHON_WORKER_RESOURCE_PATH,
         )?;
 
         let lit_source_path = self.bundled_runtime_source_path()?;
-        let python_runtime_source_path = self.bundled_python_runtime_source_path()?;
         let python_wheel_source_path = self.bundled_python_wheel_source_path()?;
         let python_worker_source_path = self.bundled_python_worker_source_path()?;
 
         for source_path in [
             &lit_source_path,
-            &python_runtime_source_path,
             &python_wheel_source_path,
             &python_worker_source_path,
         ] {
@@ -1067,10 +1065,7 @@ impl SidecarManager {
                 .map_err(|e| format!("Failed to finalize LiteRT-LM runtime install: {}", e))?;
         }
 
-        install_python_runtime_archive(
-            &python_runtime_source_path,
-            &self.python_runtime_dir_path()?,
-        )?;
+        ensure_embedded_python_runtime(&self.app_data_dir()?, &self.resource_dir_path()?)?;
         install_python_worker_launcher(
             &self.python_binary_path()?,
             &self.python_worker_binary_path()?,
@@ -1485,13 +1480,8 @@ fn unavailable_status(state: &str, message: impl AsRef<str>) -> BackendStatus {
     }
 }
 
-fn validate_bundled_python_asset_paths(
-    runtime_path: &str,
-    wheel_path: &str,
-    worker_path: &str,
-) -> Result<(), String> {
-    if runtime_path.trim().is_empty() || wheel_path.trim().is_empty() || worker_path.trim().is_empty()
-    {
+fn validate_bundled_python_asset_paths(wheel_path: &str, worker_path: &str) -> Result<(), String> {
+    if wheel_path.trim().is_empty() || worker_path.trim().is_empty() {
         return Err(
             "Friday currently bundles its managed LiteRT Python worker only for macOS Apple Silicon. Build on macOS arm64 or vendor per-platform Python assets before enabling this target."
                 .to_string(),
@@ -1507,48 +1497,6 @@ fn active_uses_idle(active_uses: usize, last_activity: Instant, now: Instant) ->
 
 fn normalize_incomplete_download_percentage(percentage: u64) -> u64 {
     percentage.min(99)
-}
-
-fn install_python_runtime_archive(source_path: &Path, target_dir: &Path) -> Result<(), String> {
-    if target_dir.join("bin").join("python3").exists() {
-        return Ok(());
-    }
-
-    let staging_dir = target_dir.with_extension("staging");
-    if staging_dir.exists() {
-        let _ = std::fs::remove_dir_all(&staging_dir);
-    }
-    std::fs::create_dir_all(&staging_dir)
-        .map_err(|e| format!("Failed to create Python staging directory: {}", e))?;
-
-    let archive_file = std::fs::File::open(source_path).map_err(|e| {
-        format!(
-            "Failed to open bundled Python runtime archive {}: {}",
-            source_path.display(),
-            e
-        )
-    })?;
-    let decoder = flate2::read::GzDecoder::new(archive_file);
-    let mut archive = tar::Archive::new(decoder);
-    archive
-        .unpack(&staging_dir)
-        .map_err(|e| format!("Failed to unpack bundled Python runtime: {}", e))?;
-
-    let extracted_dir = staging_dir.join("python");
-    if !extracted_dir.exists() {
-        return Err(format!(
-            "Bundled Python runtime archive {} did not contain a top-level python directory.",
-            source_path.display()
-        ));
-    }
-
-    if target_dir.exists() {
-        let _ = std::fs::remove_dir_all(target_dir);
-    }
-    std::fs::rename(&extracted_dir, target_dir)
-        .map_err(|e| format!("Failed to finalize bundled Python runtime install: {}", e))?;
-    let _ = std::fs::remove_dir_all(&staging_dir);
-    Ok(())
 }
 
 fn install_python_worker_launcher(
@@ -1656,164 +1604,6 @@ fn install_python_worker_launcher(
         )?;
     }
 
-    Ok(())
-}
-
-fn sync_file_if_changed(
-    source_path: &Path,
-    target_path: &Path,
-    executable: bool,
-) -> Result<bool, String> {
-    #[cfg(unix)]
-    use std::os::unix::fs::PermissionsExt;
-
-    let needs_update = match std::fs::metadata(target_path) {
-        Ok(target_metadata) => {
-            let source_metadata = std::fs::metadata(source_path).map_err(|e| {
-                format!(
-                    "Failed to read bundled asset metadata {}: {}",
-                    source_path.display(),
-                    e
-                )
-            })?;
-
-            if source_metadata.len() != target_metadata.len() {
-                true
-            } else {
-                let source_bytes = std::fs::read(source_path).map_err(|e| {
-                    format!(
-                        "Failed to read bundled asset {}: {}",
-                        source_path.display(),
-                        e
-                    )
-                })?;
-                let target_bytes = std::fs::read(target_path).map_err(|e| {
-                    format!(
-                        "Failed to read installed asset {}: {}",
-                        target_path.display(),
-                        e
-                    )
-                })?;
-                source_bytes != target_bytes
-            }
-        }
-        Err(_) => true,
-    };
-
-    #[cfg(unix)]
-    let desired_permissions =
-        std::fs::Permissions::from_mode(if executable { 0o755 } else { 0o644 });
-
-    if !needs_update {
-        #[cfg(unix)]
-        {
-            std::fs::set_permissions(target_path, desired_permissions).map_err(|e| {
-                format!(
-                    "Failed to update installed asset permissions {}: {}",
-                    target_path.display(),
-                    e
-                )
-            })?;
-        }
-        return Ok(false);
-    }
-
-    if let Some(parent) = target_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            format!(
-                "Failed to create installed asset directory {}: {}",
-                parent.display(),
-                e
-            )
-        })?;
-    }
-
-    let temp_path = target_path.with_extension("part");
-    if temp_path.exists() {
-        let _ = std::fs::remove_file(&temp_path);
-    }
-    std::fs::copy(source_path, &temp_path).map_err(|e| {
-        format!(
-            "Failed to copy bundled asset {}: {}",
-            source_path.display(),
-            e
-        )
-    })?;
-
-    #[cfg(unix)]
-    {
-        std::fs::set_permissions(&temp_path, desired_permissions).map_err(|e| {
-            format!(
-                "Failed to update staged asset permissions {}: {}",
-                temp_path.display(),
-                e
-            )
-        })?;
-    }
-
-    std::fs::rename(&temp_path, target_path).map_err(|e| {
-        format!(
-            "Failed to finalize bundled asset install {}: {}",
-            target_path.display(),
-            e
-        )
-    })?;
-
-    Ok(true)
-}
-
-fn install_python_wheel(source_path: &Path, target_dir: &Path) -> Result<(), String> {
-    let staging_dir = target_dir.with_extension("staging");
-    if staging_dir.exists() {
-        let _ = std::fs::remove_dir_all(&staging_dir);
-    }
-    std::fs::create_dir_all(&staging_dir).map_err(|e| {
-        format!(
-            "Failed to create Python site-packages staging directory: {}",
-            e
-        )
-    })?;
-
-    let file = std::fs::File::open(source_path).map_err(|e| {
-        format!(
-            "Failed to open bundled LiteRT Python wheel {}: {}",
-            source_path.display(),
-            e
-        )
-    })?;
-    let mut archive =
-        zip::ZipArchive::new(file).map_err(|e| format!("Failed to read Python wheel: {}", e))?;
-
-    for index in 0..archive.len() {
-        let mut entry = archive
-            .by_index(index)
-            .map_err(|e| format!("Failed to read Python wheel entry: {}", e))?;
-        let Some(enclosed_name) = entry.enclosed_name().map(Path::to_path_buf) else {
-            continue;
-        };
-        let output_path = staging_dir.join(enclosed_name);
-        if entry.name().ends_with('/') {
-            std::fs::create_dir_all(&output_path)
-                .map_err(|e| format!("Failed to create Python wheel directory: {}", e))?;
-            continue;
-        }
-
-        if let Some(parent) = output_path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("Failed to create Python wheel parent directory: {}", e))?;
-        }
-
-        let mut output_file = std::fs::File::create(&output_path)
-            .map_err(|e| format!("Failed to create Python wheel file: {}", e))?;
-        std::io::copy(&mut entry, &mut output_file)
-            .map_err(|e| format!("Failed to extract Python wheel file: {}", e))?;
-    }
-
-    if target_dir.exists() {
-        let _ = std::fs::remove_dir_all(target_dir);
-    }
-    std::fs::rename(&staging_dir, target_dir)
-        .map_err(|e| format!("Failed to finalize Python wheel install: {}", e))?;
     Ok(())
 }
 
@@ -1950,10 +1740,9 @@ mod tests {
 
     #[test]
     fn bundled_python_assets_must_all_be_present() {
-        assert!(validate_bundled_python_asset_paths("runtime.tar.gz", "wheel.whl", "worker.py")
-            .is_ok());
+        assert!(validate_bundled_python_asset_paths("wheel.whl", "worker.py").is_ok());
 
-        let error = validate_bundled_python_asset_paths("", "wheel.whl", "worker.py")
+        let error = validate_bundled_python_asset_paths("", "worker.py")
             .expect_err("missing asset paths should fail");
         assert!(error.contains("macOS Apple Silicon"));
     }

@@ -30,3 +30,5 @@ flate2 = "1"
 tar = "0.4"
 pdf-extract = "0.10"
 zip = { version = "0.6", default-features = false, features = ["deflate"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+sha2 = "0.10"

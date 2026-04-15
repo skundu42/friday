@@ -166,6 +166,7 @@ impl PythonWorkerClient {
         model_path: &Path,
         max_num_tokens: u32,
         backend: &str,
+        web_search_base_url: Option<&str>,
         python_site_packages: &Path,
         python_runtime_lib_dir: &Path,
     ) -> Result<Self, String> {
@@ -186,6 +187,9 @@ impl PythonWorkerClient {
                     python_runtime_lib_dir.display()
                 ),
             );
+        if let Some(web_search_base_url) = web_search_base_url {
+            command.env("FRIDAY_SEARXNG_BASE_URL", web_search_base_url);
+        }
 
         let mut child = command.spawn().map_err(|error| {
             format!(

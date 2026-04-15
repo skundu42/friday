@@ -30,7 +30,8 @@
     "targets": "all",
     "resources": {
       "resources/litert-runtime/": "litert-runtime/",
-      "resources/litert-python/": "litert-python/"
+      "resources/litert-python/": "litert-python/",
+      "resources/searxng/": "searxng/"
     },
     "icon": [
       "icons/32x32.png",

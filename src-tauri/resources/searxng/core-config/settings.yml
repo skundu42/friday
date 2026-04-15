@@ -1,0 +1,133 @@
+use_default_settings:
+  engines:
+    keep_only:
+      - wikipedia
+      - wikidata
+      - startpage
+      - startpage news
+      - bing
+      - mojeek
+      - qwant
+
+general:
+  debug: false
+  instance_name: "Friday Search"
+  privacypolicy_url: false
+  donation_url: false
+  contact_url: false
+  enable_metrics: false
+  open_metrics: ""
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  autocomplete_min: 4
+  favicon_resolver: ""
+  default_lang: "auto"
+  ban_time_on_fail: 5
+  max_ban_time_on_fail: 120
+  formats:
+    - html
+    - json
+
+server:
+  port: __FRIDAY_SEARXNG_PORT__
+  bind_address: "127.0.0.1"
+  base_url: false
+  limiter: false
+  public_instance: false
+  secret_key: "__FRIDAY_SEARXNG_SECRET_KEY__"
+  image_proxy: false
+  http_protocol_version: "1.0"
+  method: "GET"
+  default_http_headers:
+    X-Content-Type-Options: nosniff
+    X-Download-Options: noopen
+    X-Robots-Tag: noindex, nofollow
+    Referrer-Policy: no-referrer
+
+ui:
+  static_path: ""
+  templates_path: ""
+  query_in_title: false
+  default_theme: simple
+  center_alignment: false
+  default_locale: ""
+  theme_args:
+    simple_style: auto
+  search_on_category_select: true
+  hotkeys: default
+  url_formatting: pretty
+
+outgoing:
+  request_timeout: 3.0
+  pool_connections: 100
+  pool_maxsize: 20
+  enable_http2: true
+
+plugins:
+  searx.plugins.calculator.SXNGPlugin:
+    active: true
+  searx.plugins.hash_plugin.SXNGPlugin:
+    active: true
+  searx.plugins.self_info.SXNGPlugin:
+    active: true
+  searx.plugins.unit_converter.SXNGPlugin:
+    active: true
+  searx.plugins.ahmia_filter.SXNGPlugin:
+    active: true
+  searx.plugins.hostnames.SXNGPlugin:
+    active: true
+  searx.plugins.time_zone.SXNGPlugin:
+    active: true
+  searx.plugins.oa_doi_rewrite.SXNGPlugin:
+    active: false
+  searx.plugins.tor_check.SXNGPlugin:
+    active: false
+  searx.plugins.tracker_url_remover.SXNGPlugin:
+    active: true
+
+engines:
+  - name: wikipedia
+    engine: wikipedia
+    shortcut: wp
+    display_type: ["infobox"]
+    categories: [general]
+
+  - name: wikidata
+    engine: wikidata
+    shortcut: wd
+    timeout: 3.0
+    weight: 2
+    display_type: ["infobox"]
+    categories: [general]
+
+  - name: startpage
+    engine: startpage
+    shortcut: sp
+    startpage_categ: web
+    categories: [general, web]
+
+  - name: startpage news
+    engine: startpage
+    startpage_categ: news
+    categories: [news, web]
+    shortcut: spn
+
+  - name: bing
+    engine: bing
+    shortcut: bi
+    categories: [general, web]
+
+  - name: mojeek
+    engine: mojeek
+    shortcut: mj
+    paging: true
+    time_range_support: true
+    categories: [general, web]
+
+  - name: qwant
+    engine: qwant
+    shortcut: qw
+    qwant_categ: web-lite
+    categories: [general, web]
