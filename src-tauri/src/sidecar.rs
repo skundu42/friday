@@ -708,7 +708,6 @@ impl SidecarManager {
         messages: &[ChatMessage],
         generation_config: GenerationRequestConfig,
         tools_enabled: bool,
-        rag_context: Option<serde_json::Value>,
     ) -> Result<mpsc::Receiver<StreamEvent>, String> {
         self.ensure_daemon().await?;
 
@@ -718,7 +717,7 @@ impl SidecarManager {
             .ok_or_else(|| "Friday LiteRT Python worker is not available".to_string())?;
 
         daemon
-            .send_chat_with_options(messages, generation_config, tools_enabled, rag_context)
+            .send_chat_with_options(messages, generation_config, tools_enabled)
             .await
     }
 

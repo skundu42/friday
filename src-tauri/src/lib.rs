@@ -1,6 +1,6 @@
+mod knowledge;
 mod models;
 mod python_runtime;
-mod rag;
 mod runtime_manifest;
 mod searxng;
 mod session;
@@ -8,6 +8,7 @@ mod settings;
 mod sidecar;
 mod storage;
 
+use knowledge::KnowledgeManager;
 use models::python_worker::StreamEvent;
 use searxng::SearXNGManager;
 use serde::{Deserialize, Serialize};
@@ -29,6 +30,7 @@ const MAX_PROMPT_HISTORY_CHARS: usize = 120_000;
 const MAX_PROMPT_HISTORY_QUERY_LIMIT: usize = 24;
 const MAX_ATTACHMENT_TEXT_CHARS_PER_FILE: usize = 40_000;
 const MAX_ATTACHMENT_TEXT_CHARS_TOTAL: usize = 80_000;
+const MAX_KNOWLEDGE_PROMPT_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
 const DEFAULT_SESSION_TITLE: &str = "New chat";
 const SESSION_TITLE_PREVIEW_CHARS: usize = 48;
 const MAIN_WINDOW_LABEL: &str = "main";
@@ -37,11 +39,10 @@ static OBSERVABILITY_INIT: OnceLock<Result<(), String>> = OnceLock::new();
 
 pub struct AppState {
     pub db: Mutex<Option<rusqlite::Connection>>,
+    pub db_path: Mutex<Option<std::path::PathBuf>>,
     pub current_session: Mutex<Option<String>>,
     pub active_generation_session: Mutex<Option<String>>,
     pub cancel_flag: AtomicBool,
-    // RAG remains ephemeral until Friday has a dedicated persisted RAG UI.
-    pub rag_enabled: AtomicBool,
     pub tools_enabled: AtomicBool,
 }
 
@@ -83,6 +84,7 @@ struct BootstrapPayload {
     settings: settings::AppSettings,
     backend_status: sidecar::BackendStatus,
     web_search_status: searxng::WebSearchStatus,
+    knowledge_status: knowledge::KnowledgeStatus,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -100,6 +102,15 @@ where
     let guard = state.db.lock().unwrap();
     let conn = guard.as_ref().ok_or("Database not initialized")?;
     f(conn)
+}
+
+fn current_db_path(state: &AppState) -> Result<std::path::PathBuf, String> {
+    state
+        .db_path
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| "Database path not initialized".to_string())
 }
 
 struct ActiveGenerationGuard<'a> {
@@ -365,12 +376,13 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(SidecarManager::new())
         .manage(SearXNGManager::new())
+        .manage(KnowledgeManager::new())
         .manage(AppState {
             db: Mutex::new(None),
+            db_path: Mutex::new(None),
             current_session: Mutex::new(None),
             active_generation_session: Mutex::new(None),
             cancel_flag: AtomicBool::new(false),
-            rag_enabled: AtomicBool::new(false),
             tools_enabled: AtomicBool::new(false),
         })
         .invoke_handler(tauri::generate_handler![
@@ -392,13 +404,12 @@ pub fn run() {
             bootstrap_app,
             load_settings,
             save_settings,
-            rag_ingest_file,
-            rag_ingest_folder,
-            rag_search,
-            rag_list_documents,
-            rag_delete_document,
-            rag_stats,
-            set_rag_enabled,
+            knowledge_ingest_file,
+            knowledge_ingest_url,
+            knowledge_list_sources,
+            knowledge_delete_source,
+            knowledge_stats,
+            get_knowledge_status,
             set_tools_enabled,
             sidecar::list_models,
             sidecar::list_downloaded_model_ids,
@@ -414,7 +425,7 @@ pub fn run() {
                 .map_err(|e| io_error(format!("Failed to resolve app data directory: {}", e)))?;
             let temp_dir = data_dir.join("temp");
             let models_dir = data_dir.join("models");
-            let rag_dir = data_dir.join("rag");
+            let knowledge_storage_dir = data_dir.join("rag");
             let lit_home_dir = data_dir.join("lit-home");
             let logs_dir = data_dir.join("logs");
 
@@ -422,7 +433,7 @@ pub fn run() {
                 &data_dir,
                 &temp_dir,
                 &models_dir,
-                &rag_dir,
+                &knowledge_storage_dir,
                 &lit_home_dir,
                 &logs_dir,
             ] {
@@ -447,6 +458,11 @@ pub fn run() {
                 sidecar.set_resource_dir(resource_dir);
             }
 
+            let knowledge: tauri::State<KnowledgeManager> = app.state();
+            knowledge
+                .set_root_dir(knowledge_storage_dir.clone())
+                .map_err(io_error)?;
+
             let searxng: tauri::State<SearXNGManager> = app.state();
             searxng.set_app_handle(app.handle().clone());
             searxng.set_app_data_dir(data_dir.clone());
@@ -463,6 +479,7 @@ pub fn run() {
             }
             let state: tauri::State<AppState> = app.state();
             *state.db.lock().unwrap() = Some(conn);
+            *state.db_path.lock().unwrap() = Some(db_path.clone());
             tracing::info!("Database initialized at {:?}", db_path);
 
             if let Err(error) =
@@ -496,14 +513,16 @@ async fn bootstrap_app(
     state: State<'_, AppState>,
     sidecar: State<'_, SidecarManager>,
     searxng: State<'_, SearXNGManager>,
+    knowledge: State<'_, KnowledgeManager>,
 ) -> Result<BootstrapPayload, String> {
-    bootstrap_payload_inner(&state, &sidecar, &searxng).await
+    bootstrap_payload_inner(&state, &sidecar, &searxng, &knowledge).await
 }
 
 async fn bootstrap_payload_inner(
     state: &AppState,
     sidecar: &SidecarManager,
     searxng: &SearXNGManager,
+    knowledge: &KnowledgeManager,
 ) -> Result<BootstrapPayload, String> {
     let settings = with_db(state, settings::load_settings)?;
     sidecar.set_max_tokens(settings.chat.max_tokens);
@@ -511,7 +530,7 @@ async fn bootstrap_payload_inner(
         .tools_enabled
         .store(settings.chat.web_assist_enabled, Ordering::SeqCst);
     let mut backend_status = sidecar.auto_detect().await;
-    if settings.auto_start_backend && !backend_status.connected && backend_status.state == "ready" {
+    if !backend_status.connected && backend_status.state == "ready" {
         match sidecar.ensure_daemon().await {
             Ok(()) => {
                 backend_status = sidecar.auto_detect().await;
@@ -534,6 +553,7 @@ async fn bootstrap_payload_inner(
         settings,
         backend_status,
         web_search_status,
+        knowledge_status: knowledge.status(),
     })
 }
 
@@ -959,6 +979,7 @@ struct SendMessageRequest {
     attachments: Option<Vec<serde_json::Value>>,
     thinking_enabled: Option<bool>,
     web_assist_enabled: Option<bool>,
+    knowledge_enabled: Option<bool>,
 }
 
 #[tauri::command]
@@ -967,6 +988,7 @@ async fn send_message(
     state: State<'_, AppState>,
     sidecar: State<'_, SidecarManager>,
     searxng: State<'_, SearXNGManager>,
+    knowledge: State<'_, KnowledgeManager>,
     request: SendMessageRequest,
 ) -> Result<(), String> {
     let SendMessageRequest {
@@ -975,6 +997,7 @@ async fn send_message(
         attachments,
         thinking_enabled,
         web_assist_enabled,
+        knowledge_enabled,
     } = request;
 
     let session_id = match validate_requested_session_id(&requested_session_id) {
@@ -991,6 +1014,7 @@ async fn send_message(
     let _daemon_use = sidecar.begin_daemon_use();
 
     let app_settings = with_db(&state, settings::load_settings)?;
+    let db_path = current_db_path(&state)?;
     sidecar.set_max_tokens(app_settings.chat.max_tokens);
     let attachment_count = attachments.as_ref().map(Vec::len).unwrap_or(0);
 
@@ -1033,6 +1057,8 @@ async fn send_message(
         .or(app_settings.chat.generation.thinking_enabled)
         .unwrap_or(false);
     let tools_enabled = web_assist_enabled.unwrap_or(app_settings.chat.web_assist_enabled);
+    let effective_knowledge_enabled =
+        knowledge_enabled.unwrap_or(app_settings.chat.knowledge_enabled);
     let system_prompt = system_prompt_for_preferences(
         &app_settings.chat.reply_language,
         effective_thinking_enabled,
@@ -1042,10 +1068,12 @@ async fn send_message(
         trimmed_history.pop();
     }
     tracing::info!(
-        "Preparing prompt for session {} (lang={}, thinking={}, history_messages={})",
+        "Preparing prompt for session {} (lang={}, thinking={}, web={}, knowledge={}, history_messages={})",
         session_id,
         app_settings.chat.reply_language,
         effective_thinking_enabled,
+        tools_enabled,
+        effective_knowledge_enabled,
         trimmed_history.len()
     );
     let mut chat_messages: Vec<models::ChatMessage> =
@@ -1053,28 +1081,22 @@ async fn send_message(
     for msg in &trimmed_history {
         chat_messages.push(message_to_history_chat_message(msg)?);
     }
+    let knowledge_results = if effective_knowledge_enabled {
+        match knowledge::search(&knowledge, &db_path, &message).await {
+            Ok(results) => results,
+            Err(error) => {
+                tracing::warn!("Knowledge search failed: {}", error);
+                knowledge::KnowledgeSearchResults::default()
+            }
+        }
+    } else {
+        knowledge::KnowledgeSearchResults::default()
+    };
+    let prompt_message = augment_prompt_with_knowledge(prompt_message, &knowledge_results)?;
     chat_messages.push(prompt_message);
 
     // Reset cancel flag
     state.cancel_flag.store(false, Ordering::SeqCst);
-
-    // RAG search (if enabled)
-    let rag_context = if state.rag_enabled.load(Ordering::SeqCst) {
-        match with_db(&state, |conn| {
-            rag::search(conn, &message, 5).and_then(|resp| {
-                serde_json::to_value(resp)
-                    .map_err(|e| format!("Failed to serialize RAG response: {}", e))
-            })
-        }) {
-            Ok(resp) => Some(resp),
-            Err(e) => {
-                tracing::warn!("RAG search failed: {}", e);
-                None
-            }
-        }
-    } else {
-        None
-    };
 
     if tools_enabled {
         if let Err(error) = searxng.ensure_ready().await {
@@ -1098,7 +1120,6 @@ async fn send_message(
             &chat_messages,
             generation_config,
             tools_enabled,
-            rag_context,
         )
         .await
     {
@@ -1194,11 +1215,8 @@ async fn send_message(
     }
 
     if !full_response.trim().is_empty() || !full_thinking.trim().is_empty() {
-        let assistant_parts = (!full_thinking.trim().is_empty()).then(|| {
-            serde_json::json!({
-                "thinking": full_thinking,
-            })
-        });
+        let assistant_parts =
+            build_assistant_content_parts(&full_thinking, &knowledge_results.citations);
 
         if let Err(error) = save_message_json_inner(
             &state,
@@ -1235,6 +1253,117 @@ async fn send_message(
     );
 
     Ok(())
+}
+
+fn augment_prompt_with_knowledge(
+    prompt: models::ChatMessage,
+    knowledge_results: &knowledge::KnowledgeSearchResults,
+) -> Result<models::ChatMessage, String> {
+    let knowledge_text = knowledge::summarize_text_snippets(knowledge_results);
+    let knowledge_images = knowledge_results
+        .images
+        .iter()
+        .take(2)
+        .filter_map(|image| {
+            image_file_to_data_url(&image.asset_path, image.mime_type.as_deref())
+                .ok()
+                .map(|blob| models::ChatContentPart::Image { blob })
+        })
+        .collect::<Vec<_>>();
+    let knowledge_audio = knowledge::audio_prompt_asset(knowledge_results)
+        .map(|audio| models::ChatContentPart::Audio {
+            path: audio.asset_path.to_string_lossy().to_string(),
+        });
+
+    if knowledge_text.is_none() && knowledge_images.is_empty() && knowledge_audio.is_none() {
+        return Ok(prompt);
+    }
+
+    let mut prefixed_parts = Vec::new();
+    if let Some(text) = knowledge_text {
+        prefixed_parts.push(models::ChatContentPart::Text { text });
+    }
+    prefixed_parts.extend(knowledge_images);
+    if let Some(audio_part) = knowledge_audio {
+        prefixed_parts.push(audio_part);
+    }
+
+    match prompt.content {
+        models::ChatContent::Text(text) => {
+            prefixed_parts.push(models::ChatContentPart::Text { text });
+            Ok(models::ChatMessage {
+                role: prompt.role,
+                content: models::ChatContent::Parts(prefixed_parts),
+            })
+        }
+        models::ChatContent::Parts(mut parts) => {
+            prefixed_parts.append(&mut parts);
+            Ok(models::ChatMessage {
+                role: prompt.role,
+                content: models::ChatContent::Parts(prefixed_parts),
+            })
+        }
+    }
+}
+
+fn build_assistant_content_parts(
+    thinking: &str,
+    citations: &[knowledge::KnowledgeCitation],
+) -> Option<serde_json::Value> {
+    if thinking.trim().is_empty() && citations.is_empty() {
+        return None;
+    }
+
+    let mut payload = serde_json::Map::new();
+    if !thinking.trim().is_empty() {
+        payload.insert(
+            "thinking".to_string(),
+            serde_json::Value::String(thinking.to_string()),
+        );
+    }
+    if !citations.is_empty() {
+        payload.insert(
+            "sources".to_string(),
+            serde_json::to_value(citations).unwrap_or_else(|_| serde_json::json!([])),
+        );
+    }
+    Some(serde_json::Value::Object(payload))
+}
+
+fn image_file_to_data_url(path: &Path, provided_mime: Option<&str>) -> Result<String, String> {
+    let size_bytes = std::fs::metadata(path)
+        .map_err(|e| format!("Failed to inspect Knowledge image {}: {}", path.display(), e))?
+        .len();
+    if size_bytes > MAX_KNOWLEDGE_PROMPT_IMAGE_BYTES {
+        tracing::info!(
+            path = %path.display(),
+            size_bytes,
+            max_bytes = MAX_KNOWLEDGE_PROMPT_IMAGE_BYTES,
+            "Skipping oversized Knowledge image for prompt assembly"
+        );
+        return Err(format!(
+            "Knowledge image {} exceeds the prompt budget.",
+            path.display()
+        ));
+    }
+
+    let bytes = std::fs::read(path)
+        .map_err(|e| format!("Failed to read Knowledge image {}: {}", path.display(), e))?;
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let mime = provided_mime.unwrap_or(match extension.as_str() {
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        "svg" => "image/svg+xml",
+        _ => "image/png",
+    });
+    let encoded = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);
+    Ok(format!("data:{};base64,{}", mime, encoded))
 }
 
 #[tauri::command]
@@ -1333,94 +1462,72 @@ fn delete_session(state: State<'_, AppState>, session_id: String) -> Result<(), 
     Ok(())
 }
 
-// --- RAG Commands ---
+// --- Knowledge Commands ---
 
 #[tauri::command]
-async fn rag_ingest_file(
+async fn knowledge_ingest_file(
     state: State<'_, AppState>,
+    knowledge: State<'_, KnowledgeManager>,
+    app: tauri::AppHandle,
     file_path: String,
 ) -> Result<serde_json::Value, String> {
-    with_db(&state, |conn| {
-        rag::ingest_file(conn, &file_path).and_then(|result| {
-            serde_json::to_value(result)
-                .map_err(|e| format!("Failed to serialize RAG ingest result: {}", e))
-        })
-    })
+    let db_path = current_db_path(&state)?;
+    let result = knowledge::ingest_file(&knowledge, &db_path, Some(&app), &file_path).await?;
+    serde_json::to_value(result)
+        .map_err(|e| format!("Failed to serialize Knowledge ingest result: {}", e))
 }
 
 #[tauri::command]
-async fn rag_ingest_folder(
+async fn knowledge_ingest_url(
     state: State<'_, AppState>,
-    folder_path: String,
-    recursive: Option<bool>,
-) -> Result<serde_json::Value, String> {
-    with_db(&state, |conn| {
-        rag::ingest_folder(conn, &folder_path, recursive.unwrap_or(true)).and_then(|result| {
-            serde_json::to_value(result)
-                .map_err(|e| format!("Failed to serialize RAG ingest result: {}", e))
-        })
-    })
-}
-
-#[tauri::command]
-async fn rag_search(
-    state: State<'_, AppState>,
-    query: String,
-    top_k: Option<usize>,
-) -> Result<serde_json::Value, String> {
-    with_db(&state, |conn| {
-        rag::search(conn, &query, top_k.unwrap_or(5)).and_then(|result| {
-            serde_json::to_value(result)
-                .map_err(|e| format!("Failed to serialize RAG search result: {}", e))
-        })
-    })
-}
-
-#[tauri::command]
-async fn rag_list_documents(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
-    with_db(&state, |conn| {
-        rag::list_documents(conn).and_then(|result| {
-            serde_json::to_value(result)
-                .map_err(|e| format!("Failed to serialize RAG document list: {}", e))
-        })
-    })
-}
-
-#[tauri::command]
-async fn rag_delete_document(
-    state: State<'_, AppState>,
-    doc_id: String,
-) -> Result<serde_json::Value, String> {
-    with_db(&state, |conn| {
-        rag::delete_document(conn, &doc_id).and_then(|result| {
-            serde_json::to_value(result)
-                .map_err(|e| format!("Failed to serialize RAG delete result: {}", e))
-        })
-    })
-}
-
-#[tauri::command]
-async fn rag_stats(
-    state: State<'_, AppState>,
+    knowledge: State<'_, KnowledgeManager>,
     app: tauri::AppHandle,
+    url: String,
 ) -> Result<serde_json::Value, String> {
-    let storage_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("Failed to resolve app data directory: {}", e))?
-        .join("rag");
+    let db_path = current_db_path(&state)?;
+    let result = knowledge::ingest_url(&knowledge, &db_path, Some(&app), &url).await?;
+    serde_json::to_value(result)
+        .map_err(|e| format!("Failed to serialize Knowledge URL ingest result: {}", e))
+}
+
+#[tauri::command]
+fn knowledge_list_sources(
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
     with_db(&state, |conn| {
-        rag::stats(conn, &storage_dir).and_then(|result| {
+        knowledge::list_sources(conn).and_then(|result| {
             serde_json::to_value(result)
-                .map_err(|e| format!("Failed to serialize RAG stats: {}", e))
+                .map_err(|e| format!("Failed to serialize Knowledge source list: {}", e))
         })
     })
 }
 
 #[tauri::command]
-async fn set_rag_enabled(state: State<'_, AppState>, enabled: bool) -> Result<(), String> {
-    state.rag_enabled.store(enabled, Ordering::SeqCst);
-    Ok(())
+async fn knowledge_delete_source(
+    state: State<'_, AppState>,
+    knowledge: State<'_, KnowledgeManager>,
+    source_id: String,
+) -> Result<serde_json::Value, String> {
+    let db_path = current_db_path(&state)?;
+    let result = knowledge::delete_source(&knowledge, &db_path, &source_id).await?;
+    serde_json::to_value(result)
+        .map_err(|e| format!("Failed to serialize Knowledge delete result: {}", e))
+}
+
+#[tauri::command]
+async fn knowledge_stats(
+    state: State<'_, AppState>,
+    knowledge: State<'_, KnowledgeManager>,
+) -> Result<serde_json::Value, String> {
+    let db_path = current_db_path(&state)?;
+    let result = knowledge::stats(&knowledge, &db_path).await?;
+    serde_json::to_value(result)
+        .map_err(|e| format!("Failed to serialize Knowledge stats: {}", e))
+}
+
+#[tauri::command]
+fn get_knowledge_status(knowledge: State<'_, KnowledgeManager>) -> Result<knowledge::KnowledgeStatus, String> {
+    Ok(knowledge.status())
 }
 
 #[tauri::command]
@@ -2001,6 +2108,7 @@ fn unique_temp_file_path(temp_dir: &std::path::Path, name: &str) -> std::path::P
 mod tests {
     use super::*;
     use rusqlite::Connection;
+    use uuid::Uuid;
 
     fn session(id: &str) -> Session {
         Session {
@@ -2047,9 +2155,9 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(include_str!("../migrations/001_initial.sql"))
             .unwrap();
-        conn.execute_batch(include_str!("../migrations/002_rag.sql"))
-            .unwrap();
         conn.execute_batch(include_str!("../migrations/003_message_content_parts.sql"))
+            .unwrap();
+        conn.execute_batch(include_str!("../migrations/004_knowledge.sql"))
             .unwrap();
         conn
     }
@@ -2057,10 +2165,10 @@ mod tests {
     fn test_app_state(conn: Connection) -> AppState {
         AppState {
             db: Mutex::new(Some(conn)),
+            db_path: Mutex::new(None),
             current_session: Mutex::new(None),
             active_generation_session: Mutex::new(None),
             cancel_flag: AtomicBool::new(false),
-            rag_enabled: AtomicBool::new(false),
             tools_enabled: AtomicBool::new(false),
         }
     }
@@ -2236,6 +2344,85 @@ mod tests {
             Some(models::ChatContent::Parts(parts))
                 if matches!(parts.get(1), Some(models::ChatContentPart::Image { .. }))
         ));
+    }
+
+    #[test]
+    fn augment_prompt_with_knowledge_skips_oversized_images_but_keeps_text_context() {
+        let oversized_path = std::env::temp_dir().join(format!(
+            "friday-knowledge-oversized-{}.png",
+            Uuid::new_v4()
+        ));
+        let file = std::fs::File::create(&oversized_path).unwrap();
+        file.set_len(MAX_KNOWLEDGE_PROMPT_IMAGE_BYTES + 1).unwrap();
+
+        let results = knowledge::KnowledgeSearchResults {
+            citations: vec![knowledge::KnowledgeCitation {
+                source_id: "src-1".to_string(),
+                modality: knowledge::KnowledgeModality::Image,
+                display_name: "diagram.png".to_string(),
+                locator: oversized_path.to_string_lossy().to_string(),
+                score: 0.91,
+                chunk_index: None,
+                snippet: None,
+            }],
+            text_snippets: vec![knowledge::RetrievedTextSnippet {
+                citation: knowledge::KnowledgeCitation {
+                    source_id: "src-2".to_string(),
+                    modality: knowledge::KnowledgeModality::Text,
+                    display_name: "notes.md".to_string(),
+                    locator: "/tmp/notes.md".to_string(),
+                    score: 0.95,
+                    chunk_index: Some(0),
+                    snippet: Some("Friday keeps knowledge local.".to_string()),
+                },
+                snippet: "Friday keeps knowledge local.".to_string(),
+            }],
+            images: vec![knowledge::RetrievedImage {
+                citation: knowledge::KnowledgeCitation {
+                    source_id: "src-1".to_string(),
+                    modality: knowledge::KnowledgeModality::Image,
+                    display_name: "diagram.png".to_string(),
+                    locator: oversized_path.to_string_lossy().to_string(),
+                    score: 0.91,
+                    chunk_index: None,
+                    snippet: None,
+                },
+                asset_path: oversized_path.clone(),
+                mime_type: Some("image/png".to_string()),
+            }],
+            audio: None,
+        };
+
+        let augmented = augment_prompt_with_knowledge(
+            models::ChatMessage::text("user", "What should I know?"),
+            &results,
+        )
+        .unwrap();
+
+        match augmented.content {
+            models::ChatContent::Parts(parts) => {
+                assert!(parts.iter().any(|part| {
+                    matches!(
+                        part,
+                        models::ChatContentPart::Text { text }
+                            if text.contains("Relevant knowledge sources:")
+                                && text.contains("Friday keeps knowledge local.")
+                    )
+                }));
+                assert!(parts.iter().all(|part| {
+                    !matches!(part, models::ChatContentPart::Image { .. })
+                }));
+                assert!(parts.iter().any(|part| {
+                    matches!(
+                        part,
+                        models::ChatContentPart::Text { text } if text == "What should I know?"
+                    )
+                }));
+            }
+            other => panic!("expected parts prompt content, got {:?}", other),
+        }
+
+        let _ = std::fs::remove_file(&oversized_path);
     }
 
     #[test]
@@ -2484,10 +2671,13 @@ mod tests {
         let state = test_app_state(conn);
         let sidecar = SidecarManager::new();
         let searxng = SearXNGManager::new();
+        let knowledge = KnowledgeManager::new();
 
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let payload = runtime
-            .block_on(async { bootstrap_payload_inner(&state, &sidecar, &searxng).await })
+            .block_on(async {
+                bootstrap_payload_inner(&state, &sidecar, &searxng, &knowledge).await
+            })
             .unwrap();
 
         assert_eq!(payload.current_session.id, "session-a");

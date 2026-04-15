@@ -69,10 +69,12 @@ const webSearchStatus: WebSearchStatus = {
 const settings: AppSettings = {
   auto_start_backend: true,
   user_display_name: "Asha",
+  theme_mode: "light",
   chat: {
     reply_language: "english",
     max_tokens: 4096,
     web_assist_enabled: false,
+    knowledge_enabled: false,
     generation: {},
   },
 };
@@ -101,6 +103,10 @@ const bootstrapPayload: BootstrapPayload = {
   settings,
   backendStatus: backendStatus,
   webSearchStatus,
+  knowledgeStatus: {
+    state: "ready",
+    message: "Knowledge is ready.",
+  },
 };
 
 describe("useAppController", () => {
@@ -158,7 +164,7 @@ describe("useAppController", () => {
     );
   });
 
-  it("warms the backend after bootstrap when auto-start is enabled and the daemon is idle", async () => {
+  it("warms the backend after bootstrap even when legacy settings disabled auto-start", async () => {
     const readyBackendStatus: BackendStatus = {
       ...backendStatus,
       connected: false,
@@ -167,6 +173,10 @@ describe("useAppController", () => {
     };
     const readyBootstrapPayload: BootstrapPayload = {
       ...bootstrapPayload,
+      settings: {
+        ...bootstrapPayload.settings,
+        auto_start_backend: false,
+      },
       backendStatus: readyBackendStatus,
     };
 
@@ -474,6 +484,28 @@ describe("useAppController", () => {
     ).toBe("Persisted answer");
   });
 
+  it("updates knowledge status from lazy-load events", async () => {
+    const { result } = renderHook(() => useAppController());
+
+    await waitFor(() =>
+      expect(result.current.activeSession?.id).toBe("session-a"),
+    );
+
+    act(() => {
+      emitEvent("knowledge-status", {
+        state: "downloading_models",
+        message: "Preparing Knowledge text runtime.",
+      });
+    });
+
+    await waitFor(() =>
+      expect(result.current.knowledgeStatus).toEqual({
+        state: "downloading_models",
+        message: "Preparing Knowledge text runtime.",
+      }),
+    );
+  });
+
   it("buffers streamed tokens and preserves the assistant content", async () => {
     let resolveSend: (() => void) | undefined;
     invokeMock.mockImplementation(
@@ -738,12 +770,14 @@ describe("useAppController", () => {
 
   it("saves settings and refreshes backend state", async () => {
     const updatedSettings: AppSettings = {
-      auto_start_backend: false,
+      auto_start_backend: true,
       user_display_name: "Asha",
+      theme_mode: "light",
       chat: {
         reply_language: "hindi",
         max_tokens: 6144,
         web_assist_enabled: true,
+        knowledge_enabled: false,
         generation: {},
       },
     };
@@ -762,12 +796,14 @@ describe("useAppController", () => {
 
     await act(async () => {
       await result.current.saveAppSettings({
-        auto_start_backend: false,
+        auto_start_backend: true,
         user_display_name: "Asha",
+        theme_mode: "light",
         chat: {
           reply_language: "hindi",
           max_tokens: 6144,
           web_assist_enabled: true,
+          knowledge_enabled: false,
           generation: {},
         },
       });
@@ -781,20 +817,24 @@ describe("useAppController", () => {
     const firstSaved: AppSettings = {
       auto_start_backend: true,
       user_display_name: "Asha",
+      theme_mode: "light",
       chat: {
         reply_language: "hindi",
         max_tokens: 4096,
         web_assist_enabled: false,
+        knowledge_enabled: false,
         generation: {},
       },
     };
     const secondSaved: AppSettings = {
       auto_start_backend: true,
       user_display_name: "Asha",
+      theme_mode: "light",
       chat: {
         reply_language: "hindi",
         max_tokens: 8192,
         web_assist_enabled: true,
+        knowledge_enabled: false,
         generation: {},
       },
     };
@@ -825,20 +865,24 @@ describe("useAppController", () => {
       firstSavePromise = result.current.saveAppSettings({
         auto_start_backend: true,
         user_display_name: "Asha",
+        theme_mode: "light",
         chat: {
           reply_language: "hindi",
           max_tokens: 4096,
           web_assist_enabled: false,
+          knowledge_enabled: false,
           generation: {},
         },
       });
       secondSavePromise = result.current.saveAppSettings({
         auto_start_backend: true,
         user_display_name: "Asha",
+        theme_mode: "light",
         chat: {
           reply_language: "hindi",
           max_tokens: 8192,
           web_assist_enabled: true,
+          knowledge_enabled: false,
           generation: {},
         },
       });
@@ -918,20 +962,24 @@ describe("useAppController", () => {
       firstSavePromise = result.current.saveAppSettings({
         auto_start_backend: true,
         user_display_name: "Asha",
+        theme_mode: "light",
         chat: {
           reply_language: "english",
           max_tokens: 4096,
           web_assist_enabled: true,
+          knowledge_enabled: false,
           generation: {},
         },
       });
       secondSavePromise = result.current.saveAppSettings({
         auto_start_backend: true,
         user_display_name: "Asha",
+        theme_mode: "light",
         chat: {
           reply_language: "english",
           max_tokens: 4096,
           web_assist_enabled: false,
+          knowledge_enabled: false,
           generation: {
             thinking_enabled: true,
           },
@@ -962,10 +1010,12 @@ describe("useAppController", () => {
       input: {
         auto_start_backend: true,
         user_display_name: "Asha",
+        theme_mode: "light",
         chat: {
           reply_language: "english",
           max_tokens: 4096,
           web_assist_enabled: true,
+          knowledge_enabled: false,
           generation: {
             thinking_enabled: true,
           },
@@ -1260,6 +1310,88 @@ describe("useAppController", () => {
         ([command, payload]) =>
           command === "save_settings" &&
           payload?.input?.chat?.web_assist_enabled === true,
+      ),
+    ).toBe(true);
+  });
+
+  it("persists the Knowledge toggle through saved settings", async () => {
+    const savedSettings: AppSettings = {
+      ...settings,
+      chat: {
+        ...settings.chat,
+        knowledge_enabled: true,
+      },
+    };
+
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "bootstrap_app") return Promise.resolve(bootstrapPayload);
+      if (command === "save_settings") return Promise.resolve(savedSettings);
+      if (command === "detect_backend") return Promise.resolve(backendStatus);
+      return Promise.resolve(undefined);
+    });
+
+    const { result } = renderHook(() => useAppController());
+
+    await waitFor(() =>
+      expect(result.current.activeSession?.id).toBe("session-a"),
+    );
+
+    await act(async () => {
+      await result.current.toggleKnowledge();
+    });
+
+    expect(result.current.knowledgeEnabled).toBe(true);
+    expect(
+      invokeMock.mock.calls.some(
+        ([command, payload]) =>
+          command === "save_settings" &&
+          payload?.input?.chat?.knowledge_enabled === true,
+      ),
+    ).toBe(true);
+  });
+
+  it("sends the current turn with Knowledge when the toggle is enabled", async () => {
+    const payload: BootstrapPayload = {
+      ...bootstrapPayload,
+      settings: {
+        ...settings,
+        chat: {
+          ...settings.chat,
+          knowledge_enabled: true,
+        },
+      },
+    };
+
+    invokeMock.mockImplementation((command: string, args?: { sessionId?: string }) => {
+      if (command === "bootstrap_app") return Promise.resolve(payload);
+      if (command === "detect_backend") return Promise.resolve(backendStatus);
+      if (command === "send_message") return Promise.resolve(undefined);
+      if (command === "list_sessions") return Promise.resolve(bootstrapPayload.sessions);
+      if (command === "select_session" && args?.sessionId === "session-a") {
+        return Promise.resolve({
+          session: bootstrapPayload.currentSession,
+          messages: [],
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+
+    const { result } = renderHook(() => useAppController());
+
+    await waitFor(() =>
+      expect(result.current.activeSession?.id).toBe("session-a"),
+    );
+
+    await act(async () => {
+      await result.current.sendMessage("Use local knowledge");
+    });
+
+    expect(
+      invokeMock.mock.calls.some(
+        ([command, payload]) =>
+          command === "send_message" &&
+          payload?.request?.sessionId === "session-a" &&
+          payload?.request?.knowledgeEnabled === true,
       ),
     ).toBe(true);
   });

@@ -244,6 +244,36 @@ describe("MessageBubble", () => {
     expect(screen.getByText("Live reasoning")).not.toBeNull();
   });
 
+  it("renders stored Knowledge sources in a collapsible section", () => {
+    render(
+      <MessageBubble
+        message={{
+          id: "m5",
+          role: "assistant",
+          content: "Grounded answer",
+          content_parts: {
+            sources: [
+              {
+                sourceId: "source-1",
+                modality: "text",
+                displayName: "Product spec.md",
+                locator: "/tmp/Product spec.md",
+                score: 0.92,
+                chunkIndex: 0,
+                snippet: "A concise grounded excerpt.",
+              },
+            ],
+          },
+        }}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: /show sources/i })).not.toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /show sources/i }));
+    expect(screen.getByText("Product spec.md")).not.toBeNull();
+    expect(screen.getByText("A concise grounded excerpt.")).not.toBeNull();
+  });
+
   it("treats unchanged completed bubbles as memo-stable while streamed content changes are not", () => {
     expect(
       areMessageBubblePropsEqual(

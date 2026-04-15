@@ -22,10 +22,12 @@ vi.mock("@tauri-apps/api/event", () => ({
 const settings: AppSettings = {
   auto_start_backend: true,
   user_display_name: "Asha",
+  theme_mode: "light",
   chat: {
     reply_language: "english",
     max_tokens: 4096,
     web_assist_enabled: false,
+    knowledge_enabled: false,
     generation: {},
   },
 };
@@ -108,13 +110,16 @@ describe("SettingsPanel", () => {
         onSaveSettings={async (input) => ({
           auto_start_backend: input.auto_start_backend,
           user_display_name: input.user_display_name,
+          theme_mode: input.theme_mode,
           chat: input.chat,
         })}
       />,
     );
 
     expect(screen.getByText("Settings")).not.toBeNull();
-    expect(screen.getByText("Conversation")).not.toBeNull();
+    expect(
+      screen.getByRole("heading", { level: 3, name: "Conversation" }),
+    ).not.toBeNull();
 
     await waitFor(() =>
       expect(screen.getByText("Gemma 4 E2B")).not.toBeNull(),
@@ -151,6 +156,7 @@ describe("SettingsPanel", () => {
         onSaveSettings={async (input) => ({
           auto_start_backend: input.auto_start_backend,
           user_display_name: input.user_display_name,
+          theme_mode: input.theme_mode,
           chat: input.chat,
         })}
       />,
@@ -207,6 +213,7 @@ describe("SettingsPanel", () => {
         onSaveSettings={async (input) => ({
           auto_start_backend: input.auto_start_backend,
           user_display_name: input.user_display_name,
+          theme_mode: input.theme_mode,
           chat: input.chat,
         })}
       />,
@@ -247,16 +254,19 @@ describe("SettingsPanel", () => {
     const customSettings: AppSettings = {
       auto_start_backend: true,
       user_display_name: "Asha",
+      theme_mode: "light",
       chat: {
         reply_language: "english",
         max_tokens: 6144,
         web_assist_enabled: false,
+        knowledge_enabled: false,
         generation: {},
       },
     };
     const onSaveSettings = vi.fn(async (input: AppSettingsInput) => ({
       auto_start_backend: input.auto_start_backend,
       user_display_name: input.user_display_name,
+      theme_mode: input.theme_mode,
       chat: input.chat,
     }));
 
@@ -284,19 +294,22 @@ describe("SettingsPanel", () => {
     expect(onSaveSettings.mock.calls[0]?.[0]).toEqual({
       auto_start_backend: true,
       user_display_name: "Asha",
+      theme_mode: "light",
       chat: {
         reply_language: "hindi",
         max_tokens: 6144,
         web_assist_enabled: false,
+        knowledge_enabled: false,
         generation: {},
       },
     });
   });
 
-  it("persists the startup warmup setting", async () => {
+  it("persists the selected appearance mode", async () => {
     const onSaveSettings = vi.fn(async (input: AppSettingsInput) => ({
       auto_start_backend: input.auto_start_backend,
       user_display_name: input.user_display_name,
+      theme_mode: input.theme_mode,
       chat: input.chat,
     }));
 
@@ -312,18 +325,18 @@ describe("SettingsPanel", () => {
       />,
     );
 
-    fireEvent.click(
-      screen.getByRole("switch", { name: /pre-warm local model on startup/i }),
-    );
+    fireEvent.click(screen.getByRole("radio", { name: "Dark" }));
 
     await waitFor(() => expect(onSaveSettings).toHaveBeenCalledTimes(1));
     expect(onSaveSettings.mock.calls[0]?.[0]).toEqual({
-      auto_start_backend: false,
+      auto_start_backend: true,
       user_display_name: "Asha",
+      theme_mode: "dark",
       chat: {
         reply_language: "english",
         max_tokens: 4096,
         web_assist_enabled: false,
+        knowledge_enabled: false,
         generation: {},
       },
     });
@@ -353,6 +366,7 @@ describe("SettingsPanel", () => {
         onSaveSettings={async (input) => ({
           auto_start_backend: input.auto_start_backend,
           user_display_name: input.user_display_name,
+          theme_mode: input.theme_mode,
           chat: input.chat,
         })}
       />,

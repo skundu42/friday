@@ -13,11 +13,11 @@ interface AppLogoProps {
 export default function AppLogo({
   size,
   alt = "Friday",
-  borderColor = "#2C2C2C",
-  borderWidth = 2,
-  borderRadius = "50%",
-  background = "#FFFFFF",
-  padding = 4,
+  borderColor = "rgba(46, 76, 59, 0.16)",
+  borderWidth = 1,
+  borderRadius = 18,
+  background = "var(--friday-surface-strong)",
+  padding = 6,
 }: AppLogoProps) {
   return (
     <img

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Avatar, Button, Input, Select, Space, Typography, Tag } from "antd";
+import { Button, Input, Select, Tag, Typography } from "antd";
 import {
   SendOutlined,
   StopOutlined,
@@ -11,6 +11,7 @@ import {
   FileImageOutlined,
   LoadingOutlined,
   GlobalOutlined,
+  DatabaseOutlined,
   MenuOutlined,
 } from "@ant-design/icons";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -20,6 +21,7 @@ import AppLogo from "./AppLogo";
 import type {
   BackendStatus,
   FileAttachment,
+  KnowledgeStatus,
   Message,
   ReplyLanguage,
   WebSearchStatus,
@@ -111,6 +113,35 @@ function userFacingWebSearchStatusMessage(
   return null;
 }
 
+function userFacingKnowledgeStatusMessage(
+  knowledgeAvailable: boolean,
+  knowledgeEnabled: boolean,
+  knowledgeStatus: KnowledgeStatus | null,
+): string | null {
+  if (!knowledgeAvailable) {
+    return knowledgeStatus?.message ?? "Knowledge is unavailable.";
+  }
+
+  if (!knowledgeEnabled) {
+    return null;
+  }
+
+  switch (knowledgeStatus?.state) {
+    case "needs_models":
+      return "Knowledge models will download on first use.";
+    case "downloading_models":
+      return knowledgeStatus.message || "Preparing Knowledge models…";
+    case "indexing":
+      return knowledgeStatus.message || "Knowledge is indexing sources…";
+    case "error":
+      return knowledgeStatus.message || "Knowledge is unavailable.";
+    case "ready":
+      return "Grounding this reply against your local library.";
+    default:
+      return knowledgeStatus?.message ?? null;
+  }
+}
+
 interface ChatPaneProps {
   messages: Message[];
   isGenerating: boolean;
@@ -129,12 +160,16 @@ interface ChatPaneProps {
   ) => Promise<void> | void;
   onCancelGeneration: () => Promise<void> | void;
   webSearchEnabled?: boolean;
+  knowledgeEnabled?: boolean;
   thinkingEnabled?: boolean;
   webSearchAvailable?: boolean;
   webSearchStatus?: WebSearchStatus | null;
+  knowledgeAvailable?: boolean;
+  knowledgeStatus?: KnowledgeStatus | null;
   thinkingAvailable?: boolean;
   audioInputAvailable?: boolean;
   onToggleWebSearch?: () => void;
+  onToggleKnowledge?: () => void;
   onToggleThinking?: () => void;
 }
 
@@ -205,7 +240,7 @@ function humanizeBackendState(state?: string) {
 function backendStatusTone(backendStatus: BackendStatus | null) {
   if (backendStatus?.connected) return "success";
   if (backendStatus?.state === "ready") return "processing";
-  return "default";
+  return "danger";
 }
 
 export default function ChatPane({
@@ -223,12 +258,16 @@ export default function ChatPane({
   onSendMessage,
   onCancelGeneration,
   webSearchEnabled = false,
+  knowledgeEnabled = false,
   thinkingEnabled = false,
   webSearchAvailable = false,
   webSearchStatus = null,
+  knowledgeAvailable = false,
+  knowledgeStatus = null,
   thinkingAvailable = false,
   audioInputAvailable = false,
   onToggleWebSearch,
+  onToggleKnowledge,
   onToggleThinking,
 }: ChatPaneProps) {
   const [input, setInput] = useState("");
@@ -831,6 +870,7 @@ export default function ChatPane({
       : undefined
     : undefined;
   const isWebSearchActive = webSearchAvailable && webSearchEnabled;
+  const isKnowledgeActive = knowledgeAvailable && knowledgeEnabled;
   const isThinkingActive = thinkingAvailable && thinkingEnabled;
   const readyAttachments = attachments.filter((a) => a.status === "ready");
   const hasLoadingAttachments = attachments.some((a) => a.status === "loading");
@@ -839,7 +879,7 @@ export default function ChatPane({
     ? "Connected"
     : humanizeBackendState(backendStatus?.state);
   const headerSubtitle = activeSessionTitle
-    ? `${activeSessionTitle} · ${backendLabel}`
+    ? `Friday · ${backendLabel}`
     : backendLabel;
   const privacyStatus = isWebSearchActive
     ? "Web enabled for this message; Friday may contact external sites"
@@ -853,39 +893,24 @@ export default function ChatPane({
     isWebSearchActive,
     webSearchStatus,
   );
+  const knowledgeStatusMessage = userFacingKnowledgeStatusMessage(
+    knowledgeAvailable,
+    isKnowledgeActive,
+    knowledgeStatus,
+  );
 
   return (
     <div
       ref={dropZoneRef}
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        height: "100%",
-        position: "relative",
-      }}
+      className="chat-pane"
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
     >
-      {/* Drag overlay */}
       {isDragOver && (
-        <div
-          style={{
-            position: "absolute",
-            inset: 0,
-            zIndex: 1000,
-            background: "rgba(82, 196, 26, 0.08)",
-            border: "3px dashed #52C41A",
-            borderRadius: 12,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            flexDirection: "column",
-            gap: 12,
-          }}
-        >
-          <div style={{ fontSize: 48 }}>📎</div>
-          <Text style={{ fontSize: 18, fontWeight: 600, color: "#52C41A" }}>
+        <div className="chat-drop-overlay surface-card surface-card--accent">
+          <div className="chat-drop-overlay__icon">📎</div>
+          <Text style={{ fontSize: 18, fontWeight: 600, color: "var(--friday-green)" }}>
             Drop files here to add to context
           </Text>
           <Text type="secondary" style={{ fontSize: 13 }}>
@@ -894,112 +919,46 @@ export default function ChatPane({
         </div>
       )}
 
-      <div
-        style={{
-          padding: "14px 20px",
-          borderBottom: "3px solid #2C2C2C",
-          background: "#FFFFFF",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          gap: 16,
-          flexWrap: "wrap",
-        }}
-      >
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 12,
-            minWidth: 0,
-            flex: "1 1 260px",
-          }}
-        >
+      <div className="chat-topbar">
+        <div className="chat-topbar__identity">
           <Button
             icon={<MenuOutlined />}
             onClick={onToggleSidebar}
             aria-label={isSidebarOpen ? "Hide sidebar" : "Show sidebar"}
-            style={{
-              borderRadius: 12,
-              border: "2px solid #2C2C2C",
-              boxShadow: "2px 2px 0 #2C2C2C",
-              height: 40,
-              width: 40,
-              minWidth: 40,
-              display: "inline-flex",
-              alignItems: "center",
-              justifyContent: "center",
-            }}
+            className="friday-icon-button"
           />
-          <AppLogo size={36} />
-          <div style={{ minWidth: 0 }}>
-            <Text strong style={{ display: "block", fontSize: 16 }}>
-              Friday
+          <AppLogo size={40} />
+          <div className="chat-topbar__copy">
+            <Text strong className="chat-topbar__title">
+              {activeSessionTitle}
             </Text>
-            <Text
-              type="secondary"
-              style={{
-                display: "block",
-                fontSize: 12,
-                whiteSpace: "nowrap",
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-              }}
-            >
+            <Text type="secondary" className="chat-topbar__subtitle">
               {headerSubtitle}
             </Text>
           </div>
         </div>
 
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "flex-end",
-            gap: 8,
-            flexWrap: "wrap",
-            flex: "1 1 360px",
-          }}
-        >
+        <div className="chat-topbar__meta">
           <Select
             size="small"
             value={replyLanguage}
             onChange={onLanguageChange}
             options={REPLY_LANGUAGE_OPTIONS}
-            style={{ width: 132 }}
+            className="friday-compact-select"
             aria-label="Reply language"
           />
-          <Tag
-            color={backendStatusTone(backendStatus)}
-            style={{
-              margin: 0,
-              minHeight: 30,
-              display: "inline-flex",
-              alignItems: "center",
-              paddingInline: 10,
-              border: "2px solid #2C2C2C",
-              borderRadius: 999,
-              fontWeight: 600,
-            }}
-          >
+          <span className={`friday-status-pill friday-status-pill--${backendStatusTone(backendStatus)}`}>
             {backendLabel}
-          </Tag>
+          </span>
           {isWebSearchActive ? (
-            <Tag
-              color="warning"
-              style={{
-                margin: 0,
-                minHeight: 30,
-                display: "inline-flex",
-                alignItems: "center",
-                paddingInline: 10,
-                border: "2px solid #2C2C2C",
-                borderRadius: 999,
-                fontWeight: 600,
-              }}
-            >
-              Web On
-            </Tag>
+            <span className="friday-status-pill friday-status-pill--warning">
+              Web on
+            </span>
+          ) : null}
+          {isKnowledgeActive ? (
+            <span className="friday-status-pill friday-status-pill--success">
+              Knowledge on
+            </span>
           ) : null}
         </div>
       </div>
@@ -1007,39 +966,21 @@ export default function ChatPane({
       <div
         ref={messagesViewportRef}
         onScroll={handleMessagesScroll}
-        style={{ flex: 1, overflowY: "auto", padding: "24px 24px 12px" }}
+        className="chat-thread-scroll"
       >
-        <div style={{ maxWidth: 860, margin: "0 auto" }}>
+        <div className="chat-thread">
           {!hasUserMessages ? (
-            <div
-              style={{
-                marginBottom: 20,
-                background: "#FFFFFF",
-                border: "3px solid #2C2C2C",
-                boxShadow: "4px 4px 0 #2C2C2C",
-                borderRadius: 20,
-                padding: "24px 22px",
-              }}
-            >
-              <Text strong style={{ display: "block", fontSize: 18, marginBottom: 8 }}>
+            <div className="chat-empty-state surface-card">
+              <Text strong className="chat-empty-state__title">
                 {userDisplayName
                   ? `Welcome back, ${userDisplayName}.`
                   : "Welcome to Friday."}
               </Text>
-              <Text
-                type="secondary"
-                style={{ display: "block", fontSize: 14, lineHeight: 1.6 }}
-              >
-                How can I help you today?
+              <Text type="secondary" className="chat-empty-state__body">
+                Ask Friday to plan work, summarize files, or explain something in
+                clear language without leaving your device by default.
               </Text>
-              <div
-                style={{
-                  display: "flex",
-                  flexWrap: "wrap",
-                  gap: 10,
-                  marginTop: 18,
-                }}
-              >
+              <div className="chat-empty-state__suggestions">
                 {[
                   "Help me plan today’s work.",
                   "Summarize the attached document.",
@@ -1048,12 +989,7 @@ export default function ChatPane({
                   <Button
                     key={suggestion}
                     onClick={() => setInput(suggestion)}
-                    style={{
-                      borderRadius: 999,
-                      border: "2px solid #2C2C2C",
-                      boxShadow: "2px 2px 0 #2C2C2C",
-                      height: 38,
-                    }}
+                    className="suggestion-chip"
                   >
                     {suggestion}
                   </Button>
@@ -1072,21 +1008,11 @@ export default function ChatPane({
           ))}
 
           {waitingForFirstToken && (
-            <div style={{ textAlign: "center", padding: "20px 0" }}>
-              <Space>
-                <div
-                  style={{
-                    width: 8,
-                    height: 8,
-                    borderRadius: "50%",
-                    background: "#52C41A",
-                    animation: "pulse 1s infinite",
-                  }}
-                />
-                <Text type="secondary">
-                  {generationStatus ?? "Friday is thinking..."}
-                </Text>
-              </Space>
+            <div className="chat-loading">
+              <div className="chat-loading__dot" />
+              <Text type="secondary">
+                {generationStatus ?? "Friday is thinking..."}
+              </Text>
             </div>
           )}
 
@@ -1094,27 +1020,10 @@ export default function ChatPane({
         </div>
       </div>
 
-      <div
-        style={{
-          padding: "16px 24px",
-          borderTop: "3px solid #2C2C2C",
-          background: "#FFFFFF",
-        }}
-      >
-        <div style={{ maxWidth: 860, margin: "0 auto" }}>
+      <div className="chat-composer-shell">
+        <div className="chat-composer surface-card">
           {attachments.length > 0 && (
-            <div
-              style={{
-                display: "flex",
-                flexWrap: "wrap",
-                gap: 8,
-                marginBottom: 12,
-                padding: "8px 12px",
-                background: isDragOver ? "#F6FFED" : "#FAFAFA",
-                border: `2px solid ${isDragOver ? "#52C41A" : "#E8E8E8"}`,
-                borderRadius: 12,
-              }}
-            >
+            <div className="chat-composer__attachments">
               {attachments.map((att) => (
                 <Tag
                   key={att.path}
@@ -1128,7 +1037,7 @@ export default function ChatPane({
                       <LoadingOutlined style={{ fontSize: 10 }} />
                     ) : (
                       <CloseCircleFilled
-                        style={{ fontSize: 12, color: "#999" }}
+                        style={{ fontSize: 12, color: "var(--friday-text-muted)" }}
                       />
                     )
                   }
@@ -1140,39 +1049,13 @@ export default function ChatPane({
                         ? "processing"
                         : "default"
                   }
-                  style={{
-                    border: "2px solid #2C2C2C",
-                    borderRadius: 8,
-                    padding: "4px 8px",
-                    margin: 0,
-                    display: "inline-flex",
-                    alignItems: "center",
-                    gap: 4,
-                    background:
-                      att.status === "error"
-                        ? "#FFF2F0"
-                        : att.status === "loading"
-                          ? "#E6F4FF"
-                          : att.mimeType.startsWith("image/")
-                            ? "#F6FFED"
-                            : "#FFF",
-                    textDecoration:
-                      att.status === "error" ? "line-through" : "none",
-                    opacity: att.status === "error" ? 0.6 : 1,
-                  }}
+                  className={`attachment-tag attachment-tag--${att.status}`}
                 >
-                  <span
-                    style={{
-                      maxWidth: 120,
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      whiteSpace: "nowrap",
-                    }}
-                  >
+                  <span className="attachment-tag__label">
                     {att.name}
                   </span>
                   {att.sizeBytes > 0 && (
-                    <span style={{ fontSize: 10, color: "#999" }}>
+                    <span className="attachment-tag__meta">
                       {formatFileSize(att.sizeBytes)}
                       {att.status === "loading"
                         ? " · Loading"
@@ -1186,57 +1069,32 @@ export default function ChatPane({
             </div>
           )}
 
-          <div
-            style={{
-              display: "flex",
-              flexWrap: "wrap",
-              alignItems: "center",
-              gap: 8,
-              marginBottom: 8,
-            }}
-          >
+          <div className="chat-composer__toolbar">
+            <div className="chat-composer__toggles">
             <Button
               icon={<GlobalOutlined />}
               onClick={() => onToggleWebSearch?.()}
               disabled={!webSearchAvailable}
               aria-pressed={isWebSearchActive}
-              style={{
-                borderRadius: 999,
-                border: `2px solid ${isWebSearchActive ? "#52C41A" : "#2C2C2C"
-                  }`,
-                boxShadow: "1px 1px 0 #2C2C2C",
-                height: 32,
-                paddingInline: 10,
-                display: "inline-flex",
-                alignItems: "center",
-                justifyContent: "center",
-                background: isWebSearchActive ? "#F6FFED" : "#FFF",
-                color: isWebSearchActive ? "#52C41A" : "#999",
-                opacity: webSearchAvailable ? 1 : 0.5,
-                fontSize: 12,
-              }}
+              className={`composer-toggle${isWebSearchActive ? " is-active" : ""}`}
             >
               Web
+            </Button>
+            <Button
+              icon={<DatabaseOutlined />}
+              onClick={() => onToggleKnowledge?.()}
+              disabled={!knowledgeAvailable}
+              aria-pressed={isKnowledgeActive}
+              className={`composer-toggle${isKnowledgeActive ? " is-active" : ""}`}
+            >
+              Knowledge
             </Button>
             <Button
               icon={<ThunderboltOutlined />}
               onClick={() => onToggleThinking?.()}
               disabled={!thinkingAvailable}
               aria-pressed={isThinkingActive}
-              style={{
-                borderRadius: 999,
-                border: `2px solid ${isThinkingActive ? "#52C41A" : "#2C2C2C"}`,
-                boxShadow: "1px 1px 0 #2C2C2C",
-                height: 32,
-                paddingInline: 10,
-                display: "inline-flex",
-                alignItems: "center",
-                justifyContent: "center",
-                background: isThinkingActive ? "#F6FFED" : "#FFF",
-                color: isThinkingActive ? "#52C41A" : "#999",
-                opacity: thinkingAvailable ? 1 : 0.5,
-                fontSize: 12,
-              }}
+              className={`composer-toggle${isThinkingActive ? " is-active" : ""}`}
             >
               Think
             </Button>
@@ -1245,49 +1103,34 @@ export default function ChatPane({
               onClick={() => void handleToggleRecording()}
               disabled={!audioRecordingSupported}
               aria-pressed={isRecordingAudio}
-              style={{
-                borderRadius: 999,
-                border: `2px solid ${isRecordingAudio ? "#FF4D4F" : "#2C2C2C"}`,
-                boxShadow: "1px 1px 0 #2C2C2C",
-                height: 32,
-                paddingInline: 10,
-                display: "inline-flex",
-                alignItems: "center",
-                justifyContent: "center",
-                background: isRecordingAudio ? "#FFF1F0" : "#FFF",
-                color: isRecordingAudio ? "#FF4D4F" : "#999",
-                opacity: audioRecordingSupported ? 1 : 0.5,
-                fontSize: 12,
-              }}
+              className={`composer-toggle${isRecordingAudio ? " is-recording" : ""}`}
             >
               {isRecordingAudio ? "Recording" : "Voice"}
             </Button>
-            {audioError ? (
-              <Text type="danger" style={{ fontSize: 12 }}>
-                {audioError}
-              </Text>
-            ) : null}
+            </div>
+
+            <div className="chat-composer__hint">
+              {isGenerating ? (
+                <>
+                  <span className="chat-loading__dot" />
+                  <span>{generationStatus ?? "Friday is thinking..."}</span>
+                </>
+              ) : (
+                <span>
+                  {readyAttachments.length > 0
+                    ? `${readyAttachments.length} item${readyAttachments.length === 1 ? "" : "s"} ready`
+                    : "Shift+Enter for a new line"}
+                </span>
+              )}
+            </div>
           </div>
 
-          <div style={{ display: "flex", gap: 10, alignItems: "flex-end" }}>
+          <div className="chat-composer__input-row">
             <Button
               icon={<PlusOutlined />}
               onClick={() => void handlePickFile()}
               aria-label="Attach files"
-              style={{
-                borderRadius: 12,
-                border: "2px solid #2C2C2C",
-                boxShadow: "2px 2px 0 #2C2C2C",
-                height: 44,
-                width: 44,
-                minWidth: 44,
-                paddingInline: 0,
-                flexShrink: 0,
-                display: "inline-flex",
-                alignItems: "center",
-                justifyContent: "center",
-                background: "#FFF",
-              }}
+              className="friday-icon-button"
             />
             <TextArea
               value={input}
@@ -1299,12 +1142,8 @@ export default function ChatPane({
                   : "Ask Friday anything..."
               }
               autoSize={{ minRows: 1, maxRows: 4 }}
-              style={{
-                flex: 1,
-                borderRadius: 14,
-                border: "2px solid #2C2C2C",
-                paddingBlock: 10,
-              }}
+              className="chat-composer__textarea"
+              style={{ flex: 1 }}
             />
 
             {isGenerating ? (
@@ -1312,14 +1151,7 @@ export default function ChatPane({
                 icon={<StopOutlined />}
                 danger
                 onClick={() => void handleCancel()}
-                style={{
-                  borderRadius: 12,
-                  border: "2px solid #2C2C2C",
-                  boxShadow: "2px 2px 0 #2C2C2C",
-                  height: 44,
-                  minWidth: 80,
-                  flexShrink: 0,
-                }}
+                className="chat-composer__stop"
               >
                 Stop
               </Button>
@@ -1332,46 +1164,25 @@ export default function ChatPane({
                   hasLoadingAttachments ||
                   (!input.trim() && readyAttachments.length === 0)
                 }
-                style={{
-                  borderRadius: 12,
-                  border: "2px solid #2C2C2C",
-                  boxShadow: "2px 2px 0 #2C2C2C",
-                  height: 44,
-                  minWidth: 80,
-                  flexShrink: 0,
-                  background: "#52C41A",
-                }}
+                className="primary-action chat-composer__send"
               >
                 Send
               </Button>
             )}
           </div>
 
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              gap: 12,
-              flexWrap: "wrap",
-              marginTop: 8,
-              fontSize: 11,
-              color: "#999",
-            }}
-          >
+          <div className="chat-composer__footnotes">
             <span>{privacyStatus}</span>
             {webSearchStatusMessage ? <span>{webSearchStatusMessage}</span> : null}
-            {capabilityStatus ? <span>{capabilityStatus}</span> : null}
+            {knowledgeStatusMessage ? <span>{knowledgeStatusMessage}</span> : null}
+            {capabilityStatus ? (
+              <span className="is-danger">{capabilityStatus}</span>
+            ) : null}
+            {audioError ? <span className="is-danger">{audioError}</span> : null}
             <span>{isRecordingAudio ? "Recording…" : "Enter to send"}</span>
           </div>
         </div>
       </div>
-
-      <style>{`
-        @keyframes pulse {
-          0%, 100% { opacity: 1; }
-          50% { opacity: 0.3; }
-        }
-      `}</style>
     </div>
   );
 }
