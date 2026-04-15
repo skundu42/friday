@@ -140,6 +140,13 @@ function normalizeChatErrorPayload(
   return payload;
 }
 
+function hasOwnPayloadField<K extends string>(
+  payload: object,
+  key: K,
+): payload is Record<K, unknown> {
+  return Object.prototype.hasOwnProperty.call(payload, key);
+}
+
 function makeAssistantMessage(sessionId: string, content: string): Message {
   return {
     id: makeId(),
@@ -457,6 +464,56 @@ export function useAppController() {
     bufferedThoughtTokenRef.current = "";
   };
 
+  const applyCompletedAssistantPayload = (payload: ChatDonePayload) => {
+    const pendingId = pendingAssistantIdRef.current;
+    if (!pendingId) return;
+
+    const hasFinalContent =
+      typeof payload.content === "string" ||
+      hasOwnPayloadField(payload, "content");
+    const hasFinalContentParts = hasOwnPayloadField(payload, "contentParts");
+    if (!hasFinalContent && !hasFinalContentParts) {
+      return;
+    }
+
+    setMessages((previous) => {
+      const existingIndex = previous.findIndex((message) => message.id === pendingId);
+      if (existingIndex === -1) {
+        const sessionId =
+          pendingSessionIdRef.current ??
+          activeSessionRef.current?.id ??
+          previous[previous.length - 1]?.session_id ??
+          "local-session";
+        return [
+          ...previous,
+          {
+            id: pendingId,
+            session_id: sessionId,
+            role: "assistant",
+            content: typeof payload.content === "string" ? payload.content : "",
+            content_parts: hasFinalContentParts ? payload.contentParts : undefined,
+            created_at: new Date().toISOString(),
+          },
+        ];
+      }
+
+      const nextMessages = previous.slice();
+      const existing = nextMessages[existingIndex];
+      nextMessages[existingIndex] = {
+        ...existing,
+        content: hasFinalContent
+          ? typeof payload.content === "string"
+            ? payload.content
+            : ""
+          : existing.content,
+        content_parts: hasFinalContentParts
+          ? payload.contentParts
+          : existing.content_parts,
+      };
+      return nextMessages;
+    });
+  };
+
   const clearPendingGenerationState = () => {
     clearBufferedTokens();
     pendingAssistantIdRef.current = null;
@@ -661,10 +718,16 @@ export function useAppController() {
       setKnowledgeStatus(
         payload.knowledgeStatus ?? unavailableKnowledgeStatus(),
       );
-      await Promise.all([
+      const [inventoryResult, knowledgeResult] = await Promise.allSettled([
         refreshModelInventory(),
         refreshKnowledge({ includeStatus: false }),
       ]);
+      if (inventoryResult.status === "rejected") {
+        console.warn("refreshModelInventory during bootstrap failed:", inventoryResult.reason);
+      }
+      if (knowledgeResult.status === "rejected") {
+        console.warn("refreshKnowledge during bootstrap failed:", knowledgeResult.reason);
+      }
       void warmBackendIfNeeded(payload.backendStatus);
       if (
         payload.backendStatus.connected &&
@@ -720,6 +783,7 @@ export function useAppController() {
         }
 
         flushBufferedTokens();
+        applyCompletedAssistantPayload(event.payload);
         setIsGenerating(false);
         setGenerationStatus(null);
         setCurrentModel(formatModelLabel(event.payload.model));
@@ -1063,7 +1127,11 @@ export function useAppController() {
           desiredSettingsRef.current = savedInput;
           applySavedSettingsState(saved);
         }
-        await refreshBackendStatus({ includeModelInventory: false });
+        try {
+          await refreshBackendStatus({ includeModelInventory: false });
+        } catch (error) {
+          console.warn("refreshBackendStatus after save_settings failed:", error);
+        }
         return saved;
       });
 

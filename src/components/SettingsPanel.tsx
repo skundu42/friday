@@ -43,6 +43,11 @@ const REPLY_LANGUAGE_OPTIONS: { label: string; value: ReplyLanguage }[] = [
   { label: "Tamil", value: "tamil" },
   { label: "Punjabi", value: "punjabi" },
 ];
+type SettingsOverviewItem = {
+  label: string;
+  value: string;
+  meta?: string;
+};
 
 function coerceMaxTokens(value: unknown) {
   if (typeof value !== "number" || !Number.isFinite(value)) {
@@ -340,21 +345,18 @@ export default function SettingsPanel({
   const isCustomTokenValue = !TOKEN_PRESETS.includes(
     maxTokens as (typeof TOKEN_PRESETS)[number],
   );
-  const settingsOverview = [
+  const settingsOverview: SettingsOverviewItem[] = [
     {
       label: "Active model",
       value: displayNameForModelId(activeModelId),
-      meta: `${backendStatus.total_ram_gb.toFixed(1)} GB system RAM`,
     },
     {
       label: "Reply defaults",
       value: labelForReplyLanguage(replyLanguage),
-      meta: formatTokenCount(maxTokens),
     },
     {
-      label: "Appearance",
-      value: themeMode === "dark" ? "Dark" : "Light",
-      meta: "Applied across chat, onboarding, and settings",
+      label: "Privacy",
+      value: "Local and Private",
     },
   ];
 
@@ -444,7 +446,7 @@ export default function SettingsPanel({
         theme_mode: nextThemeMode,
         chat: {
           reply_language: replyLanguage,
-          max_tokens: maxTokens,
+          max_tokens: settings.chat.max_tokens,
           web_assist_enabled: settings.chat.web_assist_enabled,
           knowledge_enabled: settings.chat.knowledge_enabled,
           generation: settings.chat.generation,
@@ -476,7 +478,9 @@ export default function SettingsPanel({
             <div key={item.label} className="settings-overview-card">
               <Text className="settings-overview-card__label">{item.label}</Text>
               <Text className="settings-overview-card__value">{item.value}</Text>
-              <Text className="settings-overview-card__meta">{item.meta}</Text>
+              {item.meta ? (
+                <Text className="settings-overview-card__meta">{item.meta}</Text>
+              ) : null}
             </div>
           ))}
         </div>
@@ -563,9 +567,6 @@ export default function SettingsPanel({
 
             <div className="settings-field">
               <Text className="settings-field__label">Appearance</Text>
-              <Text className="settings-field__body">
-                Choose the theme Friday uses across chat, onboarding, and settings.
-              </Text>
               <Radio.Group
                 optionType="button"
                 buttonStyle="solid"
@@ -578,36 +579,6 @@ export default function SettingsPanel({
                 <Radio.Button value="light">Light</Radio.Button>
                 <Radio.Button value="dark">Dark</Radio.Button>
               </Radio.Group>
-            </div>
-          </section>
-
-          <section className="settings-section surface-card">
-            <div className="section-heading">
-              <div>
-                <h3 className="section-heading__title">System</h3>
-              </div>
-            </div>
-
-            <div className="settings-meta-grid">
-              {[
-                {
-                  label: "App",
-                  value: "Friday v0.1.0",
-                },
-                {
-                  label: "System RAM",
-                  value: `${backendStatus.total_ram_gb.toFixed(1)} GB`,
-                },
-                {
-                  label: "Privacy",
-                  value: "On-device by default",
-                },
-              ].map((item) => (
-                <div key={item.label} className="settings-meta-card">
-                  <Text className="settings-meta-card__label">{item.label}</Text>
-                  <Text className="settings-meta-card__value">{item.value}</Text>
-                </div>
-              ))}
             </div>
           </section>
         </div>
@@ -630,6 +601,33 @@ export default function SettingsPanel({
               isSwitchingModel={isSwitchingModel}
               onModelChange={onModelChange}
             />
+          </section>
+
+          <section className="settings-section surface-card">
+            <div className="section-heading">
+              <div>
+                <h3 className="section-heading__title">System</h3>
+              </div>
+            </div>
+
+            <div className="settings-meta-grid">
+              {[
+                {
+                  label: "App",
+                  value: "Friday v0.1.0",
+                },
+                {
+                  label: "System RAM",
+                  value: `${backendStatus.total_ram_gb.toFixed(1)} GB`,
+                },
+
+              ].map((item) => (
+                <div key={item.label} className="settings-meta-card">
+                  <Text className="settings-meta-card__label">{item.label}</Text>
+                  <Text className="settings-meta-card__value">{item.value}</Text>
+                </div>
+              ))}
+            </div>
           </section>
         </div>
       </div>

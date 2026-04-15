@@ -72,7 +72,7 @@ describe("ChatPane", () => {
     openMock.mockReset();
   });
 
-  it("renders the empty state, labeled controls, and local-first trust copy", () => {
+  it("renders the empty state and labeled controls", () => {
     renderChatPane();
 
     expect(screen.getByText("Welcome back, Asha.")).not.toBeNull();
@@ -83,7 +83,6 @@ describe("ChatPane", () => {
     expect(screen.getByRole("button", { name: /Web/ })).not.toBeNull();
     expect(screen.getByRole("button", { name: /Knowledge/ })).not.toBeNull();
     expect(screen.getByRole("button", { name: /Think/ })).not.toBeNull();
-    expect(screen.getByText("On-device only for this message")).not.toBeNull();
   });
 
   it("shows insufficient RAM directly in the header state", () => {
@@ -110,14 +109,10 @@ describe("ChatPane", () => {
     expect(screen.getByText("Friday · Disconnected")).not.toBeNull();
   });
 
-  it("updates the trust copy when web search is enabled", () => {
+  it("shows the web status pill when web search is enabled", () => {
     renderChatPane({ webSearchEnabled: true });
 
-    expect(
-      screen.getByText(
-        "Web enabled for this message; Friday may contact external sites",
-      ),
-    ).not.toBeNull();
+    expect(screen.getByText("Web on")).not.toBeNull();
   });
 
   it("shows local grounding copy when Knowledge is enabled", () => {
@@ -129,13 +124,12 @@ describe("ChatPane", () => {
     expect(screen.getByText("Knowledge on")).not.toBeNull();
   });
 
-  it("keeps the trust copy on-device without surfacing idle web-search standby copy", () => {
+  it("does not surface idle web-search standby copy when web search is unavailable", () => {
     renderChatPane({
       webSearchEnabled: true,
       webSearchAvailable: false,
     });
 
-    expect(screen.getByText("On-device only for this message")).not.toBeNull();
     expect(
       screen.queryByText("Local web search is installed and will start on demand."),
     ).toBeNull();
@@ -373,6 +367,17 @@ describe("ChatPane", () => {
     expect((screen.getByRole("button", { name: /send/i }) as HTMLButtonElement).disabled).toBe(
       true,
     );
+  });
+
+  it("does not submit while IME composition is active", () => {
+    const onSendMessage = vi.fn();
+    renderChatPane({ onSendMessage });
+
+    const input = screen.getByPlaceholderText("Ask Friday anything...");
+    fireEvent.change(input, { target: { value: "Hello" } });
+    fireEvent.keyDown(input, { key: "Enter", isComposing: true });
+
+    expect(onSendMessage).not.toHaveBeenCalled();
   });
 
   it("uses the latest image capability state for dropped files after rerender", async () => {

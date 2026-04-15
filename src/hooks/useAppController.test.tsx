@@ -164,6 +164,35 @@ describe("useAppController", () => {
     );
   });
 
+  it("keeps bootstrapping when model inventory refresh fails after bootstrap_app", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "bootstrap_app") {
+        return Promise.resolve(bootstrapPayload);
+      }
+      if (command === "list_models") {
+        return Promise.reject(new Error("inventory unavailable"));
+      }
+      if (command === "get_web_search_status") {
+        return Promise.resolve(webSearchStatus);
+      }
+      if (command === "detect_backend") {
+        return Promise.resolve(backendStatus);
+      }
+      return Promise.resolve(undefined);
+    });
+
+    const { result } = renderHook(() => useAppController());
+
+    await waitFor(() =>
+      expect(result.current.activeSession?.id).toBe("session-a"),
+    );
+
+    expect(result.current.bootstrapError).toBeNull();
+    expect(result.current.isBootstrapping).toBe(false);
+    warnSpy.mockRestore();
+  });
+
   it("warms the backend after bootstrap even when legacy settings disabled auto-start", async () => {
     const readyBackendStatus: BackendStatus = {
       ...backendStatus,
@@ -608,6 +637,81 @@ describe("useAppController", () => {
     ).toBe("Hello there");
   });
 
+  it("applies the authoritative assistant payload carried by chat-done", async () => {
+    let resolveSend: (() => void) | undefined;
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "bootstrap_app") return Promise.resolve(bootstrapPayload);
+      if (command === "detect_backend") return Promise.resolve(backendStatus);
+      if (command === "send_message") {
+        return new Promise<void>((resolve) => {
+          resolveSend = resolve;
+        });
+      }
+      if (command === "list_sessions") return Promise.resolve(bootstrapPayload.sessions);
+      if (command === "select_session") {
+        return Promise.resolve({
+          session: bootstrapPayload.currentSession,
+          messages: [],
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+
+    const { result } = renderHook(() => useAppController());
+    await waitFor(() =>
+      expect(result.current.activeSession?.id).toBe("session-a"),
+    );
+
+    await act(async () => {
+      void result.current.sendMessage("Explain LLMs");
+    });
+
+    await waitFor(() => expect(result.current.isGenerating).toBe(true));
+
+    act(() => {
+      emitEvent("chat-token", {
+        sessionId: "session-a",
+        token: "Here are key things about LLMs:* Scale:",
+      });
+    });
+
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 50));
+    });
+
+    expect(
+      result.current.messages[result.current.messages.length - 1]?.content,
+    ).toBe("Here are key things about LLMs:* Scale:");
+
+    act(() => {
+      emitEvent("chat-done", {
+        sessionId: "session-a",
+        model: "gemma-4-e2b-it.litertlm",
+        hasContent: true,
+        content:
+          "Here are key things about LLMs:\n\n* Scale: They are trained on large text corpora.",
+        contentParts: { thinking: "Keep the list readable." },
+      });
+      emitEvent("chat-token", {
+        sessionId: "session-a",
+        token: " ignored late token",
+      });
+    });
+
+    expect(
+      result.current.messages[result.current.messages.length - 1]?.content,
+    ).toBe(
+      "Here are key things about LLMs:\n\n* Scale: They are trained on large text corpora.",
+    );
+    expect(result.current.messages[result.current.messages.length - 1]?.content_parts).toEqual({
+      thinking: "Keep the list readable.",
+    });
+
+    await act(async () => {
+      resolveSend?.();
+    });
+  });
+
   it("cancels generation without leaving a blank assistant bubble", async () => {
     let resolveSend: (() => void) | undefined;
     invokeMock.mockImplementation((command: string) => {
@@ -811,6 +915,61 @@ describe("useAppController", () => {
 
     expect(result.current.settings?.chat.reply_language).toBe("hindi");
     expect(result.current.settings?.chat.max_tokens).toBe(6144);
+  });
+
+  it("treats saved settings as successful even when the post-save refresh fails", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const updatedSettings: AppSettings = {
+      auto_start_backend: true,
+      user_display_name: "Asha",
+      theme_mode: "light",
+      chat: {
+        reply_language: "hindi",
+        max_tokens: 6144,
+        web_assist_enabled: true,
+        knowledge_enabled: false,
+        generation: {},
+      },
+    };
+
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "bootstrap_app") return Promise.resolve(bootstrapPayload);
+      if (command === "save_settings") return Promise.resolve(updatedSettings);
+      if (command === "detect_backend") {
+        return Promise.reject(new Error("backend refresh unavailable"));
+      }
+      if (command === "get_web_search_status") {
+        return Promise.resolve(webSearchStatus);
+      }
+      return Promise.resolve(undefined);
+    });
+
+    const { result } = renderHook(() => useAppController());
+    await waitFor(() =>
+      expect(result.current.settings?.chat.reply_language).toBe("english"),
+    );
+
+    let saved: AppSettings | undefined;
+    await act(async () => {
+      saved = await result.current.saveAppSettings({
+        auto_start_backend: true,
+        user_display_name: "Asha",
+        theme_mode: "light",
+        chat: {
+          reply_language: "hindi",
+          max_tokens: 6144,
+          web_assist_enabled: true,
+          knowledge_enabled: false,
+          generation: {},
+        },
+      });
+    });
+
+    expect(saved).toEqual(updatedSettings);
+    expect(result.current.settings?.chat.reply_language).toBe("hindi");
+    expect(result.current.webSearchEnabled).toBe(true);
+    expect(result.current.isSavingSettings).toBe(false);
+    warnSpy.mockRestore();
   });
 
   it("serializes settings saves so later changes are applied last", async () => {

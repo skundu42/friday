@@ -316,7 +316,7 @@ export default function ChatPane({
     const hasNewMessage = messages.length !== previousMessageCountRef.current;
     previousMessageCountRef.current = messages.length;
 
-    if (!hasNewMessage && !shouldAutoScrollRef.current) {
+    if (!shouldAutoScrollRef.current) {
       return;
     }
 
@@ -409,6 +409,10 @@ export default function ChatPane({
   };
 
   const handleKeyDown = (event: React.KeyboardEvent) => {
+    if ((event.nativeEvent as KeyboardEvent).isComposing) {
+      return;
+    }
+
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
       void handleSend();
@@ -881,9 +885,6 @@ export default function ChatPane({
   const headerSubtitle = activeSessionTitle
     ? `Friday · ${backendLabel}`
     : backendLabel;
-  const privacyStatus = isWebSearchActive
-    ? "Web enabled for this message; Friday may contact external sites"
-    : "On-device only for this message";
   const capabilityStatus = imageInputAvailable
     ? null
     : IMAGE_INPUT_UNAVAILABLE_MESSAGE;
@@ -1172,7 +1173,6 @@ export default function ChatPane({
           </div>
 
           <div className="chat-composer__footnotes">
-            <span>{privacyStatus}</span>
             {webSearchStatusMessage ? <span>{webSearchStatusMessage}</span> : null}
             {knowledgeStatusMessage ? <span>{knowledgeStatusMessage}</span> : null}
             {capabilityStatus ? (

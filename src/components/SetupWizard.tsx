@@ -326,6 +326,7 @@ export default function SetupWizard({
           borderWidth={1}
           background="var(--friday-green-soft)"
           padding={10}
+          imageOffsetY={2}
         />
       </div>
       <Title level={2} style={{ textAlign: "center", marginBottom: 8 }}>
@@ -656,6 +657,7 @@ export default function SetupWizard({
           borderWidth={1}
           background="var(--friday-green-soft)"
           padding={10}
+          imageOffsetY={2}
         />
         <Title level={2} className="setup-ready-card__title">
           {(settings.user_display_name.trim() || displayName.trim())

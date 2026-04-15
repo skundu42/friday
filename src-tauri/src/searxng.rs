@@ -347,14 +347,36 @@ impl SearXNGManager {
     }
 
     async fn ensure_ready_inner(&self) -> Result<WebSearchStatus, String> {
-        self.ensure_supported_platform()?;
-        self.ensure_local_assets()?;
+        self.ensure_supported_platform().map_err(|error| {
+            tracing::warn!(
+                target: "web_search_startup",
+                stage = "setup_platform",
+                error = %error,
+                "Local web search setup failed"
+            );
+            error
+        })?;
+        self.ensure_local_assets().map_err(|error| {
+            tracing::warn!(
+                target: "web_search_startup",
+                stage = "setup_assets",
+                error = %error,
+                "Local web search setup failed"
+            );
+            error
+        })?;
 
         let mut managed_running = self.process_running().await?;
         if !managed_running && !self.port_is_available_or_recovered()? {
             let status =
                 WebSearchStatus::port_conflict(self.port_conflict_message(), self.base_url());
             let message = status.message.clone();
+            tracing::warn!(
+                target: "web_search_startup",
+                stage = "port_conflict_preflight",
+                error = %message,
+                "Local web search startup blocked"
+            );
             self.set_status(status);
             return Err(message);
         }
@@ -363,19 +385,28 @@ impl SearXNGManager {
         let requirements_lock = self.requirements_lock_path()?;
         let lock_sha256 = sha256_file_hex(&requirements_lock)?;
 
+        let mut install_refreshed = false;
         if self.install_needs_refresh(&manifest, &lock_sha256)? {
+            tracing::info!(
+                target: "web_search_startup",
+                stage = "install_prepare",
+                manifest_version = %manifest.version,
+                "Refreshing local web search install"
+            );
             self.set_status(WebSearchStatus::installing(
                 "Preparing local web search…",
                 self.base_url(),
             ));
-            if managed_running {
-                self.stop_process().await?;
-            }
             self.provision_install(&manifest, &requirements_lock, &lock_sha256)
                 .await?;
+            install_refreshed = true;
         }
 
         managed_running = self.process_running().await?;
+        if install_refreshed && managed_running {
+            self.stop_process().await?;
+            managed_running = false;
+        }
         if managed_running {
             match self.probe_readiness().await {
                 ReadinessProbe::Ready => {
@@ -392,6 +423,8 @@ impl SearXNGManager {
                 }
                 ReadinessProbe::Starting(_) => {
                     tracing::warn!(
+                        target: "web_search_startup",
+                        stage = "restart_existing_process",
                         "Friday-managed SearXNG is running but unhealthy; restarting it"
                     );
                     self.stop_process().await?;
@@ -403,10 +436,22 @@ impl SearXNGManager {
             let status =
                 WebSearchStatus::port_conflict(self.port_conflict_message(), self.base_url());
             let message = status.message.clone();
+            tracing::warn!(
+                target: "web_search_startup",
+                stage = "port_conflict_before_start",
+                error = %message,
+                "Local web search startup blocked"
+            );
             self.set_status(status);
             return Err(message);
         }
 
+        tracing::info!(
+            target: "web_search_startup",
+            stage = "start_process",
+            base_url = %self.base_url(),
+            "Starting Friday-managed local web search"
+        );
         self.set_status(WebSearchStatus::starting(
             "Starting local web search…",
             self.base_url(),
@@ -888,16 +933,11 @@ impl SearXNGManager {
         }
 
         let target_dir = self.site_packages_dir()?;
-        if target_dir.exists() {
-            let _ = std::fs::remove_dir_all(&target_dir);
-        }
-        std::fs::rename(&staging_dir, &target_dir).map_err(|error| {
-            format!(
-                "Failed to finalize local web search dependencies {}: {}",
-                target_dir.display(),
-                error
-            )
-        })?;
+        self.replace_directory_from_staging(
+            &staging_dir,
+            &target_dir,
+            "local web search dependencies",
+        )?;
         self.write_dependencies_install_stamp(requirements_lock_sha256)?;
         Ok(())
     }
@@ -943,18 +983,59 @@ impl SearXNGManager {
             })?;
 
         let target_dir = self.source_version_dir(&manifest.version)?;
-        if target_dir.exists() {
-            let _ = std::fs::remove_dir_all(&target_dir);
-        }
-        std::fs::rename(&extracted_root, &target_dir).map_err(|error| {
-            format!(
-                "Failed to finalize local web search source {}: {}",
-                target_dir.display(),
-                error
-            )
-        })?;
+        self.replace_directory_from_staging(
+            &extracted_root,
+            &target_dir,
+            "local web search source",
+        )?;
         self.write_source_install_stamp(manifest)?;
         let _ = std::fs::remove_dir_all(&staging_dir);
+        Ok(())
+    }
+
+    fn replace_directory_from_staging(
+        &self,
+        staging_dir: &Path,
+        target_dir: &Path,
+        label: &str,
+    ) -> Result<(), String> {
+        let backup_dir = target_dir.with_extension("backup");
+        if backup_dir.exists() {
+            let _ = std::fs::remove_dir_all(&backup_dir);
+        }
+
+        let replaced_existing = if target_dir.exists() {
+            std::fs::rename(target_dir, &backup_dir).map_err(|error| {
+                format!(
+                    "Failed to stage existing {} {} for replacement: {}",
+                    label,
+                    target_dir.display(),
+                    error
+                )
+            })?;
+            true
+        } else {
+            false
+        };
+
+        if let Err(error) = std::fs::rename(staging_dir, target_dir) {
+            if replaced_existing {
+                if target_dir.exists() {
+                    let _ = std::fs::remove_dir_all(target_dir);
+                }
+                let _ = std::fs::rename(&backup_dir, target_dir);
+            }
+            return Err(format!(
+                "Failed to finalize {} {}: {}",
+                label,
+                target_dir.display(),
+                error
+            ));
+        }
+
+        if replaced_existing {
+            let _ = std::fs::remove_dir_all(&backup_dir);
+        }
         Ok(())
     }
 
@@ -1067,6 +1148,12 @@ impl SearXNGManager {
 
     async fn probe_readiness(&self) -> ReadinessProbe {
         if let Err(error) = self.validate_local_settings() {
+            tracing::warn!(
+                target: "web_search_probe",
+                stage = "settings_validation",
+                error = %error,
+                "Local web search readiness probe failed"
+            );
             return ReadinessProbe::ConfigError(error);
         }
 
@@ -1076,6 +1163,12 @@ impl SearXNGManager {
         {
             Ok(client) => client,
             Err(error) => {
+                tracing::warn!(
+                    target: "web_search_probe",
+                    stage = "probe_client",
+                    error = %error,
+                    "Local web search readiness probe failed"
+                );
                 return ReadinessProbe::Starting(format!(
                     "Failed to create local web search probe client: {}",
                     error
@@ -1087,6 +1180,12 @@ impl SearXNGManager {
         let health = match client.get(&health_url).send().await {
             Ok(response) => response,
             Err(error) => {
+                tracing::info!(
+                    target: "web_search_probe",
+                    stage = "healthz",
+                    detail = %error,
+                    "Local web search health probe is still pending"
+                );
                 return ReadinessProbe::Starting(format!(
                     "Local web search is not reachable yet: {}",
                     error
@@ -1095,6 +1194,12 @@ impl SearXNGManager {
         };
 
         if !health.status().is_success() {
+            tracing::info!(
+                target: "web_search_probe",
+                stage = "healthz",
+                detail = %health.status(),
+                "Local web search health probe is still pending"
+            );
             return ReadinessProbe::Starting(format!(
                 "Local web search health check failed with HTTP {}",
                 health.status()
@@ -1110,6 +1215,12 @@ impl SearXNGManager {
         {
             Ok(response) => response,
             Err(error) => {
+                tracing::info!(
+                    target: "web_search_probe",
+                    stage = "json_probe",
+                    detail = %error,
+                    "Local web search JSON probe is still pending"
+                );
                 return ReadinessProbe::Starting(format!(
                     "Local web search JSON probe failed: {}",
                     error
@@ -1118,12 +1229,24 @@ impl SearXNGManager {
         };
 
         if search.status() == reqwest::StatusCode::FORBIDDEN {
+            tracing::warn!(
+                target: "web_search_probe",
+                stage = "json_probe",
+                detail = %search.status(),
+                "Local web search JSON probe found invalid config"
+            );
             return ReadinessProbe::ConfigError(
                 "Local SearXNG config is invalid; JSON output is disabled.".to_string(),
             );
         }
 
         if !search.status().is_success() {
+            tracing::info!(
+                target: "web_search_probe",
+                stage = "json_probe",
+                detail = %search.status(),
+                "Local web search JSON probe is still pending"
+            );
             return ReadinessProbe::Starting(format!(
                 "Local web search JSON probe failed with HTTP {}",
                 search.status()
@@ -1133,6 +1256,12 @@ impl SearXNGManager {
         let payload = match search.json::<serde_json::Value>().await {
             Ok(payload) => payload,
             Err(error) => {
+                tracing::warn!(
+                    target: "web_search_probe",
+                    stage = "json_probe",
+                    error = %error,
+                    "Local web search JSON probe returned invalid JSON"
+                );
                 return ReadinessProbe::Starting(format!(
                     "Local web search JSON probe returned invalid JSON: {}",
                     error
@@ -1141,6 +1270,11 @@ impl SearXNGManager {
         };
 
         if !payload.get("results").is_some_and(|value| value.is_array()) {
+            tracing::warn!(
+                target: "web_search_probe",
+                stage = "json_probe",
+                "Local web search JSON probe returned an unexpected payload shape"
+            );
             return ReadinessProbe::Starting(
                 "Local web search JSON probe did not return a results list.".to_string(),
             );

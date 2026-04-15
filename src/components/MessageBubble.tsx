@@ -38,12 +38,15 @@ const BOLD_MARKER_RE = /\*\*/g;
 const BOLD_INNER_WHITESPACE_RE = /\*\*([ \t]+)([^*\n][^*\n]*?)([ \t]+)?\*\*/g;
 const EMPTY_LIST_ITEM_RE = /^\s*[*-]\s*$/;
 const BROKEN_BOLD_LABEL_LIST_ITEM_RE = /^(\s*[*-]\s+)\*\*([^*\n]+?:)\s*(.+)$/;
+const INLINE_LIST_MARKER_NO_BREAK_RE =
+  /([^\s])([*-])\s+(?=[A-Z0-9][^:\n]{0,80}:)/g;
 const ATX_HEADING_NO_SPACE_RE = /^(#{1,6})(?=\S)/;
 const ORDERED_LIST_MARKER_NO_SPACE_RE = /^(\s*\d+\.)(?=\S)/;
 const PLAIN_SECTION_HEADING_RE =
   /^([A-Z][A-Za-z0-9/&()'" -]{1,80}:)$/;
 const MARKDOWN_REMARK_PLUGINS = [remarkGfm, remarkMath];
 const MARKDOWN_REHYPE_PLUGINS = [rehypeKatex];
+const WINDOWS_ABSOLUTE_PATH_RE = /^[A-Za-z]:[\\/]/;
 
 interface Props {
   message: Pick<Message, "id" | "role" | "content" | "content_parts">;
@@ -185,6 +188,10 @@ export function normalizeAssistantMarkdown(content: string): string {
       }
 
       let normalized = line.replace(MISPLACED_BOLD_RE, "$1**$2$3**");
+      normalized = normalized.replace(
+        INLINE_LIST_MARKER_NO_BREAK_RE,
+        "$1\n\n$2 ",
+      );
       normalized = normalized.replace(ATX_HEADING_NO_SPACE_RE, "$1 ");
       normalized = normalized.replace(
         ORDERED_LIST_MARKER_NO_SPACE_RE,
@@ -236,6 +243,57 @@ export function normalizeAssistantMarkdown(content: string): string {
     .replace(/\n{3,}/g, "\n\n");
 
   return normalizedLines;
+}
+
+function normalizeExternalHref(href?: string): string | null {
+  if (!href) {
+    return null;
+  }
+
+  try {
+    const url = new URL(href);
+    if (
+      url.protocol === "http:" ||
+      url.protocol === "https:" ||
+      url.protocol === "mailto:"
+    ) {
+      return url.toString();
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+function normalizePermittedImageSrc(src?: string): string | null {
+  if (!src) {
+    return null;
+  }
+
+  const trimmed = src.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  if (
+    trimmed.startsWith("data:") ||
+    trimmed.startsWith("blob:") ||
+    trimmed.startsWith("file:") ||
+    trimmed.startsWith("/")
+  ) {
+    return trimmed;
+  }
+
+  if (WINDOWS_ABSOLUTE_PATH_RE.test(trimmed)) {
+    return trimmed;
+  }
+
+  return null;
+}
+
+function openExternalLink(href: string) {
+  globalThis.open?.(href, "_blank", "noopener,noreferrer");
 }
 
 function CopyButton({
@@ -360,6 +418,39 @@ function MessageBubble({
           </CodeBlock>
         );
       },
+      a({ href, children, ...props }: React.ComponentProps<"a">) {
+        const safeHref = normalizeExternalHref(href);
+        if (!safeHref) {
+          return <span>{children}</span>;
+        }
+
+        return (
+          <a
+            {...props}
+            href={safeHref}
+            target="_blank"
+            rel="noreferrer noopener"
+            onClick={(event) => {
+              event.preventDefault();
+              openExternalLink(safeHref);
+            }}
+          >
+            {children}
+          </a>
+        );
+      },
+      img({ src, alt, ...props }: React.ComponentProps<"img">) {
+        const safeSrc = normalizePermittedImageSrc(src);
+        if (!safeSrc) {
+          return (
+            <span className="message-card__blocked-image">
+              {alt ? `Blocked remote image: ${alt}` : "Blocked remote image"}
+            </span>
+          );
+        }
+
+        return <img {...props} src={safeSrc} alt={alt} loading="lazy" />;
+      },
     }),
     [showCopyActions],
   );
@@ -445,6 +536,7 @@ function MessageBubble({
                   <ReactMarkdown
                     remarkPlugins={MARKDOWN_REMARK_PLUGINS}
                     rehypePlugins={MARKDOWN_REHYPE_PLUGINS}
+                    components={markdownComponents}
                   >
                     {thinkingContent}
                   </ReactMarkdown>

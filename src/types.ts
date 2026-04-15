@@ -179,6 +179,8 @@ export interface ChatDonePayload {
   model: string;
   cancelled?: boolean;
   hasContent?: boolean;
+  content?: string;
+  contentParts?: unknown | null;
 }
 
 // Tool calling types

@@ -8,6 +8,8 @@ interface AppLogoProps {
   borderRadius?: string | number;
   background?: string;
   padding?: number;
+  imageOffsetX?: number;
+  imageOffsetY?: number;
 }
 
 export default function AppLogo({
@@ -18,24 +20,38 @@ export default function AppLogo({
   borderRadius = 18,
   background = "var(--friday-surface-strong)",
   padding = 6,
+  imageOffsetX = 0,
+  imageOffsetY = 0,
 }: AppLogoProps) {
   return (
-    <img
-      src={fridayLogo}
-      alt={alt}
-      width={size}
-      height={size}
+    <span
       style={{
         width: size,
         height: size,
-        objectFit: "cover",
-        display: "block",
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
         borderRadius,
         background,
         border: `${borderWidth}px solid ${borderColor}`,
         padding,
         boxSizing: "border-box",
+        overflow: "hidden",
       }}
-    />
+    >
+      <img
+        src={fridayLogo}
+        alt={alt}
+        width={size}
+        height={size}
+        style={{
+          width: "100%",
+          height: "100%",
+          objectFit: "cover",
+          display: "block",
+          transform: `translate(${imageOffsetX}px, ${imageOffsetY}px)`,
+        }}
+      />
+    </span>
   );
 }

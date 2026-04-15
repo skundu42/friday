@@ -213,7 +213,7 @@ a {
   z-index: 5;
   padding: 14px 18px;
   border-radius: 24px;
-  border: 1px solid rgba(216, 222, 213, 0.9);
+  border: 1px solid color-mix(in srgb, var(--friday-border-strong) 55%, var(--friday-border));
   background: var(--friday-surface-glass);
   backdrop-filter: blur(16px);
   box-shadow: var(--friday-shadow-sm);
@@ -368,15 +368,35 @@ body[data-theme="dark"] .primary-action.ant-btn:disabled {
   height: 36px !important;
   padding-inline: 12px !important;
   border-radius: 14px !important;
-  border: 1px solid var(--friday-border) !important;
+  border: 1px solid color-mix(in srgb, var(--friday-border-strong) 55%, var(--friday-border)) !important;
   box-shadow: none !important;
-  background: var(--friday-surface-glass) !important;
+  background: var(--friday-surface-glass-strong) !important;
+  color: var(--friday-text) !important;
+  transition:
+    border-color 160ms ease,
+    background-color 160ms ease,
+    color 160ms ease;
 }
 
 .friday-compact-select .ant-select-selection-item,
 .friday-compact-select .ant-select-selection-placeholder {
   line-height: 34px !important;
   font-size: 12px !important;
+  color: var(--friday-text) !important;
+}
+
+.friday-compact-select .ant-select-selection-placeholder {
+  color: var(--friday-text-muted) !important;
+}
+
+.friday-compact-select .ant-select-arrow {
+  color: var(--friday-text-muted) !important;
+}
+
+.friday-compact-select:not(.ant-select-disabled):hover .ant-select-selector,
+.friday-compact-select.ant-select-focused .ant-select-selector {
+  border-color: var(--friday-border-strong) !important;
+  background: var(--friday-hover-soft) !important;
 }
 
 .friday-status-pill {
@@ -386,7 +406,7 @@ body[data-theme="dark"] .primary-action.ant-btn:disabled {
   min-height: 34px;
   padding: 0 12px;
   border-radius: 999px;
-  border: 1px solid var(--friday-border);
+  border: 1px solid color-mix(in srgb, var(--friday-border-strong) 55%, var(--friday-border));
   background: var(--friday-surface-glass-soft);
   color: var(--friday-text);
   font-size: 12px;
@@ -404,27 +424,27 @@ body[data-theme="dark"] .primary-action.ant-btn:disabled {
 }
 
 .friday-status-pill--success {
-  color: var(--friday-green);
-  border-color: rgba(47, 143, 87, 0.2);
-  background: rgba(230, 244, 234, 0.9);
+  color: var(--friday-green-strong);
+  border-color: color-mix(in srgb, currentColor 26%, var(--friday-border));
+  background: color-mix(in srgb, currentColor 18%, var(--friday-surface-glass-strong));
 }
 
 .friday-status-pill--processing {
   color: var(--friday-info);
-  border-color: rgba(45, 121, 186, 0.2);
-  background: rgba(238, 245, 255, 0.94);
+  border-color: color-mix(in srgb, currentColor 26%, var(--friday-border));
+  background: color-mix(in srgb, currentColor 18%, var(--friday-surface-glass-strong));
 }
 
 .friday-status-pill--warning {
   color: var(--friday-warning);
-  border-color: rgba(182, 122, 33, 0.2);
-  background: rgba(255, 245, 222, 0.96);
+  border-color: color-mix(in srgb, currentColor 26%, var(--friday-border));
+  background: color-mix(in srgb, currentColor 18%, var(--friday-surface-glass-strong));
 }
 
 .friday-status-pill--danger {
   color: var(--friday-danger);
-  border-color: rgba(197, 77, 61, 0.2);
-  background: rgba(255, 241, 239, 0.96);
+  border-color: color-mix(in srgb, currentColor 26%, var(--friday-border));
+  background: color-mix(in srgb, currentColor 18%, var(--friday-surface-glass-strong));
 }
 
 .chat-pane {
@@ -461,7 +481,7 @@ body[data-theme="dark"] .primary-action.ant-btn:disabled {
   gap: 18px;
   padding: 14px 18px;
   border-radius: 24px;
-  border: 1px solid rgba(216, 222, 213, 0.9);
+  border: 1px solid color-mix(in srgb, var(--friday-border-strong) 55%, var(--friday-border));
   background: var(--friday-surface-glass);
   backdrop-filter: blur(16px);
   box-shadow: var(--friday-shadow-sm);
@@ -795,6 +815,16 @@ body[data-theme="dark"] .primary-action.ant-btn:disabled {
   font-size: 14px;
   line-height: 1.75;
   color: var(--friday-text);
+}
+
+.message-card__blocked-image {
+  display: inline-flex;
+  padding: 8px 10px;
+  border-radius: 12px;
+  background: var(--friday-surface-muted);
+  border: 1px solid var(--friday-border);
+  color: var(--friday-text-secondary);
+  font-size: 12px;
 }
 
 .message-card__user-text {

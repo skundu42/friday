@@ -23,7 +23,10 @@ pub enum StreamEvent {
     Token(String),
     Thought(String),
     Error(String),
-    Done,
+    Done {
+        final_text: Option<String>,
+        final_thought: Option<String>,
+    },
     ToolCall {
         name: String,
         args: serde_json::Value,
@@ -164,6 +167,10 @@ enum WorkerEvent {
     },
     Done {
         request_id: String,
+        #[serde(default)]
+        final_text: Option<String>,
+        #[serde(default)]
+        final_thought: Option<String>,
     },
 }
 
@@ -524,8 +531,20 @@ async fn dispatch_worker_event(state: &Mutex<WorkerState>, event: WorkerEvent) {
         } => {
             send_if_active(state, &request_id, StreamEvent::ToolResult { name, result }).await;
         }
-        WorkerEvent::Done { request_id } => {
-            finish_request_by_id(state, &request_id, Some(StreamEvent::Done)).await;
+        WorkerEvent::Done {
+            request_id,
+            final_text,
+            final_thought,
+        } => {
+            finish_request_by_id(
+                state,
+                &request_id,
+                Some(StreamEvent::Done {
+                    final_text,
+                    final_thought,
+                }),
+            )
+            .await;
         }
         WorkerEvent::Error {
             request_id,
@@ -797,7 +816,9 @@ mod tests {
         assert_eq!(
             parse_worker_event_line(r#"{"type":"done","request_id":"req"}"#).expect("done event"),
             WorkerEvent::Done {
-                request_id: "req".to_string()
+                request_id: "req".to_string(),
+                final_text: None,
+                final_thought: None,
             }
         );
         assert_eq!(

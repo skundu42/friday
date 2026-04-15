@@ -14,6 +14,7 @@ use searxng::SearXNGManager;
 use serde::{Deserialize, Serialize};
 use session::{Message, Session};
 use sidecar::SidecarManager;
+use std::collections::BTreeSet;
 use std::fs::OpenOptions;
 use std::io::{Cursor, Read, Write};
 use std::path::Path;
@@ -94,6 +95,292 @@ struct SessionSelectionResult {
     messages: Vec<Message>,
 }
 
+#[derive(Debug, Clone, Default)]
+struct WebAssistTrace {
+    tools: Vec<WebAssistToolEvent>,
+}
+
+#[derive(Debug, Clone)]
+struct WebAssistToolEvent {
+    order: usize,
+    name: String,
+    args: serde_json::Value,
+    result: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct WebAssistLogRecord {
+    session_id: String,
+    status: String,
+    failure_stage: Option<String>,
+    failure_reason: Option<String>,
+    tool_order: Vec<String>,
+    tools: Vec<WebAssistToolLogSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct WebAssistToolLogSummary {
+    order: usize,
+    name: String,
+    query: Option<String>,
+    requested_query: Option<String>,
+    effective_query: Option<String>,
+    attempted_queries: Vec<String>,
+    url: Option<String>,
+    final_url: Option<String>,
+    domains: Vec<String>,
+    result_count: Option<usize>,
+    verification_outcome: Option<String>,
+    error: Option<String>,
+    local_datetime: Option<String>,
+}
+
+impl WebAssistTrace {
+    fn record_tool_call(&mut self, name: &str, args: serde_json::Value) {
+        if !tracked_web_assist_tool(name) {
+            return;
+        }
+
+        self.tools.push(WebAssistToolEvent {
+            order: self.tools.len() + 1,
+            name: name.to_string(),
+            args,
+            result: None,
+        });
+    }
+
+    fn record_tool_result(&mut self, name: &str, result: serde_json::Value) {
+        if !tracked_web_assist_tool(name) {
+            return;
+        }
+
+        if let Some(tool) = self
+            .tools
+            .iter_mut()
+            .rev()
+            .find(|tool| tool.name == name && tool.result.is_none())
+        {
+            tool.result = Some(result);
+            return;
+        }
+
+        self.tools.push(WebAssistToolEvent {
+            order: self.tools.len() + 1,
+            name: name.to_string(),
+            args: serde_json::Value::Null,
+            result: Some(result),
+        });
+    }
+
+    fn has_tracked_activity(&self) -> bool {
+        !self.tools.is_empty()
+    }
+}
+
+fn tracked_web_assist_tool(name: &str) -> bool {
+    matches!(name, "web_search" | "web_fetch" | "get_current_datetime")
+}
+
+fn json_string_field(value: &serde_json::Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(ToString::to_string)
+}
+
+fn json_string_list_field(value: &serde_json::Value, key: &str) -> Vec<String> {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(ToString::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn domain_from_url(url: &str) -> Option<String> {
+    let host = reqwest::Url::parse(url).ok()?.host_str()?.to_string();
+    Some(host.strip_prefix("www.").unwrap_or(&host).to_string())
+}
+
+fn domains_from_web_assist_tool(
+    tool: &WebAssistToolEvent,
+    result: Option<&serde_json::Value>,
+) -> Vec<String> {
+    let mut domains = BTreeSet::new();
+
+    if let Some(url) = json_string_field(&tool.args, "url") {
+        if let Some(domain) = domain_from_url(&url) {
+            domains.insert(domain);
+        }
+    }
+
+    if let Some(result) = result {
+        if let Some(url) = json_string_field(result, "url") {
+            if let Some(domain) = domain_from_url(&url) {
+                domains.insert(domain);
+            }
+        }
+
+        if let Some(results) = result.get("results").and_then(serde_json::Value::as_array) {
+            for item in results {
+                if let Some(url) = item.get("url").and_then(serde_json::Value::as_str) {
+                    if let Some(domain) = domain_from_url(url) {
+                        domains.insert(domain);
+                    }
+                }
+            }
+        }
+
+        if let Some(urls) = result
+            .get("recommended_fetch_urls")
+            .and_then(serde_json::Value::as_array)
+        {
+            for url in urls.iter().filter_map(serde_json::Value::as_str) {
+                if let Some(domain) = domain_from_url(url) {
+                    domains.insert(domain);
+                }
+            }
+        }
+    }
+
+    domains.into_iter().collect()
+}
+
+fn verification_outcome_for_tool(name: &str, result: Option<&serde_json::Value>) -> Option<String> {
+    let result = result?;
+    match name {
+        "get_current_datetime" => Some("resolved".to_string()),
+        "web_fetch" => Some(
+            if result.get("error").is_some() {
+                "failed"
+            } else {
+                "fetched"
+            }
+            .to_string(),
+        ),
+        "web_search" => {
+            let verified = result
+                .get("verification_pages")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|pages| {
+                    pages.iter().any(|page| {
+                        page.get("verified")
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(false)
+                    })
+                });
+            if verified {
+                Some("verified".to_string())
+            } else if result
+                .get("verification_failed")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                Some("failed".to_string())
+            } else if result
+                .get("do_not_answer_from_memory")
+                .and_then(serde_json::Value::as_bool)
+                == Some(false)
+            {
+                Some("not_required".to_string())
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+fn summarize_web_assist_tool(tool: &WebAssistToolEvent) -> WebAssistToolLogSummary {
+    let result = tool.result.as_ref();
+    let query = json_string_field(&tool.args, "query");
+    let url = json_string_field(&tool.args, "url");
+
+    WebAssistToolLogSummary {
+        order: tool.order,
+        name: tool.name.clone(),
+        query: query.clone(),
+        requested_query: result
+            .and_then(|value| json_string_field(value, "requested_query"))
+            .or(query.clone()),
+        effective_query: result
+            .and_then(|value| json_string_field(value, "effective_query"))
+            .or(query),
+        attempted_queries: result
+            .map(|value| json_string_list_field(value, "attempted_queries"))
+            .unwrap_or_default(),
+        url,
+        final_url: result.and_then(|value| json_string_field(value, "url")),
+        domains: domains_from_web_assist_tool(tool, result),
+        result_count: result
+            .and_then(|value| value.get("total"))
+            .and_then(serde_json::Value::as_u64)
+            .map(|value| value as usize),
+        verification_outcome: verification_outcome_for_tool(&tool.name, result),
+        error: result.and_then(|value| json_string_field(value, "error")),
+        local_datetime: result.and_then(|value| json_string_field(value, "local_datetime")),
+    }
+}
+
+fn build_web_assist_log_record(
+    session_id: &str,
+    status: &str,
+    trace: &WebAssistTrace,
+    failure_stage: Option<&str>,
+    failure_reason: Option<&str>,
+) -> WebAssistLogRecord {
+    WebAssistLogRecord {
+        session_id: session_id.to_string(),
+        status: status.to_string(),
+        failure_stage: failure_stage.map(ToString::to_string),
+        failure_reason: failure_reason.map(ToString::to_string),
+        tool_order: trace.tools.iter().map(|tool| tool.name.clone()).collect(),
+        tools: trace.tools.iter().map(summarize_web_assist_tool).collect(),
+    }
+}
+
+fn log_web_assist_turn(
+    session_id: &str,
+    status: &str,
+    trace: &WebAssistTrace,
+    failure_stage: Option<&str>,
+    failure_reason: Option<&str>,
+) {
+    let record =
+        build_web_assist_log_record(session_id, status, trace, failure_stage, failure_reason);
+    let payload = serde_json::to_string(&record).unwrap_or_else(|error| {
+        format!(
+            r#"{{"sessionId":"{}","status":"{}","serializationError":"{}"}}"#,
+            session_id, status, error
+        )
+    });
+
+    if status == "failed" {
+        tracing::warn!(
+            target: "web_assist",
+            session_id = %session_id,
+            failure_stage = %failure_stage.unwrap_or(""),
+            failure_reason = %failure_reason.unwrap_or(""),
+            payload = %payload,
+            "Web assist turn failed"
+        );
+    } else {
+        tracing::info!(
+            target: "web_assist",
+            session_id = %session_id,
+            payload = %payload,
+            "Web assist turn summary"
+        );
+    }
+}
+
 // Helper to run DB operations with a callback (avoids cloning Connection)
 fn with_db<F, R>(state: &AppState, f: F) -> Result<R, String>
 where
@@ -148,6 +435,16 @@ fn acquire_generation_guard<'a>(
     drop(active);
 
     Ok(ActiveGenerationGuard { state })
+}
+
+fn prepare_session_for_generation<'a>(
+    state: &'a AppState,
+    session_id: &str,
+) -> Result<ActiveGenerationGuard<'a>, String> {
+    load_session_inner(state, session_id)?;
+    let guard = acquire_generation_guard(state, session_id)?;
+    set_current_session(state, Some(session_id.to_string()))?;
+    Ok(guard)
 }
 
 fn emit_chat_error(app: &tauri::AppHandle, session_id: Option<&str>, message: &str) {
@@ -1008,9 +1305,7 @@ async fn send_message(
         }
     };
 
-    load_session_inner(&state, &session_id)?;
-    set_current_session(&state, Some(session_id.clone()))?;
-    let _generation_guard = acquire_generation_guard(state.inner(), &session_id)?;
+    let _generation_guard = prepare_session_for_generation(state.inner(), &session_id)?;
     let _daemon_use = sidecar.begin_daemon_use();
 
     let app_settings = with_db(&state, settings::load_settings)?;
@@ -1057,6 +1352,7 @@ async fn send_message(
         .or(app_settings.chat.generation.thinking_enabled)
         .unwrap_or(false);
     let tools_enabled = web_assist_enabled.unwrap_or(app_settings.chat.web_assist_enabled);
+    let mut web_assist_trace = tools_enabled.then(WebAssistTrace::default);
     let effective_knowledge_enabled =
         knowledge_enabled.unwrap_or(app_settings.chat.knowledge_enabled);
     let system_prompt = system_prompt_for_preferences(
@@ -1100,6 +1396,15 @@ async fn send_message(
 
     if tools_enabled {
         if let Err(error) = searxng.ensure_ready().await {
+            if let Some(trace) = web_assist_trace.as_ref() {
+                log_web_assist_turn(
+                    &session_id,
+                    "failed",
+                    trace,
+                    Some("ensure_ready"),
+                    Some(&error),
+                );
+            }
             persist_and_emit_assistant_error(
                 &app,
                 &state,
@@ -1125,6 +1430,15 @@ async fn send_message(
     {
         Ok(rx) => rx,
         Err(error) => {
+            if let Some(trace) = web_assist_trace.as_ref() {
+                log_web_assist_turn(
+                    &session_id,
+                    "failed",
+                    trace,
+                    Some("start_inference"),
+                    Some(&error),
+                );
+            }
             persist_and_emit_assistant_error(
                 &app,
                 &state,
@@ -1167,6 +1481,9 @@ async fn send_message(
                         );
                     }
                     Some(StreamEvent::ToolCall { name, args }) => {
+                        if let Some(trace) = web_assist_trace.as_mut() {
+                            trace.record_tool_call(&name, args.clone());
+                        }
                         let _ = app.emit("tool-call-start", serde_json::json!({
                             "sessionId": &session_id,
                             "name": name,
@@ -1174,6 +1491,9 @@ async fn send_message(
                         }));
                     }
                     Some(StreamEvent::ToolResult { name, result }) => {
+                        if let Some(trace) = web_assist_trace.as_mut() {
+                            trace.record_tool_result(&name, result.clone());
+                        }
                         let _ = app.emit("tool-call-result", serde_json::json!({
                             "sessionId": &session_id,
                             "name": name,
@@ -1189,7 +1509,19 @@ async fn send_message(
                         }
                         break;
                     }
-                    Some(StreamEvent::Done) | None => break,
+                    Some(StreamEvent::Done {
+                        final_text,
+                        final_thought,
+                    }) => {
+                        if let Some(final_text) = final_text {
+                            full_response = final_text;
+                        }
+                        if let Some(final_thought) = final_thought {
+                            full_thinking = final_thought;
+                        }
+                        break;
+                    }
+                    None => break,
                 }
             }
             _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {
@@ -1204,6 +1536,20 @@ async fn send_message(
     }
 
     if let Some(error) = stream_error {
+        if let Some(trace) = web_assist_trace.as_ref() {
+            let failure_stage = if trace.has_tracked_activity() {
+                "tool_phase"
+            } else {
+                "stream"
+            };
+            log_web_assist_turn(
+                &session_id,
+                "failed",
+                trace,
+                Some(failure_stage),
+                Some(&error),
+            );
+        }
         persist_and_emit_assistant_error(
             &app,
             &state,
@@ -1214,10 +1560,14 @@ async fn send_message(
         return Err(error);
     }
 
-    if !full_response.trim().is_empty() || !full_thinking.trim().is_empty() {
-        let assistant_parts =
-            build_assistant_content_parts(&full_thinking, &knowledge_results.citations);
+    if let Some(trace) = web_assist_trace.as_ref() {
+        let status = if cancelled { "cancelled" } else { "completed" };
+        log_web_assist_turn(&session_id, status, trace, None, None);
+    }
 
+    let assistant_parts = build_assistant_content_parts(&full_thinking, &knowledge_results.citations);
+
+    if !full_response.trim().is_empty() || !full_thinking.trim().is_empty() {
         if let Err(error) = save_message_json_inner(
             &state,
             PersistMessageJson {
@@ -1249,6 +1599,8 @@ async fn send_message(
             "model": &model_name,
             "cancelled": cancelled,
             "hasContent": !full_response.trim().is_empty() || !full_thinking.trim().is_empty(),
+            "content": &full_response,
+            "contentParts": assistant_parts,
         }),
     );
 
@@ -1270,10 +1622,11 @@ fn augment_prompt_with_knowledge(
                 .map(|blob| models::ChatContentPart::Image { blob })
         })
         .collect::<Vec<_>>();
-    let knowledge_audio = knowledge::audio_prompt_asset(knowledge_results)
-        .map(|audio| models::ChatContentPart::Audio {
+    let knowledge_audio = knowledge::audio_prompt_asset(knowledge_results).map(|audio| {
+        models::ChatContentPart::Audio {
             path: audio.asset_path.to_string_lossy().to_string(),
-        });
+        }
+    });
 
     if knowledge_text.is_none() && knowledge_images.is_empty() && knowledge_audio.is_none() {
         return Ok(prompt);
@@ -1332,7 +1685,13 @@ fn build_assistant_content_parts(
 
 fn image_file_to_data_url(path: &Path, provided_mime: Option<&str>) -> Result<String, String> {
     let size_bytes = std::fs::metadata(path)
-        .map_err(|e| format!("Failed to inspect Knowledge image {}: {}", path.display(), e))?
+        .map_err(|e| {
+            format!(
+                "Failed to inspect Knowledge image {}: {}",
+                path.display(),
+                e
+            )
+        })?
         .len();
     if size_bytes > MAX_KNOWLEDGE_PROMPT_IMAGE_BYTES {
         tracing::info!(
@@ -1491,9 +1850,7 @@ async fn knowledge_ingest_url(
 }
 
 #[tauri::command]
-fn knowledge_list_sources(
-    state: State<'_, AppState>,
-) -> Result<serde_json::Value, String> {
+fn knowledge_list_sources(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
     with_db(&state, |conn| {
         knowledge::list_sources(conn).and_then(|result| {
             serde_json::to_value(result)
@@ -1521,12 +1878,13 @@ async fn knowledge_stats(
 ) -> Result<serde_json::Value, String> {
     let db_path = current_db_path(&state)?;
     let result = knowledge::stats(&knowledge, &db_path).await?;
-    serde_json::to_value(result)
-        .map_err(|e| format!("Failed to serialize Knowledge stats: {}", e))
+    serde_json::to_value(result).map_err(|e| format!("Failed to serialize Knowledge stats: {}", e))
 }
 
 #[tauri::command]
-fn get_knowledge_status(knowledge: State<'_, KnowledgeManager>) -> Result<knowledge::KnowledgeStatus, String> {
+fn get_knowledge_status(
+    knowledge: State<'_, KnowledgeManager>,
+) -> Result<knowledge::KnowledgeStatus, String> {
     Ok(knowledge.status())
 }
 
@@ -1864,30 +2222,46 @@ fn save_message_json_conn(
         None
     };
 
-    conn.execute(
-        "INSERT INTO messages (id, session_id, role, content, content_parts, model_used, latency_ms, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-        rusqlite::params![id, params.session_id, params.role, params.content, serialized_parts, params.model_used, params.latency_ms, now],
-    )
-    .map_err(|e| e.to_string())?;
+    conn.execute_batch("BEGIN IMMEDIATE TRANSACTION;")
+        .map_err(|e| e.to_string())?;
 
-    if let Some(title) = title_candidate {
+    let result = (|| {
         conn.execute(
-            "UPDATE sessions
-             SET title = CASE WHEN title = ?1 THEN ?2 ELSE title END,
-                 updated_at = ?3
-             WHERE id = ?4",
-            rusqlite::params![DEFAULT_SESSION_TITLE, title, now, params.session_id],
+            "INSERT INTO messages (id, session_id, role, content, content_parts, model_used, latency_ms, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![id, params.session_id, params.role, params.content, serialized_parts, params.model_used, params.latency_ms, now],
         )
         .map_err(|e| e.to_string())?;
-    } else {
-        conn.execute(
-            "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
-            rusqlite::params![now, params.session_id],
-        )
-        .map_err(|e| e.to_string())?;
+
+        if let Some(title) = title_candidate {
+            conn.execute(
+                "UPDATE sessions
+                 SET title = CASE WHEN title = ?1 THEN ?2 ELSE title END,
+                     updated_at = ?3
+                 WHERE id = ?4",
+                rusqlite::params![DEFAULT_SESSION_TITLE, title, now, params.session_id],
+            )
+            .map_err(|e| e.to_string())?;
+        } else {
+            conn.execute(
+                "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
+                rusqlite::params![now, params.session_id],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+
+        Ok(())
+    })();
+
+    match result {
+        Ok(()) => conn.execute_batch("COMMIT;").map_err(|e| {
+            let _ = conn.execute_batch("ROLLBACK;");
+            e.to_string()
+        }),
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK;");
+            Err(error)
+        }
     }
-
-    Ok(())
 }
 
 fn save_message_json_inner(state: &AppState, params: PersistMessageJson<'_>) -> Result<(), String> {
@@ -1968,7 +2342,7 @@ fn web_tools_unavailable_instruction() -> &'static str {
 }
 
 fn native_web_tools_instruction() -> &'static str {
-    "Web tools are available in this turn. For current, live, recent, or otherwise time-sensitive public facts, use the available web tools before answering. Carry forward relevant chat context when the latest user message is a short correction or follow-up, and search for the concrete subject instead of the meta wording of the correction. If tool results are missing, inconclusive, or fail, say that verification was incomplete and avoid presenting uncertain current facts as certain."
+    "Web tools are available in this turn. For current, live, recent, or otherwise time-sensitive public facts, use the available web tools before answering. Carry forward relevant chat context when the latest user message is a short correction or follow-up, and search for the concrete subject instead of the meta wording of the correction. Do not finalize a time-sensitive public fact unless the tool output shows successful verification. If tool results are missing, inconclusive, or fail, say that verification was incomplete and avoid presenting uncertain current facts as certain."
 }
 
 fn system_prompt_for_preferences(
@@ -2251,7 +2625,103 @@ mod tests {
         assert!(prompt.contains("Web tools are available in this turn"));
         assert!(prompt.contains("use the available web tools before answering"));
         assert!(prompt.contains("short correction or follow-up"));
+        assert!(prompt.contains("successful verification"));
         assert!(prompt.contains("verification was incomplete"));
+    }
+
+    #[test]
+    fn build_web_assist_log_record_summarizes_web_queries_domains_and_verification() {
+        let mut trace = WebAssistTrace::default();
+        trace.record_tool_call("get_current_datetime", serde_json::json!({}));
+        trace.record_tool_result(
+            "get_current_datetime",
+            serde_json::json!({
+                "local_datetime": "2026-04-15 18:34:00 (UTC+05:30, Wednesday)",
+                "local_date": "2026-04-15",
+            }),
+        );
+        trace.record_tool_call(
+            "web_search",
+            serde_json::json!({
+                "query": "what about tomorrow",
+                "max_results": 5,
+            }),
+        );
+        trace.record_tool_result(
+            "web_search",
+            serde_json::json!({
+                "requested_query": "what about tomorrow",
+                "effective_query": "IPL match tomorrow",
+                "attempted_queries": ["IPL match tomorrow"],
+                "results": [
+                    {
+                        "title": "Fixtures",
+                        "url": "https://www.iplt20.com/matches/fixtures",
+                    }
+                ],
+                "recommended_fetch_urls": ["https://www.iplt20.com/matches/fixtures"],
+                "verification_pages": [
+                    {
+                        "url": "https://www.iplt20.com/matches/fixtures",
+                        "verified": true,
+                    }
+                ],
+                "verification_failed": false,
+                "do_not_answer_from_memory": false,
+            }),
+        );
+
+        let record = build_web_assist_log_record("session-a", "completed", &trace, None, None);
+
+        assert_eq!(record.session_id, "session-a");
+        assert_eq!(record.status, "completed");
+        assert_eq!(
+            record.tool_order,
+            vec!["get_current_datetime".to_string(), "web_search".to_string()]
+        );
+        assert_eq!(record.tools.len(), 2);
+        assert_eq!(
+            record.tools[0].local_datetime.as_deref(),
+            Some("2026-04-15 18:34:00 (UTC+05:30, Wednesday)")
+        );
+        assert_eq!(
+            record.tools[1].requested_query.as_deref(),
+            Some("what about tomorrow")
+        );
+        assert_eq!(
+            record.tools[1].effective_query.as_deref(),
+            Some("IPL match tomorrow")
+        );
+        assert_eq!(
+            record.tools[1].attempted_queries,
+            vec!["IPL match tomorrow".to_string()]
+        );
+        assert_eq!(record.tools[1].domains, vec!["iplt20.com".to_string()]);
+        assert_eq!(
+            record.tools[1].verification_outcome.as_deref(),
+            Some("verified")
+        );
+    }
+
+    #[test]
+    fn build_web_assist_log_record_preserves_turn_level_failure_context() {
+        let trace = WebAssistTrace::default();
+
+        let record = build_web_assist_log_record(
+            "session-a",
+            "failed",
+            &trace,
+            Some("ensure_ready"),
+            Some("Local web search JSON probe failed with HTTP 500"),
+        );
+
+        assert_eq!(record.status, "failed");
+        assert_eq!(record.failure_stage.as_deref(), Some("ensure_ready"));
+        assert_eq!(
+            record.failure_reason.as_deref(),
+            Some("Local web search JSON probe failed with HTTP 500")
+        );
+        assert!(record.tools.is_empty());
     }
 
     #[test]
@@ -2348,10 +2818,8 @@ mod tests {
 
     #[test]
     fn augment_prompt_with_knowledge_skips_oversized_images_but_keeps_text_context() {
-        let oversized_path = std::env::temp_dir().join(format!(
-            "friday-knowledge-oversized-{}.png",
-            Uuid::new_v4()
-        ));
+        let oversized_path =
+            std::env::temp_dir().join(format!("friday-knowledge-oversized-{}.png", Uuid::new_v4()));
         let file = std::fs::File::create(&oversized_path).unwrap();
         file.set_len(MAX_KNOWLEDGE_PROMPT_IMAGE_BYTES + 1).unwrap();
 
@@ -2409,9 +2877,9 @@ mod tests {
                                 && text.contains("Friday keeps knowledge local.")
                     )
                 }));
-                assert!(parts.iter().all(|part| {
-                    !matches!(part, models::ChatContentPart::Image { .. })
-                }));
+                assert!(parts
+                    .iter()
+                    .all(|part| { !matches!(part, models::ChatContentPart::Image { .. }) }));
                 assert!(parts.iter().any(|part| {
                     matches!(
                         part,
@@ -2696,6 +3164,35 @@ mod tests {
     }
 
     #[test]
+    fn prepare_session_for_generation_keeps_current_session_when_generation_is_busy() {
+        let conn = test_conn();
+        insert_session(&conn, "session-a");
+        insert_session(&conn, "session-b");
+        storage::save_string_setting(&conn, CURRENT_SESSION_KEY, "session-a").unwrap();
+
+        let state = test_app_state(conn);
+        *state.current_session.lock().unwrap() = Some("session-a".to_string());
+        *state.active_generation_session.lock().unwrap() = Some("session-a".to_string());
+
+        let error = match prepare_session_for_generation(&state, "session-b") {
+            Ok(_) => panic!("expected generation guard acquisition to fail"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error,
+            "A response is already in progress in another chat. Cancel it before switching sessions."
+        );
+        assert_eq!(
+            state.current_session.lock().unwrap().as_deref(),
+            Some("session-a")
+        );
+        let persisted = with_db(&state, |conn| storage::load_string_setting(conn, CURRENT_SESSION_KEY)) 
+            .unwrap();
+        assert_eq!(persisted.as_deref(), Some("session-a"));
+    }
+
+    #[test]
     fn session_title_candidate_skips_blank_lines_and_truncates() {
         let title = session_title_candidate(
             "\n   \n  First useful line that keeps going past the preview length by a bit\nSecond line",
@@ -2805,6 +3302,53 @@ mod tests {
             )
             .unwrap();
         assert_eq!(title, "Project notes");
+    }
+
+    #[test]
+    fn save_message_json_conn_rolls_back_message_insert_when_session_update_fails() {
+        let conn = test_conn();
+        conn.execute(
+            "INSERT INTO sessions (id, title, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![
+                "session-a",
+                DEFAULT_SESSION_TITLE,
+                "2026-01-01T00:00:00Z",
+                "2026-01-01T00:00:00Z"
+            ],
+        )
+        .unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER fail_session_update
+             BEFORE UPDATE ON sessions
+             BEGIN
+               SELECT RAISE(ABORT, 'session update blocked');
+             END;",
+        )
+        .unwrap();
+
+        let error = save_message_json_conn(
+            &conn,
+            PersistMessageJson {
+                session_id: "session-a",
+                role: "assistant",
+                content: "Stored content",
+                content_parts: None,
+                model_used: None,
+                latency_ms: None,
+                title_source: None,
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.contains("session update blocked"));
+        let message_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE session_id = ?1",
+                ["session-a"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(message_count, 0);
     }
 
     #[test]

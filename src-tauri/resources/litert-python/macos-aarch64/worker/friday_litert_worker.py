@@ -27,6 +27,8 @@ WEB_FETCH_TIMEOUT_SECONDS = 15
 WEB_FETCH_MAX_BYTES = 1_000_000
 WEB_FETCH_MAX_CHARS = 20_000
 WEB_FETCH_MAX_REDIRECTS = 3
+WEB_SEARCH_INLINE_FETCH_MAX_URLS = 1
+WEB_SEARCH_INLINE_FETCH_MAX_CHARS = 3000
 SEARXNG_BASE_URL = os.environ.get("FRIDAY_SEARXNG_BASE_URL", "http://127.0.0.1:8091").rstrip(
     "/"
 )
@@ -57,6 +59,7 @@ OUTER_QUOTE_PAIRS = {
 }
 SEARCH_QUERY_STOPWORDS = {
     "a",
+    "about",
     "an",
     "and",
     "are",
@@ -74,8 +77,10 @@ SEARCH_QUERY_STOPWORDS = {
     "on",
     "please",
     "right",
+    "so",
     "tell",
     "the",
+    "then",
     "to",
     "what",
     "when",
@@ -84,6 +89,37 @@ SEARCH_QUERY_STOPWORDS = {
     "who",
     "why",
     "yes",
+    "also",
+}
+CONTEXT_LIGHT_QUERY_TERMS = {
+    "today",
+    "todays",
+    "tomorrow",
+    "tomorrows",
+    "yesterday",
+    "yesterdays",
+    "latest",
+    "current",
+    "now",
+    "live",
+    "match",
+    "fixture",
+    "schedule",
+    "score",
+    "scores",
+    "result",
+    "results",
+    "price",
+    "prices",
+    "weather",
+    "forecast",
+    "news",
+    "won",
+    "update",
+    "updates",
+    "there",
+    "that",
+    "this",
 }
 TRANSIENT_SEARCH_HTTP_STATUS_CODES = {429, 502, 503, 504}
 TRANSIENT_SEARCH_ERROR_MARKERS = (
@@ -115,6 +151,47 @@ TIME_SENSITIVE_QUERY_TERMS = (
     "president",
     "release",
     "model",
+)
+DAY_SCOPED_QUERY_TERMS = (
+    "today",
+    "tomorrow",
+    "yesterday",
+    "latest",
+    "live",
+    "news",
+    "weather",
+    "forecast",
+    "price",
+    "stock",
+    "score",
+    "match",
+    "fixture",
+    "schedule",
+)
+NEWS_HEAVY_QUERY_TERMS = (
+    "today",
+    "tomorrow",
+    "yesterday",
+    "latest",
+    "live",
+    "news",
+    "weather",
+    "forecast",
+    "price",
+    "stock",
+    "score",
+    "match",
+    "fixture",
+    "schedule",
+    "won",
+)
+SEARCH_RESULT_OPTIONAL_FIELDS = (
+    "engine",
+    "source",
+    "publishedDate",
+    "published_date",
+    "date",
+    "category",
 )
 
 
@@ -176,6 +253,12 @@ def expand_relative_date_terms(query: str) -> str:
 
     expanded = query
     for term, replacement in replacements.items():
+        expanded = re.sub(
+            rf"\b{term}(?:['’]s)\b",
+            replacement,
+            expanded,
+            flags=re.IGNORECASE,
+        )
         expanded = re.sub(rf"\b{term}\b", replacement, expanded, flags=re.IGNORECASE)
     return expanded
 
@@ -226,20 +309,144 @@ def search_query_variants(query: str) -> list[str]:
     return variants
 
 
+def classify_web_search_intent(query: str) -> WebSearchIntent:
+    lowered = sanitize_tool_string(query).lower()
+    has_news_heavy_term = any(term in lowered for term in NEWS_HEAVY_QUERY_TERMS)
+    has_day_scoped_term = any(term in lowered for term in DAY_SCOPED_QUERY_TERMS)
+    requires_verification = any(term in lowered for term in TIME_SENSITIVE_QUERY_TERMS)
+    if bool(re.search(r"\bvs\b|\bv\b", lowered)):
+        has_news_heavy_term = True
+        requires_verification = True
+
+    if has_news_heavy_term:
+        categories: list[str] | None = ["general", "web", "news"]
+    elif requires_verification:
+        categories = ["general", "web"]
+    else:
+        categories = None
+
+    return WebSearchIntent(
+        time_range="day" if has_day_scoped_term else None,
+        categories=categories,
+        requires_verification=requires_verification,
+    )
+
+
 def query_requires_definitive_fetch(query: str) -> bool:
-    lowered = query.lower()
-    return any(term in lowered for term in TIME_SENSITIVE_QUERY_TERMS)
+    return classify_web_search_intent(query).requires_verification
+
+
+def default_search_metadata(
+    requested_query: str,
+    effective_query: str,
+    attempted_queries: list[str],
+    *,
+    categories: list[str] | None,
+    time_range: str | None,
+    time_range_fallback: str | None,
+    query_rewrite_applied: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "provider": "searxng",
+        "requested_query": requested_query,
+        "effective_query": effective_query,
+        "attempted_queries": attempted_queries,
+        "categories": categories,
+        "time_range": time_range,
+        "time_range_fallback": time_range_fallback,
+        "query_rewrite_applied": query_rewrite_applied,
+        "recommended_fetch_urls": [],
+        "unresponsive_engines": [],
+        "verification_failed": False,
+        "do_not_answer_from_memory": False,
+    }
+
+
+def annotate_search_verification(
+    result: dict[str, Any],
+    *,
+    intent: WebSearchIntent,
+) -> dict[str, Any]:
+    verification_pages = result.get("verification_pages")
+    verified = isinstance(verification_pages, list) and any(
+        isinstance(page, dict) and page.get("verified") is True for page in verification_pages
+    )
+    annotated = dict(result)
+    annotated["verification_failed"] = intent.requires_verification and not verified
+    annotated["do_not_answer_from_memory"] = intent.requires_verification and not verified
+
+    if intent.requires_verification:
+        annotated["recommended_next_step"] = (
+            "Use the verified page content for any definitive claim and cite the verified source."
+            if verified
+            else "Explain that live verification did not succeed and do not present an unverified current fact as certain."
+        )
+    elif not annotated.get("recommended_next_step"):
+        annotated["recommended_next_step"] = (
+            "Use web_fetch on a promising result when the search snippets are not sufficient."
+        )
+
+    return annotated
+
+
+def finalize_search_result(
+    result: dict[str, Any],
+    *,
+    requested_query: str,
+    effective_query: str,
+    attempted_queries: list[str],
+    intent: WebSearchIntent,
+    time_range_fallback: str | None = None,
+    query_rewrite_applied: str | None = None,
+) -> dict[str, Any]:
+    finalized = default_search_metadata(
+        requested_query,
+        effective_query,
+        attempted_queries,
+        categories=intent.categories,
+        time_range=intent.time_range,
+        time_range_fallback=time_range_fallback,
+        query_rewrite_applied=query_rewrite_applied,
+    )
+    finalized.update(result)
+    finalized["provider"] = "searxng"
+    finalized["requested_query"] = requested_query
+    finalized["effective_query"] = effective_query
+    finalized["attempted_queries"] = attempted_queries
+    finalized["categories"] = intent.categories
+    finalized["time_range"] = intent.time_range
+    finalized["time_range_fallback"] = time_range_fallback
+    finalized["query_rewrite_applied"] = query_rewrite_applied
+
+    if not isinstance(finalized.get("recommended_fetch_urls"), list):
+        finalized["recommended_fetch_urls"] = []
+    if not isinstance(finalized.get("unresponsive_engines"), list):
+        finalized["unresponsive_engines"] = []
+
+    return annotate_search_verification(finalized, intent=intent)
 
 
 def annotate_search_error(
     error: dict[str, Any],
     requested_query: str,
     attempted_queries: list[str],
+    *,
+    effective_query: str | None = None,
+    categories: list[str] | None = None,
+    time_range: str | None = None,
+    time_range_fallback: str | None = None,
+    query_rewrite_applied: str | None = None,
 ) -> dict[str, Any]:
-    annotated = dict(error)
-    annotated["provider"] = "searxng"
-    annotated["requested_query"] = requested_query
-    annotated["attempted_queries"] = attempted_queries
+    annotated = default_search_metadata(
+        requested_query,
+        effective_query or requested_query,
+        attempted_queries,
+        categories=categories,
+        time_range=time_range,
+        time_range_fallback=time_range_fallback,
+        query_rewrite_applied=query_rewrite_applied,
+    )
+    annotated.update(error)
     annotated["verification_failed"] = True
     annotated["do_not_answer_from_memory"] = True
     annotated["recommended_next_step"] = (
@@ -300,11 +507,105 @@ def chunk_to_events(
     return events
 
 
+def extract_chunk_channel_texts(chunk: dict[str, Any]) -> tuple[str, str]:
+    answer_parts: list[str] = []
+    for item in chunk.get("content", []):
+        if item.get("type") != "text":
+            continue
+        text = item.get("text", "")
+        if text:
+            answer_parts.append(text)
+
+    thought_text = ""
+    channels = chunk.get("channels", {})
+    if isinstance(channels, dict):
+        raw_thought = channels.get("thought", "")
+        if isinstance(raw_thought, str):
+            thought_text = raw_thought
+
+    return "".join(answer_parts), thought_text
+
+
+def stream_text_delta(previous_text: str, current_text: str) -> tuple[str, str]:
+    if not current_text:
+        return "", previous_text
+    if not previous_text:
+        return current_text, current_text
+    if current_text == previous_text or current_text in previous_text:
+        return "", previous_text
+    if current_text.startswith(previous_text):
+        return current_text[len(previous_text) :], current_text
+
+    common_prefix_len = 0
+    max_prefix = min(len(previous_text), len(current_text))
+    while (
+        common_prefix_len < max_prefix
+        and previous_text[common_prefix_len] == current_text[common_prefix_len]
+    ):
+        common_prefix_len += 1
+
+    if (
+        common_prefix_len >= 8
+        and common_prefix_len >= len(previous_text) // 2
+        and len(current_text) >= len(previous_text)
+    ):
+        return current_text[common_prefix_len:], current_text
+
+    return current_text, previous_text + current_text
+
+
+def snapshot_shows_cumulative_growth(previous_snapshot: str, current_snapshot: str) -> bool:
+    return bool(
+        previous_snapshot
+        and current_snapshot
+        and len(current_snapshot) > len(previous_snapshot)
+        and current_snapshot.startswith(previous_snapshot)
+    )
+
+
+def resolve_final_stream_text(
+    streamed_text: str,
+    latest_snapshot: str,
+    *,
+    saw_cumulative_growth: bool,
+    saw_incremental_updates: bool,
+) -> str:
+    if saw_cumulative_growth and not saw_incremental_updates and latest_snapshot:
+        return latest_snapshot
+    return streamed_text or latest_snapshot
+
+
+def chunk_to_incremental_events(
+    request_id: str,
+    chunk: dict[str, Any],
+    previous_answer_text: str,
+    previous_thought_text: str,
+) -> tuple[list[dict[str, Any]], str, str]:
+    answer_text, thought_text = extract_chunk_channel_texts(chunk)
+    answer_delta, next_answer_text = stream_text_delta(previous_answer_text, answer_text)
+    thought_delta, next_thought_text = stream_text_delta(previous_thought_text, thought_text)
+
+    events: list[dict[str, Any]] = []
+    if answer_delta:
+        events.append({"type": "token", "request_id": request_id, "text": answer_delta})
+    if thought_delta:
+        events.append({"type": "thought", "request_id": request_id, "text": thought_delta})
+
+    return events, next_answer_text, next_thought_text
+
+
 @dataclass(frozen=True)
 class EngineConfig:
     model_path: str
     max_num_tokens: int
     backend: str
+
+
+@dataclass(frozen=True)
+class WebSearchIntent:
+    time_range: str | None
+    categories: list[str] | None
+    requires_verification: bool
 
 
 @dataclass(frozen=True)
@@ -365,29 +666,110 @@ def extract_text_from_message(message: dict[str, Any]) -> str:
     return ""
 
 
+def build_recent_user_search_context(
+    messages: list[dict[str, Any]],
+    max_messages: int = 3,
+) -> str:
+    user_texts: list[str] = []
+    seen: set[str] = set()
+    for message in reversed(messages):
+        if message.get("role") != "user":
+            continue
+        text = normalize_search_query(extract_text_from_message(message))
+        if not text:
+            continue
+        folded = text.lower()
+        if folded in seen:
+            continue
+        seen.add(folded)
+        user_texts.append(text)
+        if len(user_texts) >= max_messages:
+            break
+    user_texts.reverse()
+    return " ".join(user_texts).strip()
+
+
+def strip_followup_prefixes(query: str) -> str:
+    cleaned = normalize_search_query(query)
+    patterns = (
+        r"^(?:what|how)\s+about\s+",
+        r"^(?:and|also|then|so)\s+",
+        r"^(?:what(?:'s| is)|how(?:'s| is))\s+",
+    )
+    updated = cleaned
+    for pattern in patterns:
+        updated = re.sub(pattern, "", updated, flags=re.IGNORECASE).strip()
+    return updated or cleaned
+
+
+def query_is_context_light(query: str) -> bool:
+    terms = query_entity_terms(query)
+    if not terms:
+        return True
+    return all(term in CONTEXT_LIGHT_QUERY_TERMS for term in terms)
+
+
+def extract_query_subject(query: str) -> str:
+    tokens: list[str] = []
+    for token in TOKEN_RE.findall(normalize_search_query(query)):
+        lowered = token.lower().replace("’", "").replace("'", "")
+        if lowered in SEARCH_QUERY_STOPWORDS:
+            continue
+        if lowered in {"today", "todays", "tomorrow", "tomorrows", "yesterday", "yesterdays", "latest", "current", "now", "live"}:
+            continue
+        if len(lowered) == 1 and not lowered.isdigit():
+            continue
+        tokens.append(token)
+    return " ".join(tokens)
+
+
+def combine_subject_and_query(subject: str, query: str) -> str:
+    if not subject:
+        return query
+    if not query:
+        return subject
+    subject_lower = subject.lower()
+    query_lower = query.lower()
+    if query_lower in subject_lower:
+        return subject
+    if subject_lower in query_lower:
+        return query
+    return normalize_search_query(f"{subject} {query}")
+
+
+def contextualize_web_search_query(query: str, user_search_context: str) -> tuple[str, bool]:
+    cleaned_query = sanitize_tool_string(query)
+    normalized_query = normalize_search_query(cleaned_query)
+    normalized_context = normalize_search_query(user_search_context)
+    if not normalized_query:
+        return normalized_context, bool(normalized_context)
+    if not normalized_context:
+        return cleaned_query, False
+    if not query_is_context_light(normalized_query):
+        return cleaned_query, False
+
+    subject = extract_query_subject(normalized_context)
+    followup_query = strip_followup_prefixes(normalized_query)
+    effective_query = combine_subject_and_query(subject, followup_query) if subject else normalized_context
+    return effective_query or normalized_query, (effective_query or normalized_query) != normalized_query
+
+
+def build_web_search_context(
+    preface_messages: list[dict[str, Any]],
+    prompt: dict[str, Any],
+) -> str:
+    prior_context = build_recent_user_search_context(preface_messages)
+    prompt_text = normalize_search_query(extract_text_from_message(prompt))
+    context_parts: list[str] = []
+    if prior_context:
+        context_parts.append(prior_context)
+    if prompt_text and not query_is_context_light(prompt_text):
+        context_parts.append(prompt_text)
+    return normalize_search_query(" ".join(context_parts))
+
+
 def web_search_time_range(query: str) -> str | None:
-    lowered = sanitize_tool_string(query).lower()
-    if any(
-        needle in lowered
-        for needle in (
-            "today",
-            "tomorrow",
-            "yesterday",
-            "latest",
-            "live",
-            "news",
-            "weather",
-            "forecast",
-            "price",
-            "stock",
-            "score",
-            "match",
-            "fixture",
-            "schedule",
-        )
-    ):
-        return "day"
-    return None
+    return classify_web_search_intent(query).time_range
 
 
 def extract_urls_from_text(user_text: str, limit: int = 3) -> list[str]:
@@ -433,8 +815,9 @@ def build_web_tool_guidance(user_text: str) -> str | None:
         "or brief follow-up.",
         "For current, live, recent, or breaking topics such as scores, prices, "
         "schedules, and news, include the entity names and event context in "
-        "the search query and use web_fetch on a promising result when "
-        "snippets are not definitive.",
+        "the search query and do not finalize the answer from snippets alone. "
+        "Use web_fetch on a promising result when the search result does not "
+        "already include verified page content.",
     ]
     if extract_urls_from_text(user_text):
         guidance_parts.append(
@@ -450,34 +833,7 @@ def has_web_search_results(search_result: dict[str, Any]) -> bool:
 
 
 def web_search_categories(query: str) -> list[str] | None:
-    lowered = sanitize_tool_string(query).lower()
-    if (
-        any(
-            needle in lowered
-            for needle in (
-                "today",
-                "tomorrow",
-                "yesterday",
-                "latest",
-                "live",
-                "news",
-                "weather",
-                "forecast",
-                "price",
-                "stock",
-                "score",
-                "match",
-                "fixture",
-                "schedule",
-                "won",
-            )
-        )
-        or bool(re.search(r"\bvs\b|\bv\b", lowered))
-    ):
-        return ["general", "web", "news"]
-    if query_requires_definitive_fetch(query):
-        return ["general", "web"]
-    return None
+    return classify_web_search_intent(query).categories
 
 
 def result_domain(url: str) -> str:
@@ -537,6 +893,24 @@ def annotate_search_results(query: str, results: list[dict[str, Any]]) -> list[d
     return annotated
 
 
+def normalize_result_metadata(result: dict[str, Any]) -> dict[str, Any]:
+    normalized: dict[str, Any] = {}
+    for field in SEARCH_RESULT_OPTIONAL_FIELDS:
+        value = result.get(field)
+        if value in (None, "", [], {}):
+            continue
+        normalized[field] = sanitize_tool_payload(value)
+
+    engines = result.get("engines")
+    if isinstance(engines, list) and engines:
+        normalized["engines"] = [str(engine) for engine in engines if str(engine).strip()]
+
+    if result.get("score") not in (None, ""):
+        normalized["score"] = result.get("score")
+
+    return normalized
+
+
 def recommended_fetch_urls(
     query: str,
     results: list[dict[str, Any]],
@@ -550,6 +924,34 @@ def recommended_fetch_urls(
             if result.get("url") not in preferred
         )
     return preferred[:limit]
+
+
+def build_inline_verification_pages(
+    query: str,
+    results: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    verification_pages: list[dict[str, Any]] = []
+    for url in recommended_fetch_urls(query, results, WEB_SEARCH_INLINE_FETCH_MAX_URLS):
+        fetched = web_fetch_impl(url, WEB_SEARCH_INLINE_FETCH_MAX_CHARS)
+        if "error" in fetched:
+            verification_pages.append(
+                {
+                    "url": url,
+                    "verified": False,
+                    "error": fetched["error"],
+                }
+            )
+            continue
+        verification_pages.append(
+            {
+                "url": fetched.get("url", url),
+                "verified": True,
+                "content": fetched.get("content", ""),
+                "contentType": fetched.get("contentType"),
+                "length": fetched.get("length"),
+            }
+        )
+    return verification_pages
 
 
 def extract_between(haystack: str, start_marker: str, end_marker: str) -> str:
@@ -794,7 +1196,9 @@ def perform_searxng_search(
         url = str(result.get("url") or "").strip()
         snippet = strip_tags(str(result.get("content") or "")).strip()
         if title or url or snippet:
-            results.append({"title": title, "url": url, "snippet": snippet})
+            normalized_result = {"title": title, "url": url, "snippet": snippet}
+            normalized_result.update(normalize_result_metadata(result))
+            results.append(normalized_result)
     results = annotate_search_results(query, results)
 
     normalized: dict[str, Any] = {
@@ -826,10 +1230,10 @@ def web_search_impl(query: str, max_results: int = 5) -> dict[str, Any]:
         return {"error": "Query is required."}
 
     limit = max(1, min(int(max_results), 10))
-    time_range = web_search_time_range(cleaned_query)
+    intent = classify_web_search_intent(cleaned_query)
+    time_range = intent.time_range
     variants = search_query_variants(cleaned_query)
     attempted_variants: list[str] = []
-    fallback_used = False
     last_no_results: dict[str, Any] | None = None
     last_error: dict[str, Any] | None = None
 
@@ -840,13 +1244,22 @@ def web_search_impl(query: str, max_results: int = 5) -> dict[str, Any]:
         if "error" in primary_result:
             last_error = primary_result
         elif has_web_search_results(primary_result):
+            if intent.requires_verification:
+                primary_result["verification_pages"] = build_inline_verification_pages(
+                    cleaned_query,
+                    primary_result["results"],
+                )
             if variant != cleaned_query:
                 primary_result["query_variant_used"] = variant
             if index > 0:
                 primary_result["query_variant_fallback"] = "applied"
-            primary_result["requested_query"] = cleaned_query
-            primary_result["attempted_queries"] = attempted_variants
-            return primary_result
+            return finalize_search_result(
+                primary_result,
+                requested_query=cleaned_query,
+                effective_query=cleaned_query,
+                attempted_queries=attempted_variants,
+                intent=intent,
+            )
         else:
             last_no_results = primary_result
 
@@ -855,34 +1268,56 @@ def web_search_impl(query: str, max_results: int = 5) -> dict[str, Any]:
             if "error" in fallback_result:
                 last_error = fallback_result
             elif has_web_search_results(fallback_result):
-                fallback_used = True
+                if intent.requires_verification:
+                    fallback_result["verification_pages"] = build_inline_verification_pages(
+                        cleaned_query,
+                        fallback_result["results"],
+                    )
                 if variant != cleaned_query:
                     fallback_result["query_variant_used"] = variant
                 if index > 0:
                     fallback_result["query_variant_fallback"] = "applied"
-                fallback_result["time_range_fallback"] = "omitted"
-                fallback_result["requested_query"] = cleaned_query
-                fallback_result["attempted_queries"] = attempted_variants
-                return fallback_result
+                return finalize_search_result(
+                    fallback_result,
+                    requested_query=cleaned_query,
+                    effective_query=cleaned_query,
+                    attempted_queries=attempted_variants,
+                    intent=intent,
+                    time_range_fallback="omitted",
+                )
             else:
                 last_no_results = fallback_result
 
     if last_no_results is not None:
-        if fallback_used:
-            last_no_results["time_range_fallback"] = "omitted"
+        time_range_fallback = "attempted" if time_range is not None else None
         if len(attempted_variants) > 1:
             last_no_results["query_variant_fallback"] = "attempted"
-        last_no_results["requested_query"] = cleaned_query
-        last_no_results["attempted_queries"] = attempted_variants
-        return last_no_results
+        return finalize_search_result(
+            last_no_results,
+            requested_query=cleaned_query,
+            effective_query=cleaned_query,
+            attempted_queries=attempted_variants,
+            intent=intent,
+            time_range_fallback=time_range_fallback,
+        )
 
     if last_error is not None:
-        return annotate_search_error(last_error, cleaned_query, attempted_variants)
+        return annotate_search_error(
+            last_error,
+            cleaned_query,
+            attempted_variants,
+            effective_query=cleaned_query,
+            categories=intent.categories,
+            time_range=intent.time_range,
+        )
 
     return annotate_search_error(
         {"error": "SearXNG search failed unexpectedly."},
         cleaned_query,
         attempted_variants,
+        effective_query=cleaned_query,
+        categories=intent.categories,
+        time_range=intent.time_range,
     )
 
 
@@ -1061,7 +1496,10 @@ def list_directory_impl(path: str) -> dict[str, Any]:
     return {"entries": items, "total": len(items)}
 
 
-def build_tools(tool_permissions: ToolPermissions) -> list[Any]:
+def build_tools(
+    tool_permissions: ToolPermissions,
+    user_search_context: str = "",
+) -> list[Any]:
     tools: list[Any] = []
 
     if tool_permissions.current_datetime:
@@ -1117,8 +1555,21 @@ def build_tools(tool_permissions: ToolPermissions) -> list[Any]:
                     answering.
                 max_results: The maximum number of results to return.
             """
-
-            return web_search_impl(sanitize_tool_string(query), max_results)
+            cleaned_query = sanitize_tool_string(query)
+            effective_query, rewritten = contextualize_web_search_query(
+                cleaned_query,
+                user_search_context,
+            )
+            result = web_search_impl(effective_query, max_results)
+            enriched_result = dict(result)
+            enriched_result["requested_query"] = cleaned_query or effective_query
+            enriched_result["effective_query"] = effective_query
+            enriched_result["query_rewrite_applied"] = (
+                "recent_user_context" if rewritten else None
+            )
+            if rewritten:
+                enriched_result["original_query"] = cleaned_query
+            return enriched_result
 
         def web_fetch(url: str, max_chars: int = 12000) -> dict[str, Any]:
             """Fetch the full text of a specific result URL for exact verification.
@@ -1259,12 +1710,13 @@ class LiteRtWorker:
         tool_permissions = ToolPermissions.from_command(command)
         thinking_enabled = bool(generation_config.get("thinking_enabled"))
         user_text = extract_text_from_message(prompt)
+        user_search_context = build_web_search_context(preface, prompt) if tool_permissions.web else ""
         if tool_permissions.web and user_text.strip():
             web_guidance = build_web_tool_guidance(user_text)
             if web_guidance:
                 preface = [*preface, {"role": "system", "content": web_guidance}]
 
-        tools = build_tools(tool_permissions)
+        tools = build_tools(tool_permissions, user_search_context=user_search_context)
         tool_handler = FridayToolEventHandler(request_id) if tools else None
 
         conversation = self._engine.create_conversation(
@@ -1277,19 +1729,73 @@ class LiteRtWorker:
         self._active_conversation = conversation
         self._active_request_id = request_id
         self._cancelled_request_id = None
+        streamed_answer_text = ""
+        streamed_thought_text = ""
+        latest_answer_snapshot = ""
+        latest_thought_snapshot = ""
+        saw_cumulative_answer_growth = False
+        saw_cumulative_thought_growth = False
+        saw_incremental_answer_updates = False
+        saw_incremental_thought_updates = False
+
+        def emit_done() -> None:
+            final_text = resolve_final_stream_text(
+                streamed_answer_text,
+                latest_answer_snapshot,
+                saw_cumulative_growth=saw_cumulative_answer_growth,
+                saw_incremental_updates=saw_incremental_answer_updates,
+            )
+            final_thought = resolve_final_stream_text(
+                streamed_thought_text,
+                latest_thought_snapshot,
+                saw_cumulative_growth=saw_cumulative_thought_growth,
+                saw_incremental_updates=saw_incremental_thought_updates,
+            )
+            payload: dict[str, Any] = {"request_id": request_id}
+            if final_text:
+                payload["final_text"] = final_text
+            if final_thought:
+                payload["final_thought"] = final_thought
+            write_event("done", **payload)
 
         try:
             for chunk in conversation.send_message_async(prompt):
-                for event in chunk_to_events(request_id, chunk):
+                answer_snapshot, thought_snapshot = extract_chunk_channel_texts(chunk)
+                if answer_snapshot:
+                    if snapshot_shows_cumulative_growth(
+                        latest_answer_snapshot, answer_snapshot
+                    ):
+                        saw_cumulative_answer_growth = True
+                    elif latest_answer_snapshot:
+                        saw_incremental_answer_updates = True
+                    latest_answer_snapshot = answer_snapshot
+                if thought_snapshot:
+                    if snapshot_shows_cumulative_growth(
+                        latest_thought_snapshot, thought_snapshot
+                    ):
+                        saw_cumulative_thought_growth = True
+                    elif latest_thought_snapshot:
+                        saw_incremental_thought_updates = True
+                    latest_thought_snapshot = thought_snapshot
+
+                incremental_events, streamed_answer_text, streamed_thought_text = (
+                    chunk_to_incremental_events(
+                        request_id,
+                        chunk,
+                        streamed_answer_text,
+                        streamed_thought_text,
+                    )
+                )
+                for event in incremental_events:
                     write_event(event["type"], **{k: v for k, v in event.items() if k != "type"})
         except Exception as exc:
             if self._cancelled_request_id == request_id:
-                write_event("done", request_id=request_id)
+                emit_done()
             else:
                 write_event("error", request_id=request_id, message=str(exc))
                 traceback.print_exc(file=sys.stderr)
         else:
-            write_event("done", request_id=request_id)
+            emit_done()
         finally:
             try:
                 conversation.__exit__(None, None, None)

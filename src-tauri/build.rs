@@ -91,8 +91,18 @@ fn ensure_bundled_downloadable_asset(
     }
 
     if resource_path.exists() {
-        verify_asset_sha256(resource_path, expected_sha256, asset_name);
-        return;
+        match verify_asset_sha256_result(resource_path, expected_sha256, asset_name) {
+            Ok(()) => return,
+            Err(error) => {
+                println!(
+                    "cargo:warning={} checksum verification failed at {}: {}. Re-vendoring.",
+                    asset_name,
+                    resource_path.display(),
+                    error
+                );
+                let _ = fs::remove_file(resource_path);
+            }
+        }
     }
 
     if should_skip_vendor_download() {
@@ -134,8 +144,18 @@ fn ensure_bundled_python_wheel(resource_path: &Path, asset: &RuntimeAssetSpec) {
     }
 
     if resource_path.exists() {
-        verify_asset_sha256(resource_path, expected_sha256, asset_name);
-        return;
+        match verify_asset_sha256_result(resource_path, expected_sha256, asset_name) {
+            Ok(()) => return,
+            Err(error) => {
+                println!(
+                    "cargo:warning={} checksum verification failed at {}: {}. Re-vendoring.",
+                    asset_name,
+                    resource_path.display(),
+                    error
+                );
+                let _ = fs::remove_file(resource_path);
+            }
+        }
     }
 
     if should_skip_vendor_download() {
@@ -172,16 +192,22 @@ fn copy_local_asset(
         fs::create_dir_all(parent).expect("failed to create bundled runtime directory");
     }
 
-    fs::copy(source_path, target_path).unwrap_or_else(|error| {
+    let staged_path = staged_asset_path(target_path, "part");
+    if staged_path.exists() {
+        let _ = fs::remove_file(&staged_path);
+    }
+
+    fs::copy(source_path, &staged_path).unwrap_or_else(|error| {
         panic!(
             "Failed to copy {} from {} to {}: {}",
             asset_name,
             source_path.display(),
-            target_path.display(),
+            staged_path.display(),
             error
         )
     });
-    verify_asset_sha256(target_path, expected_sha256, asset_name);
+    verify_asset_sha256(&staged_path, expected_sha256, asset_name);
+    install_staged_asset(&staged_path, target_path, asset_name);
 }
 
 fn download_asset(
@@ -219,15 +245,20 @@ fn download_asset(
             asset_name, url, error
         )
     });
-    fs::write(target_path, &bytes).unwrap_or_else(|error| {
+    let staged_path = staged_asset_path(target_path, "part");
+    if staged_path.exists() {
+        let _ = fs::remove_file(&staged_path);
+    }
+    fs::write(&staged_path, &bytes).unwrap_or_else(|error| {
         panic!(
             "Failed to write {} to {}: {}",
             asset_name,
-            target_path.display(),
+            staged_path.display(),
             error
         )
     });
-    verify_asset_sha256(target_path, expected_sha256, asset_name);
+    verify_asset_sha256(&staged_path, expected_sha256, asset_name);
+    install_staged_asset(&staged_path, target_path, asset_name);
 }
 
 fn should_skip_vendor_download() -> bool {
@@ -237,22 +268,78 @@ fn should_skip_vendor_download() -> bool {
 }
 
 fn verify_asset_sha256(path: &Path, expected_sha256: &str, asset_name: &str) {
-    let bytes = fs::read(path).unwrap_or_else(|error| {
-        panic!(
+    verify_asset_sha256_result(path, expected_sha256, asset_name).unwrap_or_else(|error| {
+        panic!("{}", error);
+    });
+}
+
+fn verify_asset_sha256_result(
+    path: &Path,
+    expected_sha256: &str,
+    asset_name: &str,
+) -> Result<(), String> {
+    let bytes = fs::read(path).map_err(|error| {
+        format!(
             "Failed to read {} from {} for checksum verification: {}",
             asset_name,
             path.display(),
             error
         )
-    });
+    })?;
     let actual_sha256 = format!("{:x}", Sha256::digest(&bytes));
     if actual_sha256 != expected_sha256 {
-        panic!(
+        return Err(format!(
             "{} checksum mismatch for {}. Expected {}, got {}.",
             asset_name,
             path.display(),
             expected_sha256,
             actual_sha256
+        ));
+    }
+    Ok(())
+}
+
+fn staged_asset_path(target_path: &Path, suffix: &str) -> PathBuf {
+    let file_name = target_path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| "asset".to_string());
+    target_path.with_file_name(format!("{}.{}", file_name, suffix))
+}
+
+fn install_staged_asset(staged_path: &Path, target_path: &Path, asset_name: &str) {
+    let backup_path = staged_asset_path(target_path, "bak");
+    if backup_path.exists() {
+        let _ = fs::remove_file(&backup_path);
+    }
+
+    let replaced_existing = if target_path.exists() {
+        fs::rename(target_path, &backup_path).unwrap_or_else(|error| {
+            panic!(
+                "Failed to stage existing {} at {} for replacement: {}",
+                asset_name,
+                target_path.display(),
+                error
+            )
+        });
+        true
+    } else {
+        false
+    };
+
+    if let Err(error) = fs::rename(staged_path, target_path) {
+        if replaced_existing {
+            let _ = fs::rename(&backup_path, target_path);
+        }
+        panic!(
+            "Failed to finalize {} at {}: {}",
+            asset_name,
+            target_path.display(),
+            error
         );
+    }
+
+    if replaced_existing {
+        let _ = fs::remove_file(&backup_path);
     }
 }
