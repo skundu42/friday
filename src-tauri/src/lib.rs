@@ -1,6 +1,7 @@
 mod models;
 mod python_runtime;
 mod rag;
+mod runtime_manifest;
 mod searxng;
 mod session;
 mod settings;
@@ -1015,7 +1016,7 @@ async fn send_message(
         return Err(error);
     }
 
-    let model_name = sidecar.active_model().id;
+    let model_name = sidecar.active_model().id.clone();
     tracing::info!(
         "Message queued in session {} (chars={}, attachments={}, model={})",
         session_id,
@@ -1077,7 +1078,13 @@ async fn send_message(
 
     if tools_enabled {
         if let Err(error) = searxng.ensure_ready().await {
-            persist_and_emit_assistant_error(&app, &state, &session_id, &error, Some(model_name));
+            persist_and_emit_assistant_error(
+                &app,
+                &state,
+                &session_id,
+                &error,
+                Some(model_name.as_str()),
+            );
             return Err(error);
         }
     }
@@ -1097,7 +1104,13 @@ async fn send_message(
     {
         Ok(rx) => rx,
         Err(error) => {
-            persist_and_emit_assistant_error(&app, &state, &session_id, &error, Some(model_name));
+            persist_and_emit_assistant_error(
+                &app,
+                &state,
+                &session_id,
+                &error,
+                Some(model_name.as_str()),
+            );
             return Err(error);
         }
     };
@@ -1170,7 +1183,13 @@ async fn send_message(
     }
 
     if let Some(error) = stream_error {
-        persist_and_emit_assistant_error(&app, &state, &session_id, &error, Some(model_name));
+        persist_and_emit_assistant_error(
+            &app,
+            &state,
+            &session_id,
+            &error,
+            Some(model_name.as_str()),
+        );
         return Err(error);
     }
 
@@ -1188,7 +1207,7 @@ async fn send_message(
                 role: "assistant",
                 content: &full_response,
                 content_parts: assistant_parts.as_ref(),
-                model_used: Some(model_name),
+                model_used: Some(model_name.as_str()),
                 latency_ms: None,
                 title_source: None,
             },
@@ -1199,7 +1218,7 @@ async fn send_message(
                 &state,
                 &session_id,
                 &persisted_error,
-                Some(model_name),
+                Some(model_name.as_str()),
             );
             return Err(persisted_error);
         }
@@ -1209,7 +1228,7 @@ async fn send_message(
         "chat-done",
         serde_json::json!({
             "sessionId": &session_id,
-            "model": model_name,
+            "model": &model_name,
             "cancelled": cancelled,
             "hasContent": !full_response.trim().is_empty() || !full_thinking.trim().is_empty(),
         }),

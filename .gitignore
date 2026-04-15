@@ -33,3 +33,4 @@ default.profraw
 src-tauri/resources/litert-runtime/**
 !src-tauri/resources/litert-runtime/
 !src-tauri/resources/litert-runtime/README.md
+!src-tauri/resources/litert-runtime/runtime-manifest.json

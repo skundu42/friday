@@ -1,10 +1,6 @@
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
-const MANAGED_RUNTIME_VERSION: &str = "0.10.1";
-const BUNDLED_PYTHON_RUNTIME_RESOURCE_PATH: &str =
-    env!("FRIDAY_BUNDLED_PYTHON_RUNTIME_RESOURCE_PATH");
-
 #[derive(Debug, Clone)]
 pub struct EmbeddedPythonPaths {
     pub python_binary: PathBuf,
@@ -14,20 +10,22 @@ pub struct EmbeddedPythonPaths {
 pub fn ensure_embedded_python_runtime(
     app_data_dir: &Path,
     resource_dir: &Path,
+    runtime_version: &str,
+    bundled_python_runtime_relative_path: &str,
 ) -> Result<EmbeddedPythonPaths, String> {
-    if BUNDLED_PYTHON_RUNTIME_RESOURCE_PATH.trim().is_empty() {
+    if bundled_python_runtime_relative_path.trim().is_empty() {
         return Err("Friday web assist is not yet supported on this platform build.".to_string());
     }
 
     let runtime_dir = app_data_dir
         .join("litert-runtime")
-        .join(MANAGED_RUNTIME_VERSION)
+        .join(runtime_version)
         .join("python");
     let python_binary = runtime_dir.join("bin").join("python3");
     let python_lib_dir = runtime_dir.join("lib");
 
     let source_path =
-        bundled_resource_source_path(resource_dir, BUNDLED_PYTHON_RUNTIME_RESOURCE_PATH);
+        bundled_resource_source_path(resource_dir, bundled_python_runtime_relative_path);
     if !source_path.exists() {
         return Err(format!(
             "Bundled Friday Python runtime asset is missing at {}. Rebuild the app so the runtime is packaged.",

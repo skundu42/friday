@@ -1,6 +1,7 @@
 use crate::python_runtime::{
     bundled_resource_source_path, ensure_embedded_python_runtime, sha256_bytes_hex, sha256_file_hex,
 };
+use crate::runtime_manifest::embedded_runtime_manifest;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
@@ -27,6 +28,20 @@ const PROCESS_OUTPUT_TAIL_LIMIT: usize = 32 * 1024;
 const SOURCE_STAMP_FILENAME: &str = ".friday-source-stamp.json";
 const DEPENDENCIES_STAMP_FILENAME: &str = ".friday-dependencies-stamp.json";
 const WHEEL_CACHE_STAMP_FILENAME: &str = ".friday-wheel-cache-stamp";
+
+fn ensure_embedded_python_runtime_for_searxng(
+    app_data_dir: &Path,
+    resource_dir: &Path,
+) -> Result<crate::python_runtime::EmbeddedPythonPaths, String> {
+    let manifest = embedded_runtime_manifest()?;
+    let platform = manifest.platform_for_current_target()?;
+    ensure_embedded_python_runtime(
+        app_data_dir,
+        resource_dir,
+        &platform.runtime_version,
+        &platform.python_runtime_archive.relative_resource_path,
+    )
+}
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -716,8 +731,10 @@ impl SearXNGManager {
         requirements_lock: &Path,
         requirements_lock_sha256: &str,
     ) -> Result<(), String> {
-        let python =
-            ensure_embedded_python_runtime(&self.app_data_dir()?, &self.resource_dir_path()?)?;
+        let python = ensure_embedded_python_runtime_for_searxng(
+            &self.app_data_dir()?,
+            &self.resource_dir_path()?,
+        )?;
         tracing::info!(
             "Preparing Friday-managed local SearXNG {} in {}",
             manifest.version,
@@ -942,8 +959,10 @@ impl SearXNGManager {
     }
 
     async fn start_process(&self) -> Result<(), String> {
-        let python =
-            ensure_embedded_python_runtime(&self.app_data_dir()?, &self.resource_dir_path()?)?;
+        let python = ensure_embedded_python_runtime_for_searxng(
+            &self.app_data_dir()?,
+            &self.resource_dir_path()?,
+        )?;
         let manifest = self.load_source_manifest()?;
         let source_root = self.source_version_dir(&manifest.version)?;
         let webapp_script = source_root.join("searx").join("webapp.py");
@@ -1153,7 +1172,8 @@ impl SearXNGManager {
     fn cleanup_stale_processes(&self) -> Result<(), String> {
         let app_data_dir = self.app_data_dir()?;
         let resource_dir = self.resource_dir_path()?;
-        let python = match ensure_embedded_python_runtime(&app_data_dir, &resource_dir) {
+        let python = match ensure_embedded_python_runtime_for_searxng(&app_data_dir, &resource_dir)
+        {
             Ok(paths) => paths,
             Err(_) => return Ok(()),
         };
