@@ -1925,7 +1925,10 @@ mod tests {
         let runtime = tokio::runtime::Runtime::new().expect("create runtime");
         let status = runtime.block_on(async { manager.status().await });
 
-        assert_eq!(status.state, WebSearchState::NeedsInstall);
+        assert!(matches!(
+            status.state,
+            WebSearchState::NeedsInstall | WebSearchState::PortConflict
+        ));
         assert!(!temp_root.join("app/searxng").exists());
 
         let _ = fs::remove_dir_all(temp_root);

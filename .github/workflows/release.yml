@@ -126,8 +126,6 @@ jobs:
         include:
           - label: Apple Silicon
             target: aarch64-apple-darwin
-          - label: Intel
-            target: x86_64-apple-darwin
     env:
       CI: true
     steps:
@@ -230,7 +228,7 @@ jobs:
           releaseBody: |
             Automated release for `${{ needs.verify-tag.outputs.tag_name }}`.
 
-            Download the macOS assets below for Apple Silicon or Intel.
+            Download the macOS assets below for Apple Silicon.
           releaseCommitish: ${{ github.sha }}
           args: --target ${{ matrix.target }}
           uploadWorkflowArtifacts: true
