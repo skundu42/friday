@@ -38,6 +38,18 @@ struct WorkerEngineConfig {
 }
 
 #[derive(Debug)]
+pub(crate) struct PythonWorkerSpawnConfig<'a> {
+    pub python_binary: &'a Path,
+    pub worker_script: &'a Path,
+    pub model_path: &'a Path,
+    pub max_num_tokens: u32,
+    pub backend: &'a str,
+    pub web_search_base_url: Option<&'a str>,
+    pub python_site_packages: &'a Path,
+    pub python_runtime_lib_dir: &'a Path,
+}
+
+#[derive(Debug)]
 struct ActiveRequest {
     request_id: String,
     sender: mpsc::Sender<StreamEvent>,
@@ -160,16 +172,18 @@ pub struct PythonWorkerClient {
 }
 
 impl PythonWorkerClient {
-    pub async fn spawn(
-        python_binary: &Path,
-        worker_script: &Path,
-        model_path: &Path,
-        max_num_tokens: u32,
-        backend: &str,
-        web_search_base_url: Option<&str>,
-        python_site_packages: &Path,
-        python_runtime_lib_dir: &Path,
-    ) -> Result<Self, String> {
+    pub async fn spawn(config: PythonWorkerSpawnConfig<'_>) -> Result<Self, String> {
+        let PythonWorkerSpawnConfig {
+            python_binary,
+            worker_script,
+            model_path,
+            max_num_tokens,
+            backend,
+            web_search_base_url,
+            python_site_packages,
+            python_runtime_lib_dir,
+        } = config;
+
         let mut command = Command::new(python_binary);
         command
             .arg(worker_script)

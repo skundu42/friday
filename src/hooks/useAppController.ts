@@ -888,15 +888,17 @@ export function useAppController() {
 
     try {
       await invoke("send_message", {
-        sessionId,
-        message:
-          trimmed ||
-          (hasAttachments
-            ? "What can you tell me about these files?"
-            : trimmed),
-        attachments: serializedAttachments,
-        thinkingEnabled: effectiveThinkingEnabled,
-        webAssistEnabled: effectiveWebAssistEnabled,
+        request: {
+          sessionId,
+          message:
+            trimmed ||
+            (hasAttachments
+              ? "What can you tell me about these files?"
+              : trimmed),
+          attachments: serializedAttachments,
+          thinkingEnabled: effectiveThinkingEnabled,
+          webAssistEnabled: effectiveWebAssistEnabled,
+        },
       });
       if (pendingSessionIdRef.current === sessionId) {
         flushBufferedTokens();

@@ -395,7 +395,8 @@ describe("useAppController", () => {
     expect(
       invokeMock.mock.calls.some(
         ([command, payload]) =>
-          command === "send_message" && payload?.sessionId === "session-a",
+          command === "send_message" &&
+          payload?.request?.sessionId === "session-a",
       ),
     ).toBe(true);
     expect(result.current.isGenerating).toBe(false);
@@ -684,9 +685,9 @@ describe("useAppController", () => {
       invokeMock.mock.calls.some(
         ([command, payload]) =>
           command === "send_message" &&
-          payload?.sessionId === "session-a" &&
-          payload?.attachments?.[0]?.path === "/tmp/test-audio.wav" &&
-          payload?.attachments?.[0]?.mimeType === "audio/wav",
+          payload?.request?.sessionId === "session-a" &&
+          payload?.request?.attachments?.[0]?.path === "/tmp/test-audio.wav" &&
+          payload?.request?.attachments?.[0]?.mimeType === "audio/wav",
       ),
     ).toBe(true);
   });
@@ -728,9 +729,9 @@ describe("useAppController", () => {
       invokeMock.mock.calls.some(
         ([command, payload]) =>
           command === "send_message" &&
-          payload?.sessionId === "session-a" &&
-          payload?.message === "What is in this image?" &&
-          payload?.attachments === null,
+          payload?.request?.sessionId === "session-a" &&
+          payload?.request?.message === "What is in this image?" &&
+          payload?.request?.attachments === null,
       ),
     ).toBe(true);
   });
@@ -1221,8 +1222,8 @@ describe("useAppController", () => {
       invokeMock.mock.calls.some(
         ([command, payload]) =>
           command === "send_message" &&
-          payload?.sessionId === "session-a" &&
-          payload?.thinkingEnabled === false,
+          payload?.request?.sessionId === "session-a" &&
+          payload?.request?.thinkingEnabled === false,
       ),
     ).toBe(true);
   });
@@ -1306,8 +1307,8 @@ describe("useAppController", () => {
       invokeMock.mock.calls.some(
         ([command, payload]) =>
           command === "send_message" &&
-          payload?.sessionId === "session-a" &&
-          payload?.webAssistEnabled === true,
+          payload?.request?.sessionId === "session-a" &&
+          payload?.request?.webAssistEnabled === true,
       ),
     ).toBe(true);
 

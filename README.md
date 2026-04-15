@@ -1,50 +1,14 @@
 # Friday
 
-Friday is a local-first desktop AI assistant. It runs Gemma 4 models on-device through a Friday-managed LiteRT runtime, stores chats and settings in local SQLite, supports multimodal attachments, and can optionally provision a localhost SearXNG stack for web-assisted replies.
+Friday is a your personal local AI assistant which runs efficienltly even in a 8gb Macbook Air. Private by design so works 100% offline. Keep your data where it belongs - with you!
 
 ## Why Friday
 
-- Local-first by default: chats, prompts, settings, and attached files stay on-device unless the user explicitly enables web assist.
-- Real desktop app: React + Tauri UI with a Rust backend, not a browser-only shell.
-- Managed runtime flow: Friday installs and maintains the bundled LiteRT runtime, embedded CPython runtime, worker script, and patched LiteRT Python wheel itself.
+- Zero Setup needed. Install and get started right away.
+- Local-first by default: chats, prompts, settings, and attached files stay on-device.
+- Supports toolcalling including web search out of the box.
 - Practical multimodality: text/code files, PDFs, DOCX, images, and audio can all be attached in the main chat flow.
-- Contributor-friendly structure: UI code lives in `src/`; app/runtime logic lives in `src-tauri/`.
-
-## Platform Support
-
-Current managed-runtime builds are supported on macOS Apple Silicon.
-
-- `src-tauri/build.rs` currently vendors the managed LiteRT runtime only for `macos/aarch64`.
-- The bundled CPython runtime, patched `litert_lm_api` wheel, and worker script are also wired for `macos/aarch64` today.
-- Treat Apple Silicon as the supported build and packaging target until additional runtime specs are added.
-
-## Current Status
-
-`v0.1.0` currently ships:
-
-- Streaming local chat with persistent sessions
-- Automatic chat titles derived from the first user message while new chats still start as `New chat`
-- First-run setup wizard with display-name capture, runtime readiness checks, and model download progress
-- Responsive layout with a docked sidebar on wide screens and a drawer-based sidebar on narrow screens
-- Two built-in local models: `Gemma 4 E2B` and `Gemma 4 E4B`
-- File attachments for text/code files, PDFs, DOCX, images, and audio
-- In-app microphone recording for audio prompts when the environment supports it
-- Reply language control for English, Hindi, Bengali, Marathi, Tamil, and Punjabi
-- Optional thinking mode for supported models
-- Assistant reasoning disclosure with a collapsible reasoning panel
-- Rich assistant message rendering with GitHub-flavored Markdown, copyable code blocks, and KaTeX math
-- Optional web-assisted replies from the chat composer
-- Friday-managed localhost SearXNG provisioning and startup for web search when web assist is enabled
-- Model download, switching, RAM checks, token-budget controls, and startup pre-warming controls
-- Backend RAG ingestion/search commands and prompt-time RAG augmentation hooks
-- Local log output under the app-data `logs/` directory
-
-Not fully productized yet:
-
-- No dedicated frontend RAG document manager
-- Tool activity is surfaced in the UI as inline status, not as a full transcript artifact
-- The backend has local file helper tools, but normal chat keeps them disabled
-- `temperature` and `top_p` are persisted in backend settings, but they are not exposed in the main settings UI
+- Runs Google Gemma models which are highly capable efficiently by using Google's own llm runtime engine natively.
 
 ## Privacy And Network Behavior
 
@@ -97,66 +61,6 @@ Python worker
 LiteRT-LM runtime
   -> Gemma 4 local inference
 ```
-
-Responsibilities:
-
-- `src/`: UI, session navigation, chat interactions, attachments, reasoning display, settings
-- `src/components/MessageBubble.tsx`: Markdown rendering, code-copy UI, reasoning disclosure, KaTeX math
-- `src/hooks/useAppController.ts`: app state hub, event listeners, session/message flow, settings persistence
-- `src-tauri/src/lib.rs`: IPC surface, prompt assembly, persistence flow, local observability setup, streaming events
-- `src-tauri/src/sidecar.rs`: model registry, runtime bootstrap, model download lifecycle, worker warmup, idle shutdown
-- `src-tauri/src/python_runtime.rs`: embedded CPython installation/sync helpers
-- `src-tauri/src/searxng.rs`: local SearXNG provisioning, process lifecycle, health checks, and status reporting
-- `src-tauri/src/models/python_worker.rs`: Rust bridge to the bundled Friday Python worker
-- `src-tauri/resources/litert-python/macos-aarch64/worker/friday_litert_worker.py`: LiteRT-LM worker implementation, tool hooks, streaming protocol, and SearXNG-backed web search
-- `src-tauri/src/rag/mod.rs`: local RAG ingestion and search
-- `src-tauri/build.rs`: build-time runtime vendoring and bundled asset path wiring
-
-Persistence details:
-
-- SQLite stores sessions, messages, settings, and RAG metadata locally.
-- `messages.content_parts` persists multimodal user content and assistant thinking traces alongside the plain-text message body.
-- Session titles start as `New chat` and are promoted to a preview of the first user message when possible.
-
-## Tech Stack
-
-Frontend:
-
-- React 19
-- TypeScript
-- Vite 6
-- Ant Design 5
-- `@tauri-apps/api` v2
-- `@tauri-apps/plugin-dialog` v2
-- `react-markdown`
-- `remark-gfm`
-- `remark-math`
-- `rehype-katex`
-- `katex`
-- Vitest + Testing Library
-
-Backend:
-
-- Tauri 2
-- Rust 2021
-- `rusqlite` with bundled SQLite
-- `tokio`
-- `reqwest`
-- `serde` / `serde_json`
-- `tracing` / `tracing-subscriber`
-- `sysinfo`
-- `base64`
-- `flate2`
-- `tar`
-- `zip`
-- `sha2`
-
-Inference/runtime:
-
-- LiteRT-LM `0.10.1`
-- bundled `lit` runtime managed by Friday
-- embedded CPython `3.12.10`
-- locally patched `litert_lm_api` wheel for Gemma 4 image slots
 
 ## Getting Started
 
@@ -213,13 +117,6 @@ npm run check
 
 `npm run check` is the default local validation flow. CI and release workflows additionally run `npm run cargo:clippy`.
 
-### Manual Verification
-
-- Web assist off: normal local chat should work without preparing or starting SearXNG.
-- First web-assisted send on a clean machine: Friday should create `app_data/searxng/`, download the pinned source/dependency artifacts, install them, start the local process, pass readiness probes, and return search-backed tool results.
-- Offline first use with web assist on: the send should fail with an actionable provisioning error and the same prompt should still work with web assist disabled.
-- Broken local SearXNG config with `json` removed from `search.formats`: readiness should fail with `Local SearXNG config is invalid; JSON output is disabled.`
-- App shutdown and relaunch: Friday should stop its managed SearXNG process on clean exit and clean up stale orphaned SearXNG and worker processes on next startup.
 
 ## First-Run Setup
 
@@ -280,48 +177,6 @@ daksha-ai/
     └── src/
 ```
 
-Important files:
-
-- [`src/App.tsx`](src/App.tsx): top-level layout, setup gating, sidebar/drawer behavior
-- [`src/components/ChatPane.tsx`](src/components/ChatPane.tsx): chat UI, attachments, web/thinking/audio controls
-- [`src/components/MessageBubble.tsx`](src/components/MessageBubble.tsx): Markdown rendering, reasoning disclosure, and copy actions
-- [`src/components/SettingsPanel.tsx`](src/components/SettingsPanel.tsx): model management, token budget, reply language, startup pre-warm settings
-- [`src/components/SetupWizard.tsx`](src/components/SetupWizard.tsx): first-run onboarding and download flow
-- [`src/hooks/useAppController.ts`](src/hooks/useAppController.ts): app state hub, event listeners, message flow, settings persistence
-- [`src/test/setup.ts`](src/test/setup.ts): shared Vitest/jsdom setup
-- [`src-tauri/build.rs`](src-tauri/build.rs): runtime asset vendoring and build-time path wiring
-- [`src-tauri/src/lib.rs`](src-tauri/src/lib.rs): IPC surface and persistence/prompt pipeline
-- [`src-tauri/src/sidecar.rs`](src-tauri/src/sidecar.rs): model/runtime lifecycle
-- [`src-tauri/src/python_runtime.rs`](src-tauri/src/python_runtime.rs): embedded CPython runtime installation helpers
-- [`src-tauri/src/searxng.rs`](src-tauri/src/searxng.rs): local SearXNG provisioning, process lifecycle, and readiness checks
-- [`src-tauri/src/models/python_worker.rs`](src-tauri/src/models/python_worker.rs): Rust-side worker protocol and prompt normalization
-- [`src-tauri/src/rag/mod.rs`](src-tauri/src/rag/mod.rs): RAG ingestion/search
-
-## Runtime Data
-
-Friday stores app data in the platform app-data directory. On macOS, the Tauri identifier is `com.friday.app`, so the app data typically lives under:
-
-```text
-~/Library/Application Support/com.friday.app/
-```
-
-Important paths:
-
-- `friday.db`
-- `logs/friday.log`
-- `litert-runtime/0.10.1/`
-- `lit-home/`
-- `lit-home/models/<model-id>/model.litertlm`
-- `searxng/`
-- `temp/`
-- `rag/`
-- `models/`
-
-Notes:
-
-- Friday still creates `models/` during setup, but the managed LiteRT runtime currently stores model files under `lit-home/models/...` because the runtime is launched with `LIT_DIR=app_data/lit-home`.
-- Temporary uploaded and recorded files live under `temp/` and are cleaned up on startup.
-
 ## Release Workflow
 
 The repo includes a PR/main CI workflow in [`.github/workflows/ci.yml`](.github/workflows/ci.yml) and a tag-driven macOS release workflow in [`.github/workflows/release.yml`](.github/workflows/release.yml).
@@ -350,15 +205,6 @@ Accepted tag formats:
 - When changing a Tauri command or payload, update both Rust handlers and the matching TypeScript types in [`src/types.ts`](src/types.ts).
 - Model/runtime changes usually span `src-tauri/build.rs`, `src-tauri/src/sidecar.rs`, `src-tauri/src/python_runtime.rs`, and the bundled resource tree under `src-tauri/resources/`.
 
-## Current Limitations
-
-- RAG is implemented in the backend but not exposed as a complete end-user document workflow.
-- The app is local-first, not network-free; enabling web assist allows outbound requests through Friday-managed tooling.
-- Changing the model or some generation settings can restart the local runtime before the next reply.
-- Tool-call results are emitted internally, but the conversation UI still shows them only as status text rather than a first-class transcript artifact.
-- Local file tools are intentionally disabled in the shipped chat path.
-- `temperature` and `top_p` are supported by the backend settings schema but not surfaced in the main settings UI.
-
 ## License
 
-This repository does not currently include a standalone `LICENSE` file. Add one before treating the project as broadly redistributable open source.
+Check the License.md file for license details
