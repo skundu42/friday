@@ -14,6 +14,10 @@ const WORKER_READY_TIMEOUT: Duration = Duration::from_secs(120);
 const WORKER_CANCEL_TIMEOUT: Duration = Duration::from_secs(3);
 const WORKER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
+fn worker_profile_output_path() -> PathBuf {
+    std::env::temp_dir().join("friday-python-worker-%p.profraw")
+}
+
 #[derive(Debug)]
 pub enum StreamEvent {
     Token(String),
@@ -190,6 +194,7 @@ impl PythonWorkerClient {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .env("LLVM_PROFILE_FILE", worker_profile_output_path())
             .env("PYTHONUNBUFFERED", "1")
             .env("PYTHONNOUSERSITE", "1")
             .env("PYTHONPATH", python_site_packages)
@@ -904,6 +909,15 @@ mod tests {
                 result: serde_json::json!({"result":"4"}),
             }
         );
+    }
+
+    #[test]
+    fn worker_profile_output_uses_a_writable_temp_path() {
+        let path = worker_profile_output_path();
+        let path_text = path.to_string_lossy();
+
+        assert!(path.starts_with(std::env::temp_dir()));
+        assert!(path_text.contains("friday-python-worker-%p.profraw"));
     }
 
     #[test]
