@@ -599,26 +599,9 @@ impl SidecarManager {
 
     async fn spawn_daemon_worker(
         &self,
-        model_path: &Path,
-        max_tokens: u32,
-        backend: &str,
-        web_search_base_url: Option<&str>,
-        python_binary: &Path,
-        worker_script: &Path,
-        python_site_packages: &Path,
-        python_runtime_lib_dir: &Path,
+        config: PythonWorkerSpawnConfig<'_>,
     ) -> Result<PythonWorkerClient, String> {
-        PythonWorkerClient::spawn(
-            python_binary,
-            worker_script,
-            model_path,
-            max_tokens,
-            backend,
-            web_search_base_url,
-            python_site_packages,
-            python_runtime_lib_dir,
-        )
-        .await
+        PythonWorkerClient::spawn(config).await
     }
 
     async fn start_daemon_inner(&self) -> Result<(), String> {
@@ -641,17 +624,18 @@ impl SidecarManager {
             preferred_backend,
         );
 
-        let (client, selected_backend) = match PythonWorkerClient::spawn(PythonWorkerSpawnConfig {
-            python_binary: &python_binary,
-            worker_script: &worker_script,
-            model_path: &model_path,
-            max_num_tokens: max_tokens,
-            backend: preferred_backend,
-            web_search_base_url: web_search_base_url.as_deref(),
-            python_site_packages: &python_site_packages,
-            python_runtime_lib_dir: &python_runtime_lib_dir,
-        })
-        .await
+        let (client, selected_backend) = match self
+            .spawn_daemon_worker(PythonWorkerSpawnConfig {
+                python_binary: &python_binary,
+                worker_script: &worker_script,
+                model_path: &model_path,
+                max_num_tokens: max_tokens,
+                backend: preferred_backend,
+                web_search_base_url: web_search_base_url.as_deref(),
+                python_site_packages: &python_site_packages,
+                python_runtime_lib_dir: &python_runtime_lib_dir,
+            })
+            .await
         {
             Ok(client) => (client, preferred_backend),
             Err(primary_error) if preferred_backend != "cpu" => {
@@ -661,17 +645,18 @@ impl SidecarManager {
                     primary_error
                 );
 
-                match PythonWorkerClient::spawn(PythonWorkerSpawnConfig {
-                    python_binary: &python_binary,
-                    worker_script: &worker_script,
-                    model_path: &model_path,
-                    max_num_tokens: max_tokens,
-                    backend: "cpu",
-                    web_search_base_url: web_search_base_url.as_deref(),
-                    python_site_packages: &python_site_packages,
-                    python_runtime_lib_dir: &python_runtime_lib_dir,
-                })
-                .await
+                match self
+                    .spawn_daemon_worker(PythonWorkerSpawnConfig {
+                        python_binary: &python_binary,
+                        worker_script: &worker_script,
+                        model_path: &model_path,
+                        max_num_tokens: max_tokens,
+                        backend: "cpu",
+                        web_search_base_url: web_search_base_url.as_deref(),
+                        python_site_packages: &python_site_packages,
+                        python_runtime_lib_dir: &python_runtime_lib_dir,
+                    })
+                    .await
                 {
                     Ok(client) => (client, "cpu"),
                     Err(fallback_error) => {
