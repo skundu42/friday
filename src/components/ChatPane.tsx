@@ -22,6 +22,7 @@ import type {
   FileAttachment,
   Message,
   ReplyLanguage,
+  WebSearchStatus,
 } from "../types";
 
 const { TextArea } = Input;
@@ -80,6 +81,36 @@ const SPECIAL_ATTACHMENT_NAMES = [".env", ".gitignore", "dockerfile", "makefile"
 const IMAGE_INPUT_UNAVAILABLE_MESSAGE =
   "Image attachments are unavailable with the current local backend.";
 
+function userFacingWebSearchStatusMessage(
+  backendStatus: BackendStatus | null,
+  webSearchAvailable: boolean,
+  isWebSearchActive: boolean,
+  webSearchStatus: WebSearchStatus | null,
+): string | null {
+  if (!backendStatus?.supports_native_tools) {
+    return "Web search is unavailable with the current local backend.";
+  }
+
+  const state = webSearchStatus?.state;
+  const message = webSearchStatus?.message;
+
+  if (!webSearchAvailable) {
+    if (state === "stopped" || state === "needs_install") {
+      return null;
+    }
+    return message ?? "Local web search is unavailable.";
+  }
+
+  if (isWebSearchActive && state !== "ready") {
+    if (state === "stopped" || state === "needs_install") {
+      return null;
+    }
+    return message ?? "Local web search is preparing.";
+  }
+
+  return null;
+}
+
 interface ChatPaneProps {
   messages: Message[];
   isGenerating: boolean;
@@ -100,6 +131,7 @@ interface ChatPaneProps {
   webSearchEnabled?: boolean;
   thinkingEnabled?: boolean;
   webSearchAvailable?: boolean;
+  webSearchStatus?: WebSearchStatus | null;
   thinkingAvailable?: boolean;
   audioInputAvailable?: boolean;
   onToggleWebSearch?: () => void;
@@ -161,10 +193,12 @@ function humanizeBackendState(state?: string) {
       return "Setup required";
     case "model_missing":
       return "Model missing";
+    case "insufficient_ram":
+      return "Insufficient RAM";
     case "start_failed":
       return "Unavailable";
     default:
-      return "Connected";
+      return "Disconnected";
   }
 }
 
@@ -191,6 +225,7 @@ export default function ChatPane({
   webSearchEnabled = false,
   thinkingEnabled = false,
   webSearchAvailable = false,
+  webSearchStatus = null,
   thinkingAvailable = false,
   audioInputAvailable = false,
   onToggleWebSearch,
@@ -407,7 +442,7 @@ export default function ChatPane({
                 ? { dataUrl: imageDataUrl }
                 : result.content.type === "audio"
                   ? { path: result.content.path }
-                : null,
+                  : null,
         };
 
         setAttachments((prev) =>
@@ -803,12 +838,21 @@ export default function ChatPane({
   const backendLabel = backendStatus?.connected
     ? "Connected"
     : humanizeBackendState(backendStatus?.state);
+  const headerSubtitle = activeSessionTitle
+    ? `${activeSessionTitle} · ${backendLabel}`
+    : backendLabel;
   const privacyStatus = isWebSearchActive
     ? "Web enabled for this message; Friday may contact external sites"
     : "On-device only for this message";
   const capabilityStatus = imageInputAvailable
     ? null
     : IMAGE_INPUT_UNAVAILABLE_MESSAGE;
+  const webSearchStatusMessage = userFacingWebSearchStatusMessage(
+    backendStatus,
+    webSearchAvailable,
+    isWebSearchActive,
+    webSearchStatus,
+  );
 
   return (
     <div
@@ -902,7 +946,7 @@ export default function ChatPane({
                 textOverflow: "ellipsis",
               }}
             >
-              {activeSessionTitle} · On-device by default
+              {headerSubtitle}
             </Text>
           </div>
         </div>
@@ -940,21 +984,23 @@ export default function ChatPane({
           >
             {backendLabel}
           </Tag>
-          <Tag
-            color={isWebSearchActive ? "warning" : "success"}
-            style={{
-              margin: 0,
-              minHeight: 30,
-              display: "inline-flex",
-              alignItems: "center",
-              paddingInline: 10,
-              border: "2px solid #2C2C2C",
-              borderRadius: 999,
-              fontWeight: 600,
-            }}
-          >
-            {isWebSearchActive ? "Web On" : "On-device"}
-          </Tag>
+          {isWebSearchActive ? (
+            <Tag
+              color="warning"
+              style={{
+                margin: 0,
+                minHeight: 30,
+                display: "inline-flex",
+                alignItems: "center",
+                paddingInline: 10,
+                border: "2px solid #2C2C2C",
+                borderRadius: 999,
+                fontWeight: 600,
+              }}
+            >
+              Web On
+            </Tag>
+          ) : null}
         </div>
       </div>
 
@@ -984,8 +1030,7 @@ export default function ChatPane({
                 type="secondary"
                 style={{ display: "block", fontSize: 14, lineHeight: 1.6 }}
               >
-                Friday runs on-device by default. Ask a question, attach a file,
-                or turn on web search only when you want outside context.
+                How can I help you today?
               </Text>
               <div
                 style={{
@@ -1157,9 +1202,8 @@ export default function ChatPane({
               aria-pressed={isWebSearchActive}
               style={{
                 borderRadius: 999,
-                border: `2px solid ${
-                  isWebSearchActive ? "#52C41A" : "#2C2C2C"
-                }`,
+                border: `2px solid ${isWebSearchActive ? "#52C41A" : "#2C2C2C"
+                  }`,
                 boxShadow: "1px 1px 0 #2C2C2C",
                 height: 32,
                 paddingInline: 10,
@@ -1315,6 +1359,7 @@ export default function ChatPane({
             }}
           >
             <span>{privacyStatus}</span>
+            {webSearchStatusMessage ? <span>{webSearchStatusMessage}</span> : null}
             {capabilityStatus ? <span>{capabilityStatus}</span> : null}
             <span>{isRecordingAudio ? "Recording…" : "Enter to send"}</span>
           </div>

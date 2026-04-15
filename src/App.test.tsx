@@ -76,6 +76,7 @@ function makeController() {
       },
     },
     backendStatus,
+    bootstrapError: null,
     activeModelId: "gemma-4-e2b-it",
     configurableModels: [],
     isBootstrapping: false,
@@ -84,8 +85,18 @@ function makeController() {
     isSwitchingModel: false,
     generationStatus: null,
     webSearchEnabled: false,
+    webSearchStatus: {
+      provider: "searxng",
+      available: true,
+      running: false,
+      healthy: false,
+      state: "stopped",
+      message: "Local web search is installed and will start on demand.",
+      base_url: "http://127.0.0.1:8091",
+    },
     thinkingEnabled: true,
     nativeToolSupportAvailable: true,
+    webSearchToggleAvailable: true,
     thinkingAvailable: true,
     audioInputAvailable: false,
     createSession: vi.fn(async () => undefined),
@@ -202,5 +213,20 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: /show sidebar/i }));
 
     await waitFor(() => expect(screen.getByText("Recent Chats")).not.toBeNull());
+  });
+
+  it("renders a blocking error panel when bootstrap fails", async () => {
+    controllerState.mockReturnValue({
+      ...makeController(),
+      settings: null,
+      backendStatus: null,
+      bootstrapError: "Database not initialized",
+    });
+
+    render(<App />);
+
+    expect(screen.getByText("Friday could not start")).not.toBeNull();
+    expect(screen.getByText("Database not initialized")).not.toBeNull();
+    expect(screen.queryByText("Loading Friday...")).toBeNull();
   });
 });

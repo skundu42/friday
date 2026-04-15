@@ -7,6 +7,9 @@ import type {
   BackendStatus,
   BootstrapPayload,
   SessionSelectionResult,
+  ToolCallEvent,
+  ToolResultEvent,
+  WebSearchStatus,
 } from "../types";
 
 const listeners = new Map<string, Set<(payload: unknown) => void>>();
@@ -53,6 +56,16 @@ const backendStatus: BackendStatus = {
   recommended_max_output_tokens: 4096,
 };
 
+const webSearchStatus: WebSearchStatus = {
+  provider: "searxng",
+  available: true,
+  running: false,
+  healthy: false,
+  state: "stopped",
+  message: "Local web search is installed and will start on demand.",
+  base_url: "http://127.0.0.1:8091",
+};
+
 const settings: AppSettings = {
   auto_start_backend: true,
   user_display_name: "Asha",
@@ -87,6 +100,7 @@ const bootstrapPayload: BootstrapPayload = {
   messages: [],
   settings,
   backendStatus: backendStatus,
+  webSearchStatus,
 };
 
 describe("useAppController", () => {
@@ -97,6 +111,9 @@ describe("useAppController", () => {
     invokeMock.mockImplementation((command: string) => {
       if (command === "bootstrap_app") return Promise.resolve(bootstrapPayload);
       if (command === "detect_backend") return Promise.resolve(backendStatus);
+      if (command === "get_web_search_status") {
+        return Promise.resolve(webSearchStatus);
+      }
       if (command === "list_sessions") {
         return Promise.resolve(bootstrapPayload.sessions);
       }
@@ -121,6 +138,24 @@ describe("useAppController", () => {
     expect(result.current.settings?.chat.reply_language).toBe("english");
     expect(result.current.currentModel).toBe("Gemma 4 E2B");
     expect(result.current.messages).toEqual([]);
+  });
+
+  it("captures bootstrap failures and exits the loading state", async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "bootstrap_app") {
+        return Promise.reject("Database not initialized");
+      }
+      return Promise.resolve(undefined);
+    });
+
+    const { result } = renderHook(() => useAppController());
+
+    await waitFor(() => expect(result.current.isBootstrapping).toBe(false));
+
+    expect(result.current.bootstrapError).toBe("Database not initialized");
+    expect(result.current.messages[0]?.content).toBe(
+      "⚠️ Database not initialized",
+    );
   });
 
   it("warms the backend after bootstrap when auto-start is enabled and the daemon is idle", async () => {
@@ -157,6 +192,39 @@ describe("useAppController", () => {
     );
   });
 
+  it("warms the backend when refreshing a ready-but-idle backend", async () => {
+    const readyBackendStatus: BackendStatus = {
+      ...backendStatus,
+      connected: false,
+      state: "ready",
+      message: "LiteRT-LM is ready to start.",
+    };
+
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "bootstrap_app") return Promise.resolve(bootstrapPayload);
+      if (command === "detect_backend") return Promise.resolve(readyBackendStatus);
+      if (command === "warm_backend") return Promise.resolve(backendStatus);
+      return Promise.resolve(undefined);
+    });
+
+    const { result } = renderHook(() => useAppController());
+
+    await waitFor(() =>
+      expect(result.current.activeSession?.id).toBe("session-a"),
+    );
+
+    invokeMock.mockClear();
+
+    await act(async () => {
+      await result.current.refreshBackendStatus({ includeModelInventory: false });
+    });
+
+    expect(
+      invokeMock.mock.calls.some(([command]) => command === "warm_backend"),
+    ).toBe(true);
+    expect(result.current.backendStatus?.connected).toBe(true);
+  });
+
   it("selects a different session without reloading", async () => {
     const selection: SessionSelectionResult = {
       session: makeSession("session-b", "Second chat", "2026-04-09T11:00:00Z"),
@@ -189,6 +257,121 @@ describe("useAppController", () => {
 
     expect(result.current.activeSession?.id).toBe("session-b");
     expect(result.current.messages[0]?.content).toBe("Loaded from storage");
+  });
+
+  it("deletes an inactive session without rebootstrapping", async () => {
+    const remainingSessions = [
+      makeSession("session-a", "New chat", "2026-04-09T12:00:00Z"),
+    ];
+    let deletedSessionId: string | null = null;
+
+    invokeMock.mockImplementation(
+      (command: string, args?: { sessionId?: string }) => {
+        if (command === "bootstrap_app") return Promise.resolve(bootstrapPayload);
+        if (command === "detect_backend") return Promise.resolve(backendStatus);
+        if (command === "delete_session") {
+          deletedSessionId = args?.sessionId ?? null;
+          return Promise.resolve(undefined);
+        }
+        if (command === "list_sessions") {
+          return Promise.resolve(
+            deletedSessionId ? remainingSessions : bootstrapPayload.sessions,
+          );
+        }
+        if (command === "select_session") {
+          return Promise.resolve({
+            session: bootstrapPayload.currentSession,
+            messages: bootstrapPayload.messages,
+          });
+        }
+        return Promise.resolve(undefined);
+      },
+    );
+
+    const { result } = renderHook(() => useAppController());
+    await waitFor(() =>
+      expect(result.current.activeSession?.id).toBe("session-a"),
+    );
+
+    invokeMock.mockClear();
+
+    await act(async () => {
+      await result.current.deleteSession("session-b");
+    });
+
+    expect(result.current.sessions).toEqual(remainingSessions);
+    expect(result.current.activeSession?.id).toBe("session-a");
+    expect(result.current.isBootstrapping).toBe(false);
+    expect(
+      invokeMock.mock.calls.some(([command]) => command === "bootstrap_app"),
+    ).toBe(false);
+    expect(
+      invokeMock.mock.calls.some(([command]) => command === "select_session"),
+    ).toBe(false);
+  });
+
+  it("deletes the active session and loads the replacement without rebootstrapping", async () => {
+    const replacementSession = makeSession(
+      "session-b",
+      "Second chat",
+      "2026-04-09T11:00:00Z",
+    );
+    const remainingSessions = [replacementSession];
+    const replacementSelection: SessionSelectionResult = {
+      session: replacementSession,
+      messages: [
+        {
+          id: "replacement-1",
+          session_id: "session-b",
+          role: "assistant",
+          content: "Replacement chat loaded",
+          created_at: "2026-04-09T11:05:00Z",
+        },
+      ],
+    };
+    let deletedSessionId: string | null = null;
+
+    invokeMock.mockImplementation(
+      (command: string, args?: { sessionId?: string }) => {
+        if (command === "bootstrap_app") return Promise.resolve(bootstrapPayload);
+        if (command === "detect_backend") return Promise.resolve(backendStatus);
+        if (command === "delete_session") {
+          deletedSessionId = args?.sessionId ?? null;
+          return Promise.resolve(undefined);
+        }
+        if (command === "list_sessions") {
+          return Promise.resolve(
+            deletedSessionId ? remainingSessions : bootstrapPayload.sessions,
+          );
+        }
+        if (command === "select_session") {
+          return Promise.resolve(replacementSelection);
+        }
+        return Promise.resolve(undefined);
+      },
+    );
+
+    const { result } = renderHook(() => useAppController());
+    await waitFor(() =>
+      expect(result.current.activeSession?.id).toBe("session-a"),
+    );
+
+    invokeMock.mockClear();
+
+    await act(async () => {
+      await result.current.deleteSession("session-a");
+    });
+
+    expect(result.current.sessions).toEqual(remainingSessions);
+    expect(result.current.activeSession?.id).toBe("session-b");
+    expect(result.current.messages[0]?.content).toBe("Replacement chat loaded");
+    expect(result.current.isBootstrapping).toBe(false);
+    expect(
+      invokeMock.mock.calls.some(([command]) => command === "bootstrap_app"),
+    ).toBe(false);
+    expect(
+      invokeMock.mock.calls.some(([command]) => command === "select_session"),
+    ).toBe(true);
   });
 
   it("removes an empty assistant placeholder and appends an error when send fails", async () => {
@@ -1078,6 +1261,291 @@ describe("useAppController", () => {
           payload?.input?.chat?.web_assist_enabled === true,
       ),
     ).toBe(true);
+  });
+
+  it("sends the current turn with web assist even before the setting save finishes", async () => {
+    let resolveSave: ((value: AppSettings) => void) | undefined;
+
+    invokeMock.mockImplementation((command: string, args?: { sessionId?: string }) => {
+      if (command === "bootstrap_app") return Promise.resolve(bootstrapPayload);
+      if (command === "detect_backend") return Promise.resolve(backendStatus);
+      if (command === "get_web_search_status") return Promise.resolve(webSearchStatus);
+      if (command === "save_settings") {
+        return new Promise<AppSettings>((resolve) => {
+          resolveSave = resolve;
+        });
+      }
+      if (command === "send_message") return Promise.resolve(undefined);
+      if (command === "list_sessions") return Promise.resolve(bootstrapPayload.sessions);
+      if (command === "select_session" && args?.sessionId === "session-a") {
+        return Promise.resolve({
+          session: bootstrapPayload.currentSession,
+          messages: [],
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+
+    const { result } = renderHook(() => useAppController());
+
+    await waitFor(() =>
+      expect(result.current.activeSession?.id).toBe("session-a"),
+    );
+
+    act(() => {
+      void result.current.toggleWebSearch();
+    });
+
+    await waitFor(() => expect(result.current.webSearchEnabled).toBe(true));
+
+    await act(async () => {
+      await result.current.sendMessage("Find the latest update");
+    });
+
+    expect(
+      invokeMock.mock.calls.some(
+        ([command, payload]) =>
+          command === "send_message" &&
+          payload?.sessionId === "session-a" &&
+          payload?.webAssistEnabled === true,
+      ),
+    ).toBe(true);
+
+    await act(async () => {
+      resolveSave?.({
+        ...settings,
+        chat: {
+          ...settings.chat,
+          web_assist_enabled: true,
+        },
+      });
+      await Promise.resolve();
+    });
+  });
+
+  it("does not toggle web assist when local web search is unavailable", async () => {
+    const payload: BootstrapPayload = {
+      ...bootstrapPayload,
+      webSearchStatus: {
+        ...webSearchStatus,
+        available: false,
+        state: "unavailable",
+        message: "Friday web assist is not yet supported on this platform build.",
+      },
+    };
+
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "bootstrap_app") return Promise.resolve(payload);
+      if (command === "detect_backend") return Promise.resolve(backendStatus);
+      if (command === "get_web_search_status") return Promise.resolve(payload.webSearchStatus);
+      return Promise.resolve(undefined);
+    });
+
+    const { result } = renderHook(() => useAppController());
+
+    await waitFor(() =>
+      expect(result.current.activeSession?.id).toBe("session-a"),
+    );
+
+    await act(async () => {
+      await result.current.toggleWebSearch();
+    });
+
+    expect(result.current.webSearchEnabled).toBe(false);
+    expect(
+      invokeMock.mock.calls.some(([command]) => command === "save_settings"),
+    ).toBe(false);
+  });
+
+  it("treats broken local web search states as unavailable for toggling", async () => {
+    const payload: BootstrapPayload = {
+      ...bootstrapPayload,
+      settings: {
+        ...settings,
+        chat: {
+          ...settings.chat,
+          web_assist_enabled: true,
+        },
+      },
+      webSearchStatus: {
+        ...webSearchStatus,
+        available: true,
+        state: "config_error",
+        message: "Local SearXNG config is invalid; JSON output is disabled.",
+      },
+    };
+
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "bootstrap_app") return Promise.resolve(payload);
+      if (command === "detect_backend") return Promise.resolve(backendStatus);
+      if (command === "get_web_search_status") return Promise.resolve(payload.webSearchStatus);
+      return Promise.resolve(undefined);
+    });
+
+    const { result } = renderHook(() => useAppController());
+
+    await waitFor(() =>
+      expect(result.current.activeSession?.id).toBe("session-a"),
+    );
+
+    expect(result.current.webSearchToggleAvailable).toBe(false);
+
+    await act(async () => {
+      await result.current.toggleWebSearch();
+    });
+
+    expect(
+      invokeMock.mock.calls.some(([command]) => command === "save_settings"),
+    ).toBe(false);
+  });
+
+  it("uses lifecycle state instead of status text for web-search startup progress", async () => {
+    let resolveSend: (() => void) | undefined;
+
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "bootstrap_app") {
+        return Promise.resolve({
+          ...bootstrapPayload,
+          settings: {
+            ...settings,
+            chat: {
+              ...settings.chat,
+              web_assist_enabled: true,
+            },
+          },
+          webSearchStatus: {
+            ...webSearchStatus,
+            state: "needs_install",
+            message: "Fresh install required.",
+          },
+        });
+      }
+      if (command === "detect_backend") return Promise.resolve(backendStatus);
+      if (command === "get_web_search_status") {
+        return Promise.resolve({
+          ...webSearchStatus,
+          state: "needs_install",
+          message: "Fresh install required.",
+        });
+      }
+      if (command === "send_message") {
+        return new Promise<void>((resolve) => {
+          resolveSend = resolve;
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+
+    const { result } = renderHook(() => useAppController());
+
+    await waitFor(() =>
+      expect(result.current.activeSession?.id).toBe("session-a"),
+    );
+
+    act(() => {
+      void result.current.sendMessage("Who is the current US president?");
+    });
+
+    await waitFor(() => expect(result.current.isGenerating).toBe(true));
+    expect(result.current.generationStatus).toBe("Preparing local web search…");
+
+    act(() => {
+      emitEvent("web-search-status", {
+        ...webSearchStatus,
+        running: true,
+        healthy: true,
+        state: "ready",
+        message: "Local web search is ready for web-assisted replies.",
+      } satisfies WebSearchStatus);
+    });
+
+    expect(result.current.generationStatus).toBe("Friday is thinking…");
+
+    await act(async () => {
+      resolveSend?.();
+      await Promise.resolve();
+    });
+  });
+
+  it("returns to thinking after an internal web fetch finishes", async () => {
+    let resolveSend: (() => void) | undefined;
+
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "bootstrap_app") {
+        return Promise.resolve({
+          ...bootstrapPayload,
+          settings: {
+            ...settings,
+            chat: {
+              ...settings.chat,
+              web_assist_enabled: true,
+            },
+          },
+          webSearchStatus: {
+            ...webSearchStatus,
+            running: true,
+            healthy: true,
+            state: "ready",
+            message: "Local web search is ready for web-assisted replies.",
+          },
+        });
+      }
+      if (command === "detect_backend") return Promise.resolve(backendStatus);
+      if (command === "get_web_search_status") {
+        return Promise.resolve({
+          ...webSearchStatus,
+          running: true,
+          healthy: true,
+          state: "ready",
+          message: "Local web search is ready for web-assisted replies.",
+        });
+      }
+      if (command === "send_message") {
+        return new Promise<void>((resolve) => {
+          resolveSend = resolve;
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+
+    const { result } = renderHook(() => useAppController());
+
+    await waitFor(() =>
+      expect(result.current.activeSession?.id).toBe("session-a"),
+    );
+
+    act(() => {
+      void result.current.sendMessage(
+        "Tell me in details what this website has-https://www.sandipank.dev/",
+      );
+    });
+
+    await waitFor(() => expect(result.current.isGenerating).toBe(true));
+
+    act(() => {
+      emitEvent("tool-call-start", {
+        sessionId: "session-a",
+        name: "web_fetch",
+        args: { url: "https://www.sandipank.dev/" },
+      } satisfies ToolCallEvent);
+    });
+
+    expect(result.current.generationStatus).toBe("Reading the page…");
+
+    act(() => {
+      emitEvent("tool-call-result", {
+        sessionId: "session-a",
+        name: "web_fetch",
+        result: { url: "https://www.sandipank.dev/", content: "Portfolio site" },
+      } satisfies ToolResultEvent);
+    });
+
+    expect(result.current.generationStatus).toBe("Friday is thinking…");
+
+    await act(async () => {
+      resolveSend?.();
+      await Promise.resolve();
+    });
   });
 
   it("persists the thinking toggle through saved settings", async () => {

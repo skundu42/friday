@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Button,
   Card,
@@ -31,6 +31,13 @@ import AppLogo from "./AppLogo";
 const { Title, Text, Paragraph } = Typography;
 
 type StepKey = "welcome" | "name" | "system" | "download" | "ready";
+const STEP_ORDER: StepKey[] = [
+  "welcome",
+  "name",
+  "system",
+  "download",
+  "ready",
+];
 
 function formatBytes(bytes: number): string {
   if (bytes === 0) return "0 B";
@@ -54,6 +61,15 @@ function formatSpeed(bps: number): string {
 
 function estimateModelBytes(setupStatus: SetupStatus | null): number {
   return Math.round((setupStatus?.modelSizeGb ?? 0) * 1024 * 1024 * 1024);
+}
+
+function getNextValidStep(currentStepKey: StepKey, stepKeys: StepKey[]): StepKey {
+  const currentIndex = STEP_ORDER.indexOf(currentStepKey);
+  return (
+    stepKeys.find((stepKey) => STEP_ORDER.indexOf(stepKey) > currentIndex) ??
+    stepKeys[stepKeys.length - 1] ??
+    "welcome"
+  );
 }
 
 function hasConcreteDownloadProgress(progress: DownloadProgress | null): boolean {
@@ -121,6 +137,8 @@ export default function SetupWizard({
   const [displayName, setDisplayName] = useState(settings.user_display_name);
   const [displayNameError, setDisplayNameError] = useState<string | null>(null);
   const [isSavingName, setIsSavingName] = useState(false);
+  const [isLaunchingAssistant, setIsLaunchingAssistant] = useState(false);
+  const warmupPromiseRef = useRef<Promise<void> | null>(null);
 
   const needsDisplayName = settings.user_display_name.trim().length === 0;
   const requiresModelSetup = !(setupStatus?.readyToChat ?? false);
@@ -143,7 +161,7 @@ export default function SetupWizard({
     if (stepKeys.includes(currentStepKey)) {
       return;
     }
-    setCurrentStepKey(stepKeys[0] ?? "welcome");
+    setCurrentStepKey(getNextValidStep(currentStepKey, stepKeys));
   }, [currentStepKey, stepKeys]);
 
   useEffect(() => {
@@ -155,6 +173,36 @@ export default function SetupWizard({
         console.error("[SetupWizard] get_setup_status error:", err);
       });
   }, []);
+
+  const startAssistantWarmup = () => {
+    if (
+      !settings.auto_start_backend ||
+      !setupStatus?.readyToChat ||
+      warmupPromiseRef.current
+    ) {
+      return warmupPromiseRef.current;
+    }
+
+    setIsLaunchingAssistant(true);
+    warmupPromiseRef.current = invoke("warm_backend")
+      .then(() => undefined)
+      .catch((error) => {
+        warmupPromiseRef.current = null;
+        console.warn("[SetupWizard] warm_backend error:", error);
+      })
+      .finally(() => {
+        setIsLaunchingAssistant(false);
+      });
+
+    return warmupPromiseRef.current;
+  };
+
+  useEffect(() => {
+    if (!setupStatus?.readyToChat || !settings.auto_start_backend) {
+      return;
+    }
+    void startAssistantWarmup();
+  }, [settings.auto_start_backend, setupStatus?.readyToChat]);
 
   useEffect(() => {
     let unlisten: UnlistenFn | undefined;
@@ -253,6 +301,11 @@ export default function SetupWizard({
     } finally {
       setIsSavingName(false);
     }
+  };
+
+  const handleComplete = async () => {
+    await startAssistantWarmup();
+    onComplete();
   };
 
   const stepItems = stepKeys.map((key) => {
@@ -694,6 +747,7 @@ export default function SetupWizard({
         <Button
           type="primary"
           size="large"
+          loading={isLaunchingAssistant}
           style={{
             height: 56,
             fontSize: 18,
@@ -704,7 +758,9 @@ export default function SetupWizard({
             boxShadow: "4px 4px 0px #2C2C2C",
             minWidth: 240,
           }}
-          onClick={onComplete}
+          onClick={() => {
+            void handleComplete();
+          }}
         >
           <RocketOutlined /> Start Chatting
         </Button>

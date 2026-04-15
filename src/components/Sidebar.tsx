@@ -59,7 +59,7 @@ export default function Sidebar({
             Friday
           </Title>
           <Text type="secondary" style={{ fontSize: 11 }}>
-            Local-first desktop assistant
+            Your personal local desktop assistant
           </Text>
         </div>
       </div>

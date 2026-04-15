@@ -1,5 +1,9 @@
 use crate::models::python_worker::{PythonWorkerClient, StreamEvent};
 use crate::models::ChatMessage;
+use crate::python_runtime::{
+    bundled_resource_source_path, ensure_embedded_python_runtime, install_python_wheel,
+    sync_file_if_changed,
+};
 use crate::settings::GenerationRequestConfig;
 use crate::{persist_active_model_id, AppState};
 use serde::{Deserialize, Serialize};
@@ -16,8 +20,6 @@ use tokio::sync::{mpsc, Mutex as AsyncMutex};
 
 const LITERT_LM_VERSION: &str = "0.10.1";
 const BUNDLED_LITERT_RESOURCE_PATH: &str = env!("FRIDAY_BUNDLED_LITERT_RESOURCE_PATH");
-const BUNDLED_PYTHON_RUNTIME_RESOURCE_PATH: &str =
-    env!("FRIDAY_BUNDLED_PYTHON_RUNTIME_RESOURCE_PATH");
 const BUNDLED_PYTHON_WHEEL_RESOURCE_PATH: &str = env!("FRIDAY_BUNDLED_PYTHON_WHEEL_RESOURCE_PATH");
 const BUNDLED_PYTHON_WORKER_RESOURCE_PATH: &str =
     env!("FRIDAY_BUNDLED_PYTHON_WORKER_RESOURCE_PATH");
@@ -101,7 +103,7 @@ fn model_download_url(model: &ModelInfo) -> String {
 }
 
 fn default_backend() -> &'static str {
-    "cpu"
+    "gpu"
 }
 
 fn backend_label(backend: &str) -> &'static str {
@@ -225,6 +227,7 @@ pub struct SidecarManager {
     daemon_activity: Arc<DaemonActivity>,
     selected_backend: Mutex<String>,
     downloaded_model_ids_cache: Mutex<Option<Vec<String>>>,
+    web_search_base_url: Mutex<Option<String>>,
 }
 
 struct DaemonActivity {
@@ -280,6 +283,7 @@ impl SidecarManager {
             daemon_activity: Arc::new(DaemonActivity::new()),
             selected_backend: Mutex::new(default_backend().to_string()),
             downloaded_model_ids_cache: Mutex::new(None),
+            web_search_base_url: Mutex::new(None),
         }
     }
 
@@ -299,6 +303,10 @@ impl SidecarManager {
 
     pub fn set_max_tokens(&self, max_tokens: u32) {
         self.max_tokens.store(max_tokens, Ordering::SeqCst);
+    }
+
+    pub fn set_web_search_base_url(&self, base_url: &str) {
+        *self.web_search_base_url.lock().unwrap() = Some(base_url.to_string());
     }
 
     fn selected_backend(&self) -> String {
@@ -401,6 +409,7 @@ impl SidecarManager {
         let runtime_installed = self.is_runtime_installed();
         let model = self.active_model();
         let model_downloaded = self.has_model_for(model);
+        let meets_ram_minimum = total_ram >= model.min_ram_gb;
 
         SetupStatus {
             model_id: model.id.to_string(),
@@ -409,9 +418,9 @@ impl SidecarManager {
             model_size_gb: model.size_gb,
             min_ram_gb: model.min_ram_gb,
             total_ram_gb: total_ram,
-            meets_ram_minimum: total_ram >= model.min_ram_gb,
+            meets_ram_minimum,
             runtime_installed,
-            ready_to_chat: runtime_installed && model_downloaded,
+            ready_to_chat: runtime_installed && model_downloaded && meets_ram_minimum,
             partial_download_bytes: if model_downloaded {
                 model.size_bytes
             } else {
@@ -425,19 +434,23 @@ impl SidecarManager {
         let model = self.active_model();
         let features = runtime_feature_support(model);
         let model_downloaded = self.has_model_for(model);
+        let total_ram_gb = get_system_ram_gb();
+        let ram_error = ram_support_error(model, total_ram_gb);
         let daemon_running = if runtime_installed && model_downloaded {
             self.daemon_is_running().await
         } else {
             false
         };
 
-        let status = if runtime_installed && model_downloaded && daemon_running {
+        let status = if let Some(error) = ram_error {
+            unavailable_status("insufficient_ram", error)
+        } else if runtime_installed && model_downloaded && daemon_running {
             BackendStatus {
                 backend: BackendType::LiteRtLm,
                 connected: true,
                 models: vec![model.id.to_string()],
                 base_url: String::new(),
-                total_ram_gb: get_system_ram_gb(),
+                total_ram_gb,
                 state: "connected".to_string(),
                 message: format!(
                     "LiteRT-LM {} with {} is ready in Friday's Python worker on {}.",
@@ -459,7 +472,7 @@ impl SidecarManager {
                 connected: false,
                 models: vec![model.id.to_string()],
                 base_url: String::new(),
-                total_ram_gb: get_system_ram_gb(),
+                total_ram_gb,
                 state: "ready".to_string(),
                 message: format!(
                     "LiteRT-LM {} with {} is ready to start in Friday's Python worker on {}.",
@@ -515,8 +528,9 @@ impl SidecarManager {
                 Err(_) => return false,
             };
             let max_tokens = self.max_tokens.load(Ordering::SeqCst);
+            let backend = self.selected_backend();
 
-            if daemon.matches(&model_path, max_tokens) && daemon.is_alive().await {
+            if daemon.matches(&model_path, max_tokens, &backend) && daemon.is_alive().await {
                 return true;
             }
 
@@ -568,8 +582,9 @@ impl SidecarManager {
             if let Some(daemon) = guard.as_ref() {
                 let model_path = self.model_storage_path(self.active_model())?;
                 let max_tokens = self.max_tokens.load(Ordering::SeqCst);
+                let backend = self.selected_backend();
 
-                if daemon.matches(&model_path, max_tokens) && daemon.is_alive().await {
+                if daemon.matches(&model_path, max_tokens, &backend) && daemon.is_alive().await {
                     return Ok(());
                 }
                 tracing::warn!("Replacing Friday LiteRT Python worker to match the active config");
@@ -582,6 +597,30 @@ impl SidecarManager {
         self.start_daemon_inner().await
     }
 
+    async fn spawn_daemon_worker(
+        &self,
+        model_path: &Path,
+        max_tokens: u32,
+        backend: &str,
+        web_search_base_url: Option<&str>,
+        python_binary: &Path,
+        worker_script: &Path,
+        python_site_packages: &Path,
+        python_runtime_lib_dir: &Path,
+    ) -> Result<PythonWorkerClient, String> {
+        PythonWorkerClient::spawn(
+            python_binary,
+            worker_script,
+            model_path,
+            max_tokens,
+            backend,
+            web_search_base_url,
+            python_site_packages,
+            python_runtime_lib_dir,
+        )
+        .await
+    }
+
     async fn start_daemon_inner(&self) -> Result<(), String> {
         self.ensure_ready().await?;
 
@@ -592,22 +631,63 @@ impl SidecarManager {
         let worker_script = self.python_worker_script_path()?;
         let python_site_packages = self.python_site_packages_path()?;
         let python_runtime_lib_dir = self.python_runtime_lib_dir_path()?;
+        let preferred_backend = default_backend();
+        let web_search_base_url = self.web_search_base_url.lock().unwrap().clone();
 
         tracing::info!(
-            "Starting Friday LiteRT Python worker (model={}, max_num_tokens={}, backend=cpu)…",
+            "Starting Friday LiteRT Python worker (model={}, max_num_tokens={}, backend={})…",
             model.id,
             max_tokens,
+            preferred_backend,
         );
 
-        let client = PythonWorkerClient::spawn(
-            &python_binary,
-            &worker_script,
-            &model_path,
-            max_tokens,
-            &python_site_packages,
-            &python_runtime_lib_dir,
-        )
-        .await?;
+        let (client, selected_backend) = match self
+            .spawn_daemon_worker(
+                &model_path,
+                max_tokens,
+                preferred_backend,
+                web_search_base_url.as_deref(),
+                &python_binary,
+                &worker_script,
+                &python_site_packages,
+                &python_runtime_lib_dir,
+            )
+            .await
+        {
+            Ok(client) => (client, preferred_backend),
+            Err(primary_error) if preferred_backend != "cpu" => {
+                tracing::warn!(
+                    "Friday LiteRT Python worker failed to start on {}: {}. Falling back to CPU.",
+                    backend_label(preferred_backend),
+                    primary_error
+                );
+
+                match self
+                    .spawn_daemon_worker(
+                        &model_path,
+                        max_tokens,
+                        "cpu",
+                        web_search_base_url.as_deref(),
+                        &python_binary,
+                        &worker_script,
+                        &python_site_packages,
+                        &python_runtime_lib_dir,
+                    )
+                    .await
+                {
+                    Ok(client) => (client, "cpu"),
+                    Err(fallback_error) => {
+                        return Err(format!(
+                            "Failed to start Friday LiteRT Python worker on {}: {}. CPU fallback also failed: {}",
+                            backend_label(preferred_backend),
+                            primary_error,
+                            fallback_error
+                        ));
+                    }
+                }
+            }
+            Err(error) => return Err(error),
+        };
 
         let mut guard = self.daemon.lock().await;
         if let Some(existing) = guard.take() {
@@ -616,8 +696,11 @@ impl SidecarManager {
         }
         *guard = Some(client);
         self.daemon_activity.touch();
-        *self.selected_backend.lock().unwrap() = default_backend().to_string();
-        tracing::info!("Friday LiteRT Python worker started on CPU");
+        *self.selected_backend.lock().unwrap() = selected_backend.to_string();
+        tracing::info!(
+            "Friday LiteRT Python worker started on {}",
+            backend_label(selected_backend)
+        );
         Ok(())
     }
 
@@ -823,26 +906,14 @@ impl SidecarManager {
     }
 
     fn bundled_resource_source_path(&self, relative_path: &str) -> Result<PathBuf, String> {
-        let resource_dir = self.resource_dir_path()?;
-        let primary = resource_dir.join(relative_path);
-        if primary.exists() {
-            return Ok(primary);
-        }
-
-        let legacy = resource_dir.join("resources").join(relative_path);
-        if legacy.exists() {
-            return Ok(legacy);
-        }
-
-        Ok(primary)
+        Ok(bundled_resource_source_path(
+            &self.resource_dir_path()?,
+            relative_path,
+        ))
     }
 
     fn bundled_runtime_source_path(&self) -> Result<PathBuf, String> {
         self.bundled_resource_source_path(BUNDLED_LITERT_RESOURCE_PATH)
-    }
-
-    fn bundled_python_runtime_source_path(&self) -> Result<PathBuf, String> {
-        self.bundled_resource_source_path(BUNDLED_PYTHON_RUNTIME_RESOURCE_PATH)
     }
 
     fn bundled_python_wheel_source_path(&self) -> Result<PathBuf, String> {
@@ -942,15 +1013,17 @@ impl SidecarManager {
             .map_err(|e| format!("Failed to create runtime directory: {}", e))?;
         std::fs::create_dir_all(self.lit_home_dir_path()?)
             .map_err(|e| format!("Failed to create LiteRT home directory: {}", e))?;
+        validate_bundled_python_asset_paths(
+            BUNDLED_PYTHON_WHEEL_RESOURCE_PATH,
+            BUNDLED_PYTHON_WORKER_RESOURCE_PATH,
+        )?;
 
         let lit_source_path = self.bundled_runtime_source_path()?;
-        let python_runtime_source_path = self.bundled_python_runtime_source_path()?;
         let python_wheel_source_path = self.bundled_python_wheel_source_path()?;
         let python_worker_source_path = self.bundled_python_worker_source_path()?;
 
         for source_path in [
             &lit_source_path,
-            &python_runtime_source_path,
             &python_wheel_source_path,
             &python_worker_source_path,
         ] {
@@ -992,10 +1065,7 @@ impl SidecarManager {
                 .map_err(|e| format!("Failed to finalize LiteRT-LM runtime install: {}", e))?;
         }
 
-        install_python_runtime_archive(
-            &python_runtime_source_path,
-            &self.python_runtime_dir_path()?,
-        )?;
+        ensure_embedded_python_runtime(&self.app_data_dir()?, &self.resource_dir_path()?)?;
         install_python_worker_launcher(
             &self.python_binary_path()?,
             &self.python_worker_binary_path()?,
@@ -1410,54 +1480,23 @@ fn unavailable_status(state: &str, message: impl AsRef<str>) -> BackendStatus {
     }
 }
 
+fn validate_bundled_python_asset_paths(wheel_path: &str, worker_path: &str) -> Result<(), String> {
+    if wheel_path.trim().is_empty() || worker_path.trim().is_empty() {
+        return Err(
+            "Friday currently bundles its managed LiteRT Python worker only for macOS Apple Silicon. Build on macOS arm64 or vendor per-platform Python assets before enabling this target."
+                .to_string(),
+        );
+    }
+
+    Ok(())
+}
+
 fn active_uses_idle(active_uses: usize, last_activity: Instant, now: Instant) -> bool {
     active_uses == 0 && now.saturating_duration_since(last_activity) >= DAEMON_IDLE_TIMEOUT
 }
 
 fn normalize_incomplete_download_percentage(percentage: u64) -> u64 {
     percentage.min(99)
-}
-
-fn install_python_runtime_archive(source_path: &Path, target_dir: &Path) -> Result<(), String> {
-    if target_dir.join("bin").join("python3").exists() {
-        return Ok(());
-    }
-
-    let staging_dir = target_dir.with_extension("staging");
-    if staging_dir.exists() {
-        let _ = std::fs::remove_dir_all(&staging_dir);
-    }
-    std::fs::create_dir_all(&staging_dir)
-        .map_err(|e| format!("Failed to create Python staging directory: {}", e))?;
-
-    let archive_file = std::fs::File::open(source_path).map_err(|e| {
-        format!(
-            "Failed to open bundled Python runtime archive {}: {}",
-            source_path.display(),
-            e
-        )
-    })?;
-    let decoder = flate2::read::GzDecoder::new(archive_file);
-    let mut archive = tar::Archive::new(decoder);
-    archive
-        .unpack(&staging_dir)
-        .map_err(|e| format!("Failed to unpack bundled Python runtime: {}", e))?;
-
-    let extracted_dir = staging_dir.join("python");
-    if !extracted_dir.exists() {
-        return Err(format!(
-            "Bundled Python runtime archive {} did not contain a top-level python directory.",
-            source_path.display()
-        ));
-    }
-
-    if target_dir.exists() {
-        let _ = std::fs::remove_dir_all(target_dir);
-    }
-    std::fs::rename(&extracted_dir, target_dir)
-        .map_err(|e| format!("Failed to finalize bundled Python runtime install: {}", e))?;
-    let _ = std::fs::remove_dir_all(&staging_dir);
-    Ok(())
 }
 
 fn install_python_worker_launcher(
@@ -1565,164 +1604,6 @@ fn install_python_worker_launcher(
         )?;
     }
 
-    Ok(())
-}
-
-fn sync_file_if_changed(
-    source_path: &Path,
-    target_path: &Path,
-    executable: bool,
-) -> Result<bool, String> {
-    #[cfg(unix)]
-    use std::os::unix::fs::PermissionsExt;
-
-    let needs_update = match std::fs::metadata(target_path) {
-        Ok(target_metadata) => {
-            let source_metadata = std::fs::metadata(source_path).map_err(|e| {
-                format!(
-                    "Failed to read bundled asset metadata {}: {}",
-                    source_path.display(),
-                    e
-                )
-            })?;
-
-            if source_metadata.len() != target_metadata.len() {
-                true
-            } else {
-                let source_bytes = std::fs::read(source_path).map_err(|e| {
-                    format!(
-                        "Failed to read bundled asset {}: {}",
-                        source_path.display(),
-                        e
-                    )
-                })?;
-                let target_bytes = std::fs::read(target_path).map_err(|e| {
-                    format!(
-                        "Failed to read installed asset {}: {}",
-                        target_path.display(),
-                        e
-                    )
-                })?;
-                source_bytes != target_bytes
-            }
-        }
-        Err(_) => true,
-    };
-
-    #[cfg(unix)]
-    let desired_permissions =
-        std::fs::Permissions::from_mode(if executable { 0o755 } else { 0o644 });
-
-    if !needs_update {
-        #[cfg(unix)]
-        {
-            std::fs::set_permissions(target_path, desired_permissions).map_err(|e| {
-                format!(
-                    "Failed to update installed asset permissions {}: {}",
-                    target_path.display(),
-                    e
-                )
-            })?;
-        }
-        return Ok(false);
-    }
-
-    if let Some(parent) = target_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            format!(
-                "Failed to create installed asset directory {}: {}",
-                parent.display(),
-                e
-            )
-        })?;
-    }
-
-    let temp_path = target_path.with_extension("part");
-    if temp_path.exists() {
-        let _ = std::fs::remove_file(&temp_path);
-    }
-    std::fs::copy(source_path, &temp_path).map_err(|e| {
-        format!(
-            "Failed to copy bundled asset {}: {}",
-            source_path.display(),
-            e
-        )
-    })?;
-
-    #[cfg(unix)]
-    {
-        std::fs::set_permissions(&temp_path, desired_permissions).map_err(|e| {
-            format!(
-                "Failed to update staged asset permissions {}: {}",
-                temp_path.display(),
-                e
-            )
-        })?;
-    }
-
-    std::fs::rename(&temp_path, target_path).map_err(|e| {
-        format!(
-            "Failed to finalize bundled asset install {}: {}",
-            target_path.display(),
-            e
-        )
-    })?;
-
-    Ok(true)
-}
-
-fn install_python_wheel(source_path: &Path, target_dir: &Path) -> Result<(), String> {
-    let staging_dir = target_dir.with_extension("staging");
-    if staging_dir.exists() {
-        let _ = std::fs::remove_dir_all(&staging_dir);
-    }
-    std::fs::create_dir_all(&staging_dir).map_err(|e| {
-        format!(
-            "Failed to create Python site-packages staging directory: {}",
-            e
-        )
-    })?;
-
-    let file = std::fs::File::open(source_path).map_err(|e| {
-        format!(
-            "Failed to open bundled LiteRT Python wheel {}: {}",
-            source_path.display(),
-            e
-        )
-    })?;
-    let mut archive =
-        zip::ZipArchive::new(file).map_err(|e| format!("Failed to read Python wheel: {}", e))?;
-
-    for index in 0..archive.len() {
-        let mut entry = archive
-            .by_index(index)
-            .map_err(|e| format!("Failed to read Python wheel entry: {}", e))?;
-        let Some(enclosed_name) = entry.enclosed_name().map(Path::to_path_buf) else {
-            continue;
-        };
-        let output_path = staging_dir.join(enclosed_name);
-        if entry.name().ends_with('/') {
-            std::fs::create_dir_all(&output_path)
-                .map_err(|e| format!("Failed to create Python wheel directory: {}", e))?;
-            continue;
-        }
-
-        if let Some(parent) = output_path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("Failed to create Python wheel parent directory: {}", e))?;
-        }
-
-        let mut output_file = std::fs::File::create(&output_path)
-            .map_err(|e| format!("Failed to create Python wheel file: {}", e))?;
-        std::io::copy(&mut entry, &mut output_file)
-            .map_err(|e| format!("Failed to extract Python wheel file: {}", e))?;
-    }
-
-    if target_dir.exists() {
-        let _ = std::fs::remove_dir_all(target_dir);
-    }
-    std::fs::rename(&staging_dir, target_dir)
-        .map_err(|e| format!("Failed to finalize Python wheel install: {}", e))?;
     Ok(())
 }
 
@@ -1844,8 +1725,8 @@ mod tests {
     }
 
     #[test]
-    fn default_backend_is_cpu_for_python_worker() {
-        assert_eq!(default_backend(), "cpu");
+    fn default_backend_prefers_gpu_for_python_worker() {
+        assert_eq!(default_backend(), "gpu");
     }
 
     #[test]
@@ -1855,6 +1736,15 @@ mod tests {
         assert_eq!(status.state, "runtime_missing");
         assert!(!status.supports_image_input);
         assert_eq!(status.max_context_tokens, 0);
+    }
+
+    #[test]
+    fn bundled_python_assets_must_all_be_present() {
+        assert!(validate_bundled_python_asset_paths("wheel.whl", "worker.py").is_ok());
+
+        let error = validate_bundled_python_asset_paths("", "worker.py")
+            .expect_err("missing asset paths should fail");
+        assert!(error.contains("macOS Apple Silicon"));
     }
 
     #[test]

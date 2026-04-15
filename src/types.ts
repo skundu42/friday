@@ -71,6 +71,26 @@ export interface BackendStatus {
   recommended_max_output_tokens: number;
 }
 
+export type WebSearchState =
+  | "unavailable"
+  | "needs_install"
+  | "stopped"
+  | "installing"
+  | "starting"
+  | "ready"
+  | "config_error"
+  | "port_conflict";
+
+export interface WebSearchStatus {
+  provider: string;
+  available: boolean;
+  running: boolean;
+  healthy: boolean;
+  state: WebSearchState;
+  message: string;
+  base_url: string;
+}
+
 export type ReplyLanguage =
   | "english"
   | "hindi"
@@ -115,6 +135,7 @@ export interface BootstrapPayload {
   messages: Message[];
   settings: AppSettings;
   backendStatus: BackendStatus;
+  webSearchStatus: WebSearchStatus;
 }
 
 export interface SessionSelectionResult {

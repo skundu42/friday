@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 import ast
-import copy
+import datetime
 import html
+import http.client
 import ipaddress
 import json
 import math
+import os
 import pathlib
+import re
 import socket
+import ssl
 import sys
+import time
 import traceback
 import urllib.error
 import urllib.parse
@@ -21,11 +26,240 @@ from typing import Any
 WEB_FETCH_TIMEOUT_SECONDS = 15
 WEB_FETCH_MAX_BYTES = 1_000_000
 WEB_FETCH_MAX_CHARS = 20_000
+WEB_FETCH_MAX_REDIRECTS = 3
+SEARXNG_BASE_URL = os.environ.get("FRIDAY_SEARXNG_BASE_URL", "http://127.0.0.1:8091").rstrip(
+    "/"
+)
+HTML_BLOCK_TAG_RE = re.compile(
+    r"</?(?:address|article|aside|blockquote|br|caption|dd|div|dl|dt|figcaption|figure|footer|form|h[1-6]|header|hr|li|main|nav|ol|p|pre|section|table|tbody|td|tfoot|th|thead|tr|ul)[^>]*>",
+    re.IGNORECASE,
+)
+HTML_TAG_RE = re.compile(r"<[^>]+>")
+HORIZONTAL_WHITESPACE_RE = re.compile(r"[ \t\f\v]+")
+BLANK_LINE_RE = re.compile(r"\n{3,}")
+SPACE_BEFORE_PUNCTUATION_RE = re.compile(r"\s+([,.;:!?])")
+URL_RE = re.compile(r"https?://[^\s<>()]+", re.IGNORECASE)
+TRAILING_URL_PUNCTUATION = ".,!?;:)]}>\"'"
+TOOL_SENTINEL_RE = re.compile(r"<\|[^<>]{0,32}\|>")
+TOKEN_RE = re.compile(r"[A-Za-z0-9]+(?:['’][A-Za-z0-9]+)?")
+MONTH_NAME_RE = re.compile(
+    r"\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+    r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|"
+    r"nov(?:ember)?|dec(?:ember)?)\b",
+    re.IGNORECASE,
+)
+OUTER_QUOTE_PAIRS = {
+    '"': '"',
+    "'": "'",
+    "`": "`",
+    "“": "”",
+    "‘": "’",
+}
+SEARCH_QUERY_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "at",
+    "for",
+    "from",
+    "how",
+    "i",
+    "if",
+    "in",
+    "is",
+    "it",
+    "me",
+    "of",
+    "on",
+    "please",
+    "right",
+    "tell",
+    "the",
+    "to",
+    "what",
+    "when",
+    "where",
+    "which",
+    "who",
+    "why",
+    "yes",
+}
+TRANSIENT_SEARCH_HTTP_STATUS_CODES = {429, 502, 503, 504}
+TRANSIENT_SEARCH_ERROR_MARKERS = (
+    "connection refused",
+    "connection reset",
+    "temporarily unavailable",
+    "timed out",
+    "timeout",
+    "network is unreachable",
+)
+TIME_SENSITIVE_QUERY_TERMS = (
+    "today",
+    "tomorrow",
+    "yesterday",
+    "latest",
+    "current",
+    "now",
+    "holiday",
+    "weather",
+    "forecast",
+    "price",
+    "stock",
+    "score",
+    "match",
+    "fixture",
+    "schedule",
+    "won",
+    "ceo",
+    "president",
+    "release",
+    "model",
+)
 
 
 def write_event(event_type: str, **payload: Any) -> None:
     sys.stdout.write(json.dumps({"type": event_type, **payload}) + "\n")
     sys.stdout.flush()
+
+
+def sanitize_tool_string(value: str) -> str:
+    cleaned = TOOL_SENTINEL_RE.sub("", value).strip()
+    while len(cleaned) >= 2:
+        closing_quote = OUTER_QUOTE_PAIRS.get(cleaned[0])
+        if closing_quote is None or not cleaned.endswith(closing_quote):
+            break
+        inner = cleaned[1:-1].strip()
+        if not inner:
+            break
+        cleaned = inner
+    cleaned = html.unescape(cleaned)
+    cleaned = HORIZONTAL_WHITESPACE_RE.sub(" ", cleaned)
+    return cleaned.strip()
+
+
+def sanitize_tool_payload(value: Any) -> Any:
+    if isinstance(value, str):
+        return sanitize_tool_string(value)
+    if isinstance(value, dict):
+        return {str(key): sanitize_tool_payload(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [sanitize_tool_payload(item) for item in value]
+    return value
+
+
+def normalize_search_query(query: str) -> str:
+    cleaned = sanitize_tool_string(query)
+    cleaned = cleaned.replace("’", "'")
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    cleaned = re.sub(r"[?!.]+$", "", cleaned)
+    return cleaned.strip(" ,")
+
+
+def query_contains_explicit_date(query: str) -> bool:
+    if MONTH_NAME_RE.search(query):
+        return True
+    return bool(re.search(r"\b\d{4}-\d{2}-\d{2}\b", query) or re.search(r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b", query))
+
+
+def expand_relative_date_terms(query: str) -> str:
+    lowered = query.lower()
+    if not any(term in lowered for term in ("today", "tomorrow", "yesterday")):
+        return query
+
+    local_today = datetime.datetime.now().astimezone().date()
+    replacements = {
+        "today": local_today.strftime("%B %-d %Y"),
+        "tomorrow": (local_today + datetime.timedelta(days=1)).strftime("%B %-d %Y"),
+        "yesterday": (local_today - datetime.timedelta(days=1)).strftime("%B %-d %Y"),
+    }
+
+    expanded = query
+    for term, replacement in replacements.items():
+        expanded = re.sub(rf"\b{term}\b", replacement, expanded, flags=re.IGNORECASE)
+    return expanded
+
+
+def simplify_search_query(query: str) -> str | None:
+    tokens = TOKEN_RE.findall(query)
+    keywords: list[str] = []
+    for token in tokens:
+        lowered = token.lower().replace("’", "'")
+        if lowered in SEARCH_QUERY_STOPWORDS:
+            continue
+        normalized = lowered.replace("'", "")
+        if len(normalized) == 1 and not normalized.isdigit():
+            continue
+        keywords.append(normalized)
+
+    if len(keywords) < 2:
+        return None
+    return " ".join(keywords)
+
+
+def search_query_variants(query: str) -> list[str]:
+    variants: list[str] = []
+    seen: set[str] = set()
+
+    def add(value: str | None) -> None:
+        if not value:
+            return
+        normalized = normalize_search_query(value)
+        if not normalized:
+            return
+        folded = normalized.lower()
+        if folded in seen:
+            return
+        seen.add(folded)
+        variants.append(normalized)
+
+    add(query)
+    normalized = normalize_search_query(query)
+    if "," in normalized:
+        add(normalized.replace(",", ""))
+    expanded = expand_relative_date_terms(normalized)
+    if expanded != normalized:
+        add(expanded)
+        if "," in expanded:
+            add(expanded.replace(",", ""))
+    add(simplify_search_query(expanded))
+    return variants
+
+
+def query_requires_definitive_fetch(query: str) -> bool:
+    lowered = query.lower()
+    return any(term in lowered for term in TIME_SENSITIVE_QUERY_TERMS)
+
+
+def annotate_search_error(
+    error: dict[str, Any],
+    requested_query: str,
+    attempted_queries: list[str],
+) -> dict[str, Any]:
+    annotated = dict(error)
+    annotated["provider"] = "searxng"
+    annotated["requested_query"] = requested_query
+    annotated["attempted_queries"] = attempted_queries
+    annotated["verification_failed"] = True
+    annotated["do_not_answer_from_memory"] = True
+    annotated["recommended_next_step"] = (
+        "Explain that live web verification failed and do not present an "
+        "unverified current fact as certain."
+    )
+    return annotated
+
+
+def annotate_fetch_error(error: str, requested_url: str) -> dict[str, Any]:
+    return {
+        "error": error,
+        "url": requested_url,
+        "verification_failed": True,
+        "do_not_answer_from_memory": True,
+        "recommended_next_step": (
+            "Explain that the page could not be verified and do not claim page "
+            "contents that were not fetched."
+        ),
+    }
 
 
 def split_messages_for_conversation(
@@ -70,6 +304,7 @@ def chunk_to_events(
 class EngineConfig:
     model_path: str
     max_num_tokens: int
+    backend: str
 
 
 @dataclass(frozen=True)
@@ -77,6 +312,7 @@ class ToolPermissions:
     web: bool = False
     local_files: bool = False
     calculate: bool = False
+    current_datetime: bool = False
 
     @classmethod
     def from_command(cls, command: dict[str, Any]) -> ToolPermissions:
@@ -85,6 +321,7 @@ class ToolPermissions:
             web=bool(raw.get("web")),
             local_files=bool(raw.get("local_files")),
             calculate=bool(raw.get("calculate")),
+            current_datetime=bool(raw.get("current_datetime")),
         )
 
 
@@ -94,11 +331,12 @@ class FridayToolEventHandler:
 
     def approve_tool_call(self, tool_call: dict[str, Any]) -> bool:
         function = tool_call.get("function", {})
+        raw_args = function.get("arguments", {}) or {}
         write_event(
             "tool_call",
             request_id=self._request_id,
             name=str(function.get("name", "")),
-            args=function.get("arguments", {}) or {},
+            args=normalize_tool_payload(raw_args),
         )
         return True
 
@@ -107,7 +345,7 @@ class FridayToolEventHandler:
             "tool_result",
             request_id=self._request_id,
             name=str(tool_response.get("name", "")),
-            result=tool_response.get("response"),
+            result=normalize_tool_payload(tool_response.get("response")),
         )
         return tool_response
 
@@ -127,15 +365,15 @@ def extract_text_from_message(message: dict[str, Any]) -> str:
     return ""
 
 
-def should_force_web_search(user_text: str) -> bool:
-    lowered = user_text.lower()
-    return any(
+def web_search_time_range(query: str) -> str | None:
+    lowered = sanitize_tool_string(query).lower()
+    if any(
         needle in lowered
         for needle in (
             "today",
-            "current",
+            "tomorrow",
+            "yesterday",
             "latest",
-            "now",
             "live",
             "news",
             "weather",
@@ -143,50 +381,175 @@ def should_force_web_search(user_text: str) -> bool:
             "price",
             "stock",
             "score",
+            "match",
+            "fixture",
             "schedule",
         )
-    )
+    ):
+        return "day"
+    return None
 
 
-def inject_web_search_results(
-    prompt: dict[str, Any],
-    search_result: dict[str, Any],
-) -> dict[str, Any]:
-    results = search_result.get("results")
-    if not isinstance(results, list) or not results:
-        return prompt
-
-    lines: list[str] = []
-    for result in results[:5]:
-        if not isinstance(result, dict):
+def extract_urls_from_text(user_text: str, limit: int = 3) -> list[str]:
+    urls: list[str] = []
+    seen: set[str] = set()
+    for match in URL_RE.finditer(user_text):
+        normalized = match.group(0).rstrip(TRAILING_URL_PUNCTUATION)
+        if not normalized or normalized in seen:
             continue
-        pieces = [
-            result.get("title", ""),
-            result.get("url", ""),
-            result.get("snippet", ""),
-        ]
-        line = " - ".join(piece for piece in pieces if isinstance(piece, str) and piece)
-        if line:
-            lines.append(line)
+        seen.add(normalized)
+        urls.append(normalized)
+        if len(urls) >= limit:
+            break
+    return urls
 
-    if not lines:
-        return prompt
 
-    prefix = (
-        "Live web search results for this turn:\n"
-        + "\n".join(lines)
-        + "\n\nUse these results as current external context when relevant."
-    )
-    next_prompt = copy.deepcopy(prompt)
-    content = next_prompt.get("content")
-    if isinstance(content, str):
-        next_prompt["content"] = f"{prefix}\n\nUser request:\n{content}"
-        return next_prompt
-    if isinstance(content, list):
-        content.insert(0, {"type": "text", "text": prefix})
-        return next_prompt
-    next_prompt["content"] = prefix
-    return next_prompt
+def normalize_tool_payload(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return sanitize_tool_payload(value)
+    if value is None:
+        return {}
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return {}
+        try:
+            decoded = json.loads(stripped)
+        except json.JSONDecodeError:
+            return {"value": sanitize_tool_string(value)}
+        if isinstance(decoded, dict):
+            return sanitize_tool_payload(decoded)
+        return {"value": sanitize_tool_payload(decoded)}
+    if isinstance(value, (list, tuple)):
+        return {"value": sanitize_tool_payload(list(value))}
+    return {"value": value}
+
+
+def build_web_tool_guidance(user_text: str) -> str | None:
+    guidance_parts = [
+        "When using web tools, search for the concrete subject of the user's "
+        "request rather than repeating short meta follow-ups verbatim. Carry "
+        "forward relevant chat context when the latest message is a correction "
+        "or brief follow-up.",
+        "For current, live, recent, or breaking topics such as scores, prices, "
+        "schedules, and news, include the entity names and event context in "
+        "the search query and use web_fetch on a promising result when "
+        "snippets are not definitive.",
+    ]
+    if extract_urls_from_text(user_text):
+        guidance_parts.append(
+            "The user included explicit URLs. Use web_fetch on the exact URL "
+            "before summarizing or making claims about that page."
+        )
+    return " ".join(guidance_parts)
+
+
+def has_web_search_results(search_result: dict[str, Any]) -> bool:
+    results = search_result.get("results")
+    return isinstance(results, list) and any(isinstance(result, dict) for result in results)
+
+
+def web_search_categories(query: str) -> list[str] | None:
+    lowered = sanitize_tool_string(query).lower()
+    if (
+        any(
+            needle in lowered
+            for needle in (
+                "today",
+                "tomorrow",
+                "yesterday",
+                "latest",
+                "live",
+                "news",
+                "weather",
+                "forecast",
+                "price",
+                "stock",
+                "score",
+                "match",
+                "fixture",
+                "schedule",
+                "won",
+            )
+        )
+        or bool(re.search(r"\bvs\b|\bv\b", lowered))
+    ):
+        return ["general", "web", "news"]
+    if query_requires_definitive_fetch(query):
+        return ["general", "web"]
+    return None
+
+
+def result_domain(url: str) -> str:
+    try:
+        host = urllib.parse.urlparse(url).hostname or ""
+    except ValueError:
+        return ""
+    host = host.lower()
+    if host.startswith("www."):
+        host = host[4:]
+    return host
+
+
+def query_entity_terms(query: str) -> set[str]:
+    terms: set[str] = set()
+    for token in TOKEN_RE.findall(query):
+        normalized = token.lower().replace("’", "").replace("'", "")
+        if normalized in SEARCH_QUERY_STOPWORDS or len(normalized) < 3:
+            continue
+        terms.add(normalized)
+    return terms
+
+
+def is_likely_primary_source(domain: str, entity_terms: set[str]) -> bool:
+    if not domain:
+        return False
+    if domain.endswith(".gov") or ".gov." in domain or domain.endswith(".edu") or domain.endswith(".mil"):
+        return True
+    return any(term in domain for term in entity_terms if len(term) >= 4)
+
+
+def score_search_result(query: str, result: dict[str, Any]) -> tuple[int, int]:
+    domain = result_domain(str(result.get("url") or ""))
+    entity_terms = query_entity_terms(query)
+    score = 0
+    if is_likely_primary_source(domain, entity_terms):
+        score += 100
+    if domain.endswith(".org"):
+        score += 10
+    snippet_length = len(str(result.get("snippet") or ""))
+    score += min(snippet_length, 160) // 10
+    title_length = len(str(result.get("title") or ""))
+    score += min(title_length, 120) // 20
+    return score, snippet_length
+
+
+def annotate_search_results(query: str, results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    annotated: list[dict[str, Any]] = []
+    entity_terms = query_entity_terms(query)
+    for result in results:
+        domain = result_domain(str(result.get("url") or ""))
+        enriched = dict(result)
+        enriched["domain"] = domain
+        enriched["likely_primary_source"] = is_likely_primary_source(domain, entity_terms)
+        annotated.append(enriched)
+    annotated.sort(key=lambda item: score_search_result(query, item), reverse=True)
+    return annotated
+
+
+def recommended_fetch_urls(
+    query: str,
+    results: list[dict[str, Any]],
+    limit: int = 3,
+) -> list[str]:
+    preferred = [result["url"] for result in results if result.get("likely_primary_source")]
+    if len(preferred) < limit:
+        preferred.extend(
+            result["url"]
+            for result in results
+            if result.get("url") not in preferred
+        )
+    return preferred[:limit]
 
 
 def extract_between(haystack: str, start_marker: str, end_marker: str) -> str:
@@ -205,16 +568,15 @@ def extract_between(haystack: str, start_marker: str, end_marker: str) -> str:
 
 
 def strip_tags(value: str) -> str:
-    output: list[str] = []
-    inside_tag = False
-    for ch in value:
-        if ch == "<":
-            inside_tag = True
-        elif ch == ">":
-            inside_tag = False
-        elif not inside_tag:
-            output.append(ch)
-    return html.unescape("".join(output)).strip()
+    normalized = value.replace("\r\n", "\n").replace("\r", "\n")
+    normalized = HTML_BLOCK_TAG_RE.sub("\n", normalized)
+    normalized = HTML_TAG_RE.sub(" ", normalized)
+    normalized = html.unescape(normalized).replace("\xa0", " ")
+    normalized = HORIZONTAL_WHITESPACE_RE.sub(" ", normalized)
+    normalized = re.sub(r" *\n *", "\n", normalized)
+    normalized = BLANK_LINE_RE.sub("\n\n", normalized)
+    normalized = SPACE_BEFORE_PUNCTUATION_RE.sub(r"\1", normalized)
+    return normalized.strip()
 
 
 def truncate_to_char_limit(value: str, max_chars: int) -> tuple[str, bool]:
@@ -242,7 +604,7 @@ def is_disallowed_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     return ip in ipaddress.ip_network("2001:db8::/32")
 
 
-def validate_remote_web_url(url: str) -> str:
+def resolve_remote_web_target(url: str) -> tuple[urllib.parse.ParseResult, str, int]:
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme not in {"http", "https"}:
         raise ValueError("Only http and https URLs are allowed.")
@@ -260,21 +622,101 @@ def validate_remote_web_url(url: str) -> str:
     except ValueError:
         parsed_ip = None
 
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
     if parsed_ip is not None:
         if is_disallowed_ip(parsed_ip):
             raise ValueError("Local and private network hosts are blocked.")
-        return url
+        return parsed, host, port
 
-    port = parsed.port or (443 if parsed.scheme == "https" else 80)
     resolved = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
     if not resolved:
         raise ValueError(f"Host {host} did not resolve to a public address.")
+    public_address: str | None = None
     for *_, sockaddr in resolved:
         ip = ipaddress.ip_address(sockaddr[0])
         if is_disallowed_ip(ip):
             raise ValueError("Local and private network hosts are blocked.")
+        if public_address is None:
+            public_address = sockaddr[0]
 
-    return url
+    if public_address is None:
+        raise ValueError(f"Host {host} did not resolve to a public address.")
+
+    return parsed, public_address, port
+
+
+def request_target_for_url(parsed: urllib.parse.ParseResult) -> str:
+    path = parsed.path or "/"
+    if parsed.query:
+        return f"{path}?{parsed.query}"
+    return path
+
+
+class VerifiedHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, resolved_host: str, *args: Any, **kwargs: Any) -> None:
+        self._resolved_host = resolved_host
+        super().__init__(*args, **kwargs)
+
+    def connect(self) -> None:
+        self.sock = self._create_connection(
+            (self._resolved_host, self.port),
+            self.timeout,
+            self.source_address,
+        )
+
+
+class VerifiedHTTPSConnection(http.client.HTTPSConnection):
+    def __init__(self, resolved_host: str, *args: Any, **kwargs: Any) -> None:
+        self._resolved_host = resolved_host
+        super().__init__(*args, **kwargs)
+
+    def connect(self) -> None:
+        sock = self._create_connection(
+            (self._resolved_host, self.port),
+            self.timeout,
+            self.source_address,
+        )
+        self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
+
+
+def open_remote_web_response(
+    url: str,
+    headers: dict[str, str],
+) -> tuple[http.client.HTTPConnection, http.client.HTTPResponse, str]:
+    current_url = url
+    for _ in range(WEB_FETCH_MAX_REDIRECTS + 1):
+        parsed, resolved_host, port = resolve_remote_web_target(current_url)
+        request_headers = dict(headers)
+        if parsed.scheme == "https":
+            connection: http.client.HTTPConnection = VerifiedHTTPSConnection(
+                resolved_host,
+                parsed.hostname or "",
+                port=port,
+                timeout=WEB_FETCH_TIMEOUT_SECONDS,
+                context=ssl.create_default_context(),
+            )
+        else:
+            connection = VerifiedHTTPConnection(
+                resolved_host,
+                parsed.hostname or "",
+                port=port,
+                timeout=WEB_FETCH_TIMEOUT_SECONDS,
+            )
+
+        connection.request("GET", request_target_for_url(parsed), headers=request_headers)
+        response = connection.getresponse()
+        if response.status in {301, 302, 303, 307, 308}:
+            location = response.getheader("Location")
+            response.read()
+            connection.close()
+            if not location:
+                raise ValueError("Fetch failed with an invalid redirect response.")
+            current_url = urllib.parse.urljoin(current_url, location)
+            continue
+
+        return connection, response, current_url
+
+    raise ValueError(f"Fetch exceeded {WEB_FETCH_MAX_REDIRECTS} redirects.")
 
 
 def is_supported_web_fetch_content_type(content_type: str) -> bool:
@@ -291,67 +733,204 @@ def is_supported_web_fetch_content_type(content_type: str) -> bool:
     } or mime.startswith("text/")
 
 
-def web_search_impl(query: str, max_results: int = 5) -> dict[str, Any]:
-    if not query.strip():
-        return {"error": "Query is required."}
+def perform_searxng_search(
+    query: str,
+    limit: int,
+    time_range: str | None,
+    categories: list[str] | None = None,
+) -> dict[str, Any]:
+    params = {"q": query, "format": "json"}
+    if time_range:
+        params["time_range"] = time_range
+    if categories:
+        params["categories"] = ",".join(categories)
 
-    encoded_query = urllib.parse.quote(query)
     request = urllib.request.Request(
-        f"https://html.duckduckgo.com/html/?q={encoded_query}",
-        headers={"User-Agent": "Friday/0.1", "Accept-Encoding": "identity"},
+        f"{SEARXNG_BASE_URL}/search?{urllib.parse.urlencode(params)}",
+        headers={
+            "User-Agent": "Friday/0.1",
+            "Accept": "application/json",
+            "Accept-Encoding": "identity",
+        },
     )
-    try:
-        with urllib.request.urlopen(request, timeout=WEB_FETCH_TIMEOUT_SECONDS) as response:
-            html_body = response.read().decode("utf-8", errors="replace")
-    except Exception as exc:  # pragma: no cover - exercised through integration, not unit
-        return {"error": str(exc)}
+    payload: dict[str, Any] | None = None
+    retry_delays = (0.25, 0.75)
+    for attempt in range(len(retry_delays) + 1):
+        try:
+            with urllib.request.urlopen(request, timeout=WEB_FETCH_TIMEOUT_SECONDS) as response:
+                payload = json.loads(response.read().decode("utf-8", errors="replace"))
+            break
+        except urllib.error.HTTPError as exc:
+            if exc.code == 403:
+                return {"error": "Local SearXNG config is invalid; JSON output is disabled."}
+            if exc.code in TRANSIENT_SEARCH_HTTP_STATUS_CODES and attempt < len(retry_delays):
+                time.sleep(retry_delays[attempt])
+                continue
+            return {"error": f"SearXNG search failed with HTTP {exc.code}"}
+        except json.JSONDecodeError as exc:
+            return {"error": f"SearXNG returned invalid JSON: {exc}"}
+        except Exception as exc:  # pragma: no cover - exercised through integration, not unit
+            error_text = str(exc).lower()
+            if (
+                attempt < len(retry_delays)
+                and any(marker in error_text for marker in TRANSIENT_SEARCH_ERROR_MARKERS)
+            ):
+                time.sleep(retry_delays[attempt])
+                continue
+            return {"error": str(exc)}
+
+    if payload is None:
+        return {"error": "SearXNG search did not return a response."}
 
     results: list[dict[str, Any]] = []
-    limit = max(1, min(int(max_results), 10))
-    for segment in html_body.split("result__body")[1 : limit + 1]:
-        title = strip_tags(extract_between(segment, "result__a", "</a>"))
-        url = ""
-        if "uddg=" in segment:
-            encoded_url = segment.split("uddg=", 1)[1].split("&", 1)[0]
-            url = urllib.parse.unquote(encoded_url)
-        snippet = strip_tags(extract_between(segment, "result__snippet", "</a>"))
+    raw_results = payload.get("results")
+    if not isinstance(raw_results, list):
+        return {"error": "SearXNG response did not include a results list."}
+
+    for result in raw_results[:limit]:
+        if not isinstance(result, dict):
+            continue
+        title = strip_tags(str(result.get("title") or "")).strip()
+        url = str(result.get("url") or "").strip()
+        snippet = strip_tags(str(result.get("content") or "")).strip()
         if title or url or snippet:
             results.append({"title": title, "url": url, "snippet": snippet})
+    results = annotate_search_results(query, results)
 
-    return {"query": query, "results": results, "total": len(results)}
+    normalized: dict[str, Any] = {
+        "query": str(payload.get("query") or query),
+        "results": results,
+        "total": len(results),
+        "provider": "searxng",
+    }
+    normalized["snippets_are_not_definitive"] = True
+    normalized["recommended_fetch_urls"] = recommended_fetch_urls(query, results)
+    if query_requires_definitive_fetch(query):
+        normalized["recommended_next_step"] = (
+            "Use web_fetch on a recommended URL before giving a definitive answer, "
+            "because search results only contain snippets."
+        )
+    unresponsive_engines = payload.get("unresponsive_engines")
+    if isinstance(unresponsive_engines, list):
+        normalized["unresponsive_engines"] = unresponsive_engines
+    if time_range:
+        normalized["time_range"] = time_range
+    if categories:
+        normalized["categories"] = categories
+    return normalized
+
+
+def web_search_impl(query: str, max_results: int = 5) -> dict[str, Any]:
+    cleaned_query = normalize_search_query(query)
+    if not cleaned_query:
+        return {"error": "Query is required."}
+
+    limit = max(1, min(int(max_results), 10))
+    time_range = web_search_time_range(cleaned_query)
+    variants = search_query_variants(cleaned_query)
+    attempted_variants: list[str] = []
+    fallback_used = False
+    last_no_results: dict[str, Any] | None = None
+    last_error: dict[str, Any] | None = None
+
+    for index, variant in enumerate(variants):
+        attempted_variants.append(variant)
+        categories = web_search_categories(variant)
+        primary_result = perform_searxng_search(variant, limit, time_range, categories)
+        if "error" in primary_result:
+            last_error = primary_result
+        elif has_web_search_results(primary_result):
+            if variant != cleaned_query:
+                primary_result["query_variant_used"] = variant
+            if index > 0:
+                primary_result["query_variant_fallback"] = "applied"
+            primary_result["requested_query"] = cleaned_query
+            primary_result["attempted_queries"] = attempted_variants
+            return primary_result
+        else:
+            last_no_results = primary_result
+
+        if time_range is not None:
+            fallback_result = perform_searxng_search(variant, limit, None, categories)
+            if "error" in fallback_result:
+                last_error = fallback_result
+            elif has_web_search_results(fallback_result):
+                fallback_used = True
+                if variant != cleaned_query:
+                    fallback_result["query_variant_used"] = variant
+                if index > 0:
+                    fallback_result["query_variant_fallback"] = "applied"
+                fallback_result["time_range_fallback"] = "omitted"
+                fallback_result["requested_query"] = cleaned_query
+                fallback_result["attempted_queries"] = attempted_variants
+                return fallback_result
+            else:
+                last_no_results = fallback_result
+
+    if last_no_results is not None:
+        if fallback_used:
+            last_no_results["time_range_fallback"] = "omitted"
+        if len(attempted_variants) > 1:
+            last_no_results["query_variant_fallback"] = "attempted"
+        last_no_results["requested_query"] = cleaned_query
+        last_no_results["attempted_queries"] = attempted_variants
+        return last_no_results
+
+    if last_error is not None:
+        return annotate_search_error(last_error, cleaned_query, attempted_variants)
+
+    return annotate_search_error(
+        {"error": "SearXNG search failed unexpectedly."},
+        cleaned_query,
+        attempted_variants,
+    )
 
 
 def web_fetch_impl(url: str, max_chars: int = 5000) -> dict[str, Any]:
-    if not url.strip():
-        return {"error": "URL is required."}
+    cleaned_url = sanitize_tool_string(url)
+    if not cleaned_url:
+        return annotate_fetch_error("URL is required.", cleaned_url)
 
     try:
-        validated_url = validate_remote_web_url(url)
+        _, _, _ = resolve_remote_web_target(cleaned_url)
     except ValueError as exc:
-        return {"error": str(exc)}
+        return annotate_fetch_error(str(exc), cleaned_url)
 
-    request = urllib.request.Request(
-        validated_url,
-        headers={"User-Agent": "Friday/0.1", "Accept-Encoding": "identity"},
-    )
+    connection: http.client.HTTPConnection | None = None
     try:
-        with urllib.request.urlopen(request, timeout=WEB_FETCH_TIMEOUT_SECONDS) as response:
-            final_url = response.geturl()
-            validate_remote_web_url(final_url)
-            content_length = response.headers.get("Content-Length")
-            if content_length and int(content_length) > WEB_FETCH_MAX_BYTES:
-                return {"error": f"Response exceeds {WEB_FETCH_MAX_BYTES} bytes."}
-            content_type = response.headers.get_content_type().lower()
-            if not is_supported_web_fetch_content_type(content_type):
-                return {"error": f"Unsupported content type: {content_type or 'unknown'}"}
-            body = response.read(WEB_FETCH_MAX_BYTES + 1)
-    except urllib.error.HTTPError as exc:
-        return {"error": f"Fetch failed with HTTP {exc.code}"}
+        connection, response, final_url = open_remote_web_response(
+            cleaned_url,
+            {"User-Agent": "Friday/0.1", "Accept-Encoding": "identity"},
+        )
+        if response.status >= 400:
+            return annotate_fetch_error(
+                f"Fetch failed with HTTP {response.status}",
+                cleaned_url,
+            )
+        content_length = response.headers.get("Content-Length")
+        if content_length and int(content_length) > WEB_FETCH_MAX_BYTES:
+            return annotate_fetch_error(
+                f"Response exceeds {WEB_FETCH_MAX_BYTES} bytes.",
+                cleaned_url,
+            )
+        content_type = response.headers.get_content_type().lower()
+        if not is_supported_web_fetch_content_type(content_type):
+            return annotate_fetch_error(
+                f"Unsupported content type: {content_type or 'unknown'}",
+                cleaned_url,
+            )
+        body = response.read(WEB_FETCH_MAX_BYTES + 1)
     except Exception as exc:  # pragma: no cover - exercised through integration, not unit
-        return {"error": str(exc)}
+        return annotate_fetch_error(str(exc), cleaned_url)
+    finally:
+        if connection is not None:
+            connection.close()
 
     if len(body) > WEB_FETCH_MAX_BYTES:
-        return {"error": f"Response exceeds {WEB_FETCH_MAX_BYTES} bytes."}
+        return annotate_fetch_error(
+            f"Response exceeds {WEB_FETCH_MAX_BYTES} bytes.",
+            cleaned_url,
+        )
 
     body_text = body.decode("utf-8", errors="replace")
     snippet, was_truncated = truncate_to_char_limit(
@@ -413,7 +992,7 @@ def _eval_math(node: ast.AST) -> float:
 
 
 def calculate_impl(expression: str) -> dict[str, Any]:
-    cleaned = expression.strip()
+    cleaned = sanitize_tool_string(expression).strip()
     if not cleaned:
         return {"error": "Expression is required."}
     try:
@@ -424,8 +1003,32 @@ def calculate_impl(expression: str) -> dict[str, Any]:
     return {"result": str(result)}
 
 
+def get_current_datetime_impl() -> dict[str, Any]:
+    now = datetime.datetime.now().astimezone()
+    raw_offset = now.strftime("%z")
+    if len(raw_offset) == 5:
+        formatted_offset = f"{raw_offset[:3]}:{raw_offset[3:]}"
+    else:
+        formatted_offset = raw_offset
+
+    utc_offset = f"UTC{formatted_offset}" if formatted_offset else "UTC"
+    timezone_name = now.tzname() or "local"
+    return {
+        "local_iso": now.isoformat(timespec="seconds"),
+        "local_datetime": (
+            f"{now.strftime('%Y-%m-%d %H:%M:%S')} "
+            f"({utc_offset}, {now.strftime('%A')})"
+        ),
+        "local_date": now.strftime("%Y-%m-%d"),
+        "local_time": now.strftime("%H:%M:%S"),
+        "weekday": now.strftime("%A"),
+        "timezone": timezone_name,
+        "utc_offset": utc_offset,
+    }
+
+
 def file_read_impl(path: str) -> dict[str, Any]:
-    file_path = pathlib.Path(path)
+    file_path = pathlib.Path(sanitize_tool_string(path))
     if not file_path.exists():
         return {"error": f"File not found: {file_path}"}
     try:
@@ -436,7 +1039,7 @@ def file_read_impl(path: str) -> dict[str, Any]:
 
 
 def list_directory_impl(path: str) -> dict[str, Any]:
-    dir_path = pathlib.Path(path)
+    dir_path = pathlib.Path(sanitize_tool_string(path))
     try:
         entries = list(dir_path.iterdir())
     except Exception as exc:
@@ -461,29 +1064,21 @@ def list_directory_impl(path: str) -> dict[str, Any]:
 def build_tools(tool_permissions: ToolPermissions) -> list[Any]:
     tools: list[Any] = []
 
-    if tool_permissions.web:
+    if tool_permissions.current_datetime:
 
-        def web_search(query: str, max_results: int = 5) -> dict[str, Any]:
-            """Search the web for current information.
+        def get_current_datetime() -> dict[str, Any]:
+            """Get the exact current local date and time for relative-date questions.
 
-            Args:
-                query: The search query.
-                max_results: The maximum number of results to return.
+            Use this whenever the user asks about the current date or time,
+            what day it is, or relative dates like today, yesterday, and tomorrow.
+            If the answer also depends on a public fact for that date, such as a
+            holiday, officeholder, news event, score, or schedule, use
+            web_search after resolving the date.
             """
 
-            return web_search_impl(query, max_results)
+            return get_current_datetime_impl()
 
-        def web_fetch(url: str, max_chars: int = 5000) -> dict[str, Any]:
-            """Fetch a URL and extract visible text content.
-
-            Args:
-                url: The URL to fetch.
-                max_chars: The maximum number of visible characters to return.
-            """
-
-            return web_fetch_impl(url, max_chars)
-
-        tools.extend([web_search, web_fetch])
+        tools.append(get_current_datetime)
 
     if tool_permissions.local_files:
 
@@ -494,7 +1089,7 @@ def build_tools(tool_permissions: ToolPermissions) -> list[Any]:
                 path: The file path to read.
             """
 
-            return file_read_impl(path)
+            return file_read_impl(sanitize_tool_string(path))
 
         def list_directory(path: str) -> dict[str, Any]:
             """List files and folders in a local directory.
@@ -503,9 +1098,41 @@ def build_tools(tool_permissions: ToolPermissions) -> list[Any]:
                 path: The directory path to inspect.
             """
 
-            return list_directory_impl(path)
+            return list_directory_impl(sanitize_tool_string(path))
 
         tools.extend([file_read, list_directory])
+
+    if tool_permissions.web:
+
+        def web_search(query: str, max_results: int = 5) -> dict[str, Any]:
+            """Search web snippets to find sources for current or public facts.
+
+            Args:
+                query: The search query to run. Use this to verify public facts,
+                    especially when the answer depends on today's date or another
+                    relative date. Examples include holidays, officeholders,
+                    weather, prices, scores, schedules, and breaking news. If
+                    the search snippets are not conclusive enough to answer
+                    reliably, follow a relevant result with web_fetch before
+                    answering.
+                max_results: The maximum number of results to return.
+            """
+
+            return web_search_impl(sanitize_tool_string(query), max_results)
+
+        def web_fetch(url: str, max_chars: int = 12000) -> dict[str, Any]:
+            """Fetch the full text of a specific result URL for exact verification.
+
+            Args:
+                url: The exact URL to fetch. Use this when the user provides a
+                    URL or when you need to inspect a specific page from search
+                    because the search snippet alone is not definitive.
+                max_chars: The maximum number of characters to return.
+            """
+
+            return web_fetch_impl(sanitize_tool_string(url), max_chars)
+
+        tools.extend([web_search, web_fetch])
 
     if tool_permissions.calculate:
 
@@ -516,7 +1143,7 @@ def build_tools(tool_permissions: ToolPermissions) -> list[Any]:
                 expression: The expression to evaluate.
             """
 
-            return calculate_impl(expression)
+            return calculate_impl(sanitize_tool_string(expression))
 
         tools.append(calculate)
 
@@ -562,21 +1189,41 @@ class LiteRtWorker:
         self._active_request_id = None
         self._cancelled_request_id = None
 
-    def ensure_engine(self, model_path: str, max_num_tokens: int) -> None:
-        next_config = EngineConfig(model_path=model_path, max_num_tokens=max_num_tokens)
+    def _resolve_backend(self, backend: str, litert_lm: Any) -> Any:
+        normalized = backend.strip().lower()
+        if normalized == "gpu":
+            return litert_lm.Backend.GPU
+        if normalized == "cpu":
+            return litert_lm.Backend.CPU
+        raise ValueError(f"Unsupported LiteRT backend: {backend}")
+
+    def ensure_engine(
+        self,
+        model_path: str,
+        max_num_tokens: int,
+        backend: str,
+    ) -> None:
+        next_config = EngineConfig(
+            model_path=model_path,
+            max_num_tokens=max_num_tokens,
+            backend=backend,
+        )
         if self._engine is not None and self._engine_config == next_config:
             return
 
         self.close_engine()
         litert_lm = self._load_litert_module()
+        main_backend = self._resolve_backend(backend, litert_lm)
         engine = litert_lm.Engine(
             model_path,
-            backend=litert_lm.Backend.CPU,
+            backend=main_backend,
             max_num_tokens=max_num_tokens,
             # Gemma 4 image prompts require the Metal-backed vision encoder on
             # macOS; CPU vision initialization accepts images but does not
             # actually ground responses in them.
             vision_backend=litert_lm.Backend.GPU,
+            # Gemma 4 audio inputs currently require the CPU audio backend even
+            # when the main model executor runs on GPU.
             audio_backend=litert_lm.Backend.CPU,
         )
         engine.__enter__()
@@ -586,7 +1233,12 @@ class LiteRtWorker:
     def handle_warm(self, command: dict[str, Any]) -> None:
         model_path = str(command["model_path"])
         max_num_tokens = int(command["max_num_tokens"])
-        self.ensure_engine(model_path, max_num_tokens)
+        backend = str(command.get("backend") or "cpu")
+        self.ensure_engine(
+            model_path,
+            max_num_tokens,
+            backend,
+        )
         write_event(
             "ready",
             model_path=model_path,
@@ -607,22 +1259,10 @@ class LiteRtWorker:
         tool_permissions = ToolPermissions.from_command(command)
         thinking_enabled = bool(generation_config.get("thinking_enabled"))
         user_text = extract_text_from_message(prompt)
-        if tool_permissions.web and should_force_web_search(user_text):
-            search_args = {"query": user_text, "max_results": 5}
-            write_event(
-                "tool_call",
-                request_id=request_id,
-                name="web_search",
-                args=search_args,
-            )
-            search_result = web_search_impl(user_text, 5)
-            write_event(
-                "tool_result",
-                request_id=request_id,
-                name="web_search",
-                result=search_result,
-            )
-            prompt = inject_web_search_results(prompt, search_result)
+        if tool_permissions.web and user_text.strip():
+            web_guidance = build_web_tool_guidance(user_text)
+            if web_guidance:
+                preface = [*preface, {"role": "system", "content": web_guidance}]
 
         tools = build_tools(tool_permissions)
         tool_handler = FridayToolEventHandler(request_id) if tools else None

@@ -16,6 +16,9 @@ import type {
   Session,
   SessionSelectionResult,
   ToolCallEvent,
+  ToolResultEvent,
+  WebSearchState,
+  WebSearchStatus,
 } from "../types";
 
 const TOKEN_FLUSH_INTERVAL_MS = 16;
@@ -40,6 +43,80 @@ function toErrorMessage(error: unknown) {
   if (typeof error === "string") return error;
   if (error instanceof Error) return error.message;
   return "Something went wrong while processing your request.";
+}
+
+function unavailableWebSearchStatus(
+  message = "Local web search is unavailable.",
+): WebSearchStatus {
+  return {
+    provider: "searxng",
+    available: false,
+    running: false,
+    healthy: false,
+    state: "unavailable",
+    message,
+    base_url: "http://127.0.0.1:8091",
+  };
+}
+
+function webSearchStartupMessage(status: WebSearchStatus | null): string {
+  switch (status?.state) {
+    case "needs_install":
+    case "installing":
+      return "Preparing local web search…";
+    default:
+      return "Starting local web search…";
+  }
+}
+
+function generationStatusForWebSearchLifecycle(
+  state: WebSearchState,
+): string | null {
+  switch (state) {
+    case "needs_install":
+    case "installing":
+      return "Preparing local web search…";
+    case "stopped":
+    case "starting":
+      return "Starting local web search…";
+    case "ready":
+      return "Friday is thinking…";
+    default:
+      return null;
+  }
+}
+
+function generationStatusForToolCall(name: string): string {
+  switch (name) {
+    case "get_current_datetime":
+      return "Checking the date and time…";
+    case "web_search":
+      return "Searching the web…";
+    case "web_fetch":
+      return "Reading the page…";
+    case "file_read":
+      return "Reading local files…";
+    case "list_directory":
+      return "Inspecting local files…";
+    case "calculate":
+      return "Calculating…";
+    default:
+      return "Working…";
+  }
+}
+
+function generationStatusForToolResult(name: string): string | null {
+  switch (name) {
+    case "web_search":
+    case "web_fetch":
+    case "get_current_datetime":
+    case "file_read":
+    case "list_directory":
+    case "calculate":
+      return "Friday is thinking…";
+    default:
+      return null;
+  }
 }
 
 function normalizeChatErrorPayload(
@@ -210,6 +287,19 @@ function settingsInputsEqual(
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
+function canUseWebSearch(
+  backendStatus: BackendStatus | null,
+  webSearchStatus: WebSearchStatus | null,
+) {
+  return Boolean(
+    backendStatus?.supports_native_tools &&
+      webSearchStatus?.available &&
+      webSearchStatus.state !== "unavailable" &&
+      webSearchStatus.state !== "config_error" &&
+      webSearchStatus.state !== "port_conflict",
+  );
+}
+
 export function useAppController() {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [activeSession, setActiveSession] = useState<Session | null>(null);
@@ -218,12 +308,16 @@ export function useAppController() {
   const [backendStatus, setBackendStatus] = useState<BackendStatus | null>(
     null,
   );
+  const [webSearchStatus, setWebSearchStatus] = useState<WebSearchStatus | null>(
+    null,
+  );
   const [currentModel, setCurrentModel] = useState("—");
   const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
   const [downloadedModelIds, setDownloadedModelIds] = useState<string[]>([]);
   const [activeModelId, setActiveModelId] = useState<string>("");
   const [isSwitchingModel, setIsSwitchingModel] = useState(false);
   const [isBootstrapping, setIsBootstrapping] = useState(true);
+  const [bootstrapError, setBootstrapError] = useState<string | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
   const [isSavingSettings, setIsSavingSettings] = useState(false);
   const [webSearchEnabled, setWebSearchEnabled] = useState(false);
@@ -326,6 +420,12 @@ export function useAppController() {
     pendingSessionIdRef.current = null;
   };
 
+  const resetGenerationUiState = () => {
+    clearPendingGenerationState();
+    setIsGenerating(false);
+    setGenerationStatus(null);
+  };
+
   const scheduleBufferedTokenFlush = () => {
     if (tokenFlushTimeoutRef.current !== null) return;
     tokenFlushTimeoutRef.current = window.setTimeout(() => {
@@ -392,20 +492,41 @@ export function useAppController() {
     return status;
   };
 
+  const detectWebSearchStatus = async () => {
+    try {
+      const status =
+        (await invoke<WebSearchStatus>("get_web_search_status")) ??
+        unavailableWebSearchStatus();
+      setWebSearchStatus(status);
+      return status;
+    } catch (error) {
+      const status = unavailableWebSearchStatus(toErrorMessage(error));
+      setWebSearchStatus(status);
+      return status;
+    }
+  };
+
   const refreshBackendStatus = async ({
     includeModelInventory = true,
+    settingsValue = settings,
   }: {
     includeModelInventory?: boolean;
+    settingsValue?: AppSettings | null;
   } = {}) => {
     if (!includeModelInventory) {
-      return detectBackendStatus();
+      const [status] = await Promise.all([
+        detectBackendStatus(),
+        detectWebSearchStatus(),
+      ]);
+      return (await warmBackendIfNeeded(settingsValue, status)) ?? status;
     }
 
     const [status] = await Promise.all([
       detectBackendStatus(),
+      detectWebSearchStatus(),
       refreshModelInventory(),
     ]);
-    return status;
+    return (await warmBackendIfNeeded(settingsValue, status)) ?? status;
   };
 
   const warmBackendIfNeeded = async (
@@ -413,10 +534,10 @@ export function useAppController() {
     statusValue: BackendStatus | null | undefined,
   ) => {
     if (!settingsValue?.auto_start_backend) {
-      return;
+      return statusValue;
     }
     if (!statusValue || statusValue.connected || statusValue.state !== "ready") {
-      return;
+      return statusValue;
     }
 
     try {
@@ -425,13 +546,16 @@ export function useAppController() {
       if (warmed.models[0]) {
         setCurrentModel(formatModelLabel(warmed.models[0]));
       }
+      return warmed;
     } catch {
       // Warmup is opportunistic; the regular send path will still start the daemon.
+      return statusValue;
     }
   };
 
   const bootstrap = async () => {
     setIsBootstrapping(true);
+    setBootstrapError(null);
     try {
       const payload = await invoke<BootstrapPayload>("bootstrap_app");
       const normalizedSettings = settingsToInput(payload.settings);
@@ -442,6 +566,9 @@ export function useAppController() {
       setMessages(payload.messages);
       applySavedSettingsState(payload.settings);
       setBackendStatus(payload.backendStatus);
+      setWebSearchStatus(
+        payload.webSearchStatus ?? unavailableWebSearchStatus(),
+      );
       await refreshModelInventory();
       void warmBackendIfNeeded(payload.settings, payload.backendStatus);
       if (
@@ -521,6 +648,23 @@ export function useAppController() {
         },
       );
 
+      const unlistenWebSearchStatus = await listen<WebSearchStatus>(
+        "web-search-status",
+        (event) => {
+          setWebSearchStatus(event.payload);
+          if (!pendingSessionIdRef.current) {
+            return;
+          }
+
+          const nextStatus = generationStatusForWebSearchLifecycle(
+            event.payload.state,
+          );
+          if (nextStatus) {
+            setGenerationStatus(nextStatus);
+          }
+        },
+      );
+
       const unlistenToolCall = await listen<ToolCallEvent>(
         "tool-call-start",
         (event) => {
@@ -528,25 +672,23 @@ export function useAppController() {
             return;
           }
 
-          switch (event.payload.name) {
-            case "web_search":
-              setGenerationStatus("Searching the web…");
-              break;
-            case "web_fetch":
-              setGenerationStatus("Reading the page…");
-              break;
-            case "file_read":
-              setGenerationStatus("Reading local files…");
-              break;
-            case "list_directory":
-              setGenerationStatus("Inspecting local files…");
-              break;
-            case "calculate":
-              setGenerationStatus("Calculating…");
-              break;
-            default:
-              setGenerationStatus("Working…");
-              break;
+          setGenerationStatus(generationStatusForToolCall(event.payload.name));
+        },
+      );
+
+      const unlistenToolResult = await listen<ToolResultEvent>(
+        "tool-call-result",
+        (event) => {
+          if (
+            event.payload.sessionId !== pendingSessionIdRef.current ||
+            !pendingSessionIdRef.current
+          ) {
+            return;
+          }
+
+          const nextStatus = generationStatusForToolResult(event.payload.name);
+          if (nextStatus) {
+            setGenerationStatus(nextStatus);
           }
         },
       );
@@ -581,7 +723,9 @@ export function useAppController() {
         unlistenToken();
         unlistenDone();
         unlistenActivity();
+        unlistenWebSearchStatus();
         unlistenToolCall();
+        unlistenToolResult();
         unlistenError();
       };
     };
@@ -600,6 +744,7 @@ export function useAppController() {
 
     void bootstrap().catch((error) => {
       const message = toErrorMessage(error);
+      setBootstrapError(message);
       setMessages([makeAssistantMessage("bootstrap", `⚠️ ${message}`)]);
       setIsBootstrapping(false);
     });
@@ -623,8 +768,7 @@ export function useAppController() {
     ]);
     setActiveSession(session);
     setMessages([]);
-    clearPendingGenerationState();
-    setIsGenerating(false);
+    resetGenerationUiState();
   };
 
   const selectSession = async (sessionId: string) => {
@@ -635,15 +779,41 @@ export function useAppController() {
     });
     setActiveSession(result.session);
     setMessages(result.messages);
-    clearPendingGenerationState();
-    setIsGenerating(false);
+    resetGenerationUiState();
   };
 
   const deleteSession = async (sessionId: string) => {
     if (isGenerating) return;
 
     await invoke("delete_session", { sessionId });
-    await bootstrap();
+    const deletedActiveSession = activeSessionRef.current?.id === sessionId;
+    const nextSessions = await invoke<Session[]>("list_sessions");
+    setSessions(nextSessions);
+    resetGenerationUiState();
+
+    if (
+      !deletedActiveSession &&
+      activeSessionRef.current?.id &&
+      nextSessions.some((session) => session.id === activeSessionRef.current?.id)
+    ) {
+      return;
+    }
+
+    const fallbackSession = nextSessions[0] ?? null;
+    if (!fallbackSession) {
+      setActiveSession(null);
+      setMessages([]);
+      return;
+    }
+
+    setActiveSession(fallbackSession);
+    setMessages([]);
+
+    const selection = await invoke<SessionSelectionResult>("select_session", {
+      sessionId: fallbackSession.id,
+    });
+    setActiveSession(selection.session);
+    setMessages(selection.messages);
   };
 
   const sendMessage = async (
@@ -658,6 +828,8 @@ export function useAppController() {
     const sessionId = activeSession.id;
     const effectiveThinkingEnabled =
       thinkingEnabled && (backendStatus?.supports_thinking ?? false);
+    const effectiveWebAssistEnabled =
+      webSearchEnabled && canUseWebSearch(backendStatus, webSearchStatus);
 
     // Build display content for the user bubble
     let displayContent = trimmed;
@@ -694,8 +866,14 @@ export function useAppController() {
     pendingAssistantIdRef.current = pendingId;
     pendingSessionIdRef.current = sessionId;
     setIsGenerating(true);
+    const needsWebSearchStartup =
+      effectiveWebAssistEnabled && webSearchStatus?.state !== "ready";
     setGenerationStatus(
-      backendStatus?.connected ? "Friday is thinking…" : "Starting local model…",
+      needsWebSearchStartup
+        ? webSearchStartupMessage(webSearchStatus)
+        : backendStatus?.connected
+          ? "Friday is thinking…"
+          : "Starting local model…",
     );
     setMessages((previous) => [
       ...previous,
@@ -718,6 +896,7 @@ export function useAppController() {
             : trimmed),
         attachments: serializedAttachments,
         thinkingEnabled: effectiveThinkingEnabled,
+        webAssistEnabled: effectiveWebAssistEnabled,
       });
       if (pendingSessionIdRef.current === sessionId) {
         flushBufferedTokens();
@@ -733,9 +912,11 @@ export function useAppController() {
       clearPendingGenerationState();
 
       if (
-        !handledSendErrorRef.current &&
+        handledSendErrorRef.current &&
         activeSessionRef.current?.id === sessionId
       ) {
+        await refreshSessionState(sessionId).catch(() => undefined);
+      } else if (activeSessionRef.current?.id === sessionId) {
         appendAssistantError(toErrorMessage(error));
       }
     }
@@ -774,7 +955,10 @@ export function useAppController() {
           desiredSettingsRef.current = savedInput;
           applySavedSettingsState(saved);
         }
-        await refreshBackendStatus({ includeModelInventory: false });
+        await refreshBackendStatus({
+          includeModelInventory: false,
+          settingsValue: saved,
+        });
         return saved;
       });
 
@@ -812,7 +996,7 @@ export function useAppController() {
   };
 
   const toggleWebSearch = async () => {
-    if (!backendStatus?.supports_native_tools || !settings) {
+    if (!canUseWebSearch(backendStatus, webSearchStatus) || !settings) {
       return;
     }
     const next = !webSearchEnabled;
@@ -878,6 +1062,10 @@ export function useAppController() {
   const configurableModels = availableModels.filter((model) =>
     downloadedModelIds.includes(model.id),
   );
+  const webSearchToggleAvailable = canUseWebSearch(
+    backendStatus,
+    webSearchStatus,
+  );
 
   return {
     sessions,
@@ -885,10 +1073,12 @@ export function useAppController() {
     messages,
     settings,
     backendStatus,
+    webSearchStatus,
     currentModel,
     activeModelId,
     configurableModels,
     isBootstrapping,
+    bootstrapError,
     isGenerating,
     isSavingSettings,
     isSwitchingModel,
@@ -906,6 +1096,7 @@ export function useAppController() {
     thinkingEnabled,
     generationStatus,
     nativeToolSupportAvailable: backendStatus?.supports_native_tools ?? false,
+    webSearchToggleAvailable,
     audioInputAvailable: backendStatus?.supports_audio_input ?? false,
     thinkingAvailable: backendStatus?.supports_thinking ?? false,
     toggleWebSearch,

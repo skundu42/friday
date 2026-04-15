@@ -35,7 +35,7 @@ fn main() {
     let target_arch = env::var("CARGO_CFG_TARGET_ARCH").expect("missing CARGO_CFG_TARGET_ARCH");
     let spec = runtime_spec(&target_os, &target_arch).unwrap_or_else(|| {
         panic!(
-            "LiteRT-LM native runtime is not available for {} / {}.",
+            "Friday currently supports the managed LiteRT runtime only on macOS / aarch64, not {} / {}.",
             target_os, target_arch
         )
     });
@@ -115,21 +115,6 @@ fn runtime_spec(target_os: &str, target_arch: &str) -> Option<RuntimeSpec> {
             relative_resource_path: "litert-runtime/macos-aarch64/lit",
             download_url: "https://github.com/google-ai-edge/LiteRT-LM/releases/download/v0.10.1/lit_macos_arm64",
             sha256: "311ac22de765402adbba8fb04e4a70d0ed1263ff75d104b063453449651006bb",
-        }),
-        ("linux", "x86_64") => Some(RuntimeSpec {
-            relative_resource_path: "litert-runtime/linux-x86_64/lit",
-            download_url: "https://github.com/google-ai-edge/LiteRT-LM/releases/download/v0.10.1/lit_linux_x86_64",
-            sha256: "d8461038fc1ce523975f8a2ef8cf403cae30b85e469116f9bee186a3a8fe1f54",
-        }),
-        ("linux", "aarch64") => Some(RuntimeSpec {
-            relative_resource_path: "litert-runtime/linux-aarch64/lit",
-            download_url: "https://github.com/google-ai-edge/LiteRT-LM/releases/download/v0.10.1/lit_linux_arm64",
-            sha256: "d7016a38ad63689c8f8facd0eac6b4cd6bd6be8325918af46ee54df9c677dd9c",
-        }),
-        ("windows", "x86_64") => Some(RuntimeSpec {
-            relative_resource_path: "litert-runtime/windows-x86_64/lit.exe",
-            download_url: "https://github.com/google-ai-edge/LiteRT-LM/releases/download/v0.10.1/lit_windows_x86_64.exe",
-            sha256: "ea55d6357a1348a081dfb26c31bc2ffc4b383a139201dc5ac25a5d9c745bb753",
         }),
         _ => None,
     }
