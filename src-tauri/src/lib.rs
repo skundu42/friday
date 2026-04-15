@@ -9,7 +9,7 @@ mod storage;
 
 use models::python_worker::StreamEvent;
 use searxng::SearXNGManager;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use session::{Message, Session};
 use sidecar::SidecarManager;
 use std::fs::OpenOptions;
@@ -476,19 +476,17 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building Friday");
 
-    app.run(|app_handle, event| {
-        match event {
-            tauri::RunEvent::WindowEvent { label, event, .. }
-                if label == MAIN_WINDOW_LABEL
-                    && matches!(event, tauri::WindowEvent::CloseRequested { .. }) =>
-            {
-                app_handle.exit(0);
-            }
-            tauri::RunEvent::Exit => {
-                shutdown_managed_services(app_handle);
-            }
-            _ => {}
+    app.run(|app_handle, event| match event {
+        tauri::RunEvent::WindowEvent { label, event, .. }
+            if label == MAIN_WINDOW_LABEL
+                && matches!(event, tauri::WindowEvent::CloseRequested { .. }) =>
+        {
+            app_handle.exit(0);
         }
+        tauri::RunEvent::Exit => {
+            shutdown_managed_services(app_handle);
+        }
+        _ => {}
     });
 }
 
@@ -506,7 +504,7 @@ async fn bootstrap_payload_inner(
     sidecar: &SidecarManager,
     searxng: &SearXNGManager,
 ) -> Result<BootstrapPayload, String> {
-    let settings = with_db(&state, settings::load_settings)?;
+    let settings = with_db(state, settings::load_settings)?;
     sidecar.set_max_tokens(settings.chat.max_tokens);
     state
         .tools_enabled
@@ -523,9 +521,9 @@ async fn bootstrap_payload_inner(
         }
     }
 
-    let current_session = ensure_active_session(&state)?;
-    let sessions = list_sessions_inner(&state)?;
-    let messages = load_messages_inner(&state, &current_session.id)?;
+    let current_session = ensure_active_session(state)?;
+    let sessions = list_sessions_inner(state)?;
+    let messages = load_messages_inner(state, &current_session.id)?;
     let web_search_status = searxng.status().await;
 
     Ok(BootstrapPayload {
@@ -952,19 +950,33 @@ async fn delete_temp_file(app: tauri::AppHandle, path: String) -> Result<(), Str
     Ok(())
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SendMessageRequest {
+    session_id: String,
+    message: String,
+    attachments: Option<Vec<serde_json::Value>>,
+    thinking_enabled: Option<bool>,
+    web_assist_enabled: Option<bool>,
+}
+
 #[tauri::command]
 async fn send_message(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     sidecar: State<'_, SidecarManager>,
     searxng: State<'_, SearXNGManager>,
-    session_id: String,
-    message: String,
-    attachments: Option<Vec<serde_json::Value>>,
-    thinking_enabled: Option<bool>,
-    web_assist_enabled: Option<bool>,
+    request: SendMessageRequest,
 ) -> Result<(), String> {
-    let session_id = match validate_requested_session_id(&session_id) {
+    let SendMessageRequest {
+        session_id: requested_session_id,
+        message,
+        attachments,
+        thinking_enabled,
+        web_assist_enabled,
+    } = request;
+
+    let session_id = match validate_requested_session_id(&requested_session_id) {
         Ok(value) => value.to_string(),
         Err(error) => {
             emit_chat_error(&app, None, &error);

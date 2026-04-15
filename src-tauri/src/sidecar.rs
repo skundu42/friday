@@ -1,4 +1,4 @@
-use crate::models::python_worker::{PythonWorkerClient, StreamEvent};
+use crate::models::python_worker::{PythonWorkerClient, PythonWorkerSpawnConfig, StreamEvent};
 use crate::models::ChatMessage;
 use crate::python_runtime::{
     bundled_resource_source_path, ensure_embedded_python_runtime, install_python_wheel,
@@ -641,18 +641,17 @@ impl SidecarManager {
             preferred_backend,
         );
 
-        let (client, selected_backend) = match self
-            .spawn_daemon_worker(
-                &model_path,
-                max_tokens,
-                preferred_backend,
-                web_search_base_url.as_deref(),
-                &python_binary,
-                &worker_script,
-                &python_site_packages,
-                &python_runtime_lib_dir,
-            )
-            .await
+        let (client, selected_backend) = match PythonWorkerClient::spawn(PythonWorkerSpawnConfig {
+            python_binary: &python_binary,
+            worker_script: &worker_script,
+            model_path: &model_path,
+            max_num_tokens: max_tokens,
+            backend: preferred_backend,
+            web_search_base_url: web_search_base_url.as_deref(),
+            python_site_packages: &python_site_packages,
+            python_runtime_lib_dir: &python_runtime_lib_dir,
+        })
+        .await
         {
             Ok(client) => (client, preferred_backend),
             Err(primary_error) if preferred_backend != "cpu" => {
@@ -662,18 +661,17 @@ impl SidecarManager {
                     primary_error
                 );
 
-                match self
-                    .spawn_daemon_worker(
-                        &model_path,
-                        max_tokens,
-                        "cpu",
-                        web_search_base_url.as_deref(),
-                        &python_binary,
-                        &worker_script,
-                        &python_site_packages,
-                        &python_runtime_lib_dir,
-                    )
-                    .await
+                match PythonWorkerClient::spawn(PythonWorkerSpawnConfig {
+                    python_binary: &python_binary,
+                    worker_script: &worker_script,
+                    model_path: &model_path,
+                    max_num_tokens: max_tokens,
+                    backend: "cpu",
+                    web_search_base_url: web_search_base_url.as_deref(),
+                    python_site_packages: &python_site_packages,
+                    python_runtime_lib_dir: &python_runtime_lib_dir,
+                })
+                .await
                 {
                     Ok(client) => (client, "cpu"),
                     Err(fallback_error) => {
