@@ -204,6 +204,10 @@ class WorkerProtocolTests(unittest.TestCase):
             "steady sweep One evening storm rolled in",
         )
         self.assertEqual(
+            _MODULE.join_text_fragments(["Done.", "Next step"]),
+            "Done. Next step",
+        )
+        self.assertEqual(
             _MODULE.join_text_fragments(["St", "oring"]),
             "Storing",
         )
@@ -212,12 +216,28 @@ class WorkerProtocolTests(unittest.TestCase):
             "30",
         )
         self.assertEqual(
+            _MODULE.join_text_fragments(["नमस्ते", "दुनिया"]),
+            "नमस्तेदुनिया",
+        )
+        self.assertEqual(
             _MODULE.join_text_fragments(["Okay", ",", " let", "'s", " check"]),
             "Okay, let's check",
         )
         self.assertEqual(
             _MODULE.join_text_fragments(["```python\n", "print('hi')\n```"]),
             "```python\nprint('hi')\n```",
+        )
+        self.assertEqual(
+            _MODULE.join_text_fragments(
+                ["[The Rust Programming Language Book](https://doc.", "rust-lang.", "org/book/)"]
+            ),
+            "[The Rust Programming Language Book](https://doc.rust-lang.org/book/)",
+        )
+        self.assertEqual(
+            _MODULE.join_text_fragments(
+                ["[The Rust Programming Language Book]", "(https://doc.rust-lang.org/book/)"]
+            ),
+            "[The Rust Programming Language Book](https://doc.rust-lang.org/book/)",
         )
 
     def test_chunk_to_incremental_events_joins_multiple_text_items_safely(self) -> None:
@@ -369,6 +389,21 @@ class WorkerProtocolTests(unittest.TestCase):
         delta, merged = _MODULE.stream_text_delta("3", "0")
         self.assertEqual(delta, "0")
         self.assertEqual(merged, "30")
+
+    def test_stream_text_delta_does_not_insert_spaces_inside_urls_or_markdown_links(self) -> None:
+        delta, merged = _MODULE.stream_text_delta("Visit https://doc.", "rust-lang.org/book/")
+        self.assertEqual(delta, "rust-lang.org/book/")
+        self.assertEqual(merged, "Visit https://doc.rust-lang.org/book/")
+
+        delta, merged = _MODULE.stream_text_delta(
+            "[The Rust Programming Language Book](https://doc.",
+            "rust-lang.org/book/)",
+        )
+        self.assertEqual(delta, "rust-lang.org/book/)")
+        self.assertEqual(
+            merged,
+            "[The Rust Programming Language Book](https://doc.rust-lang.org/book/)",
+        )
 
     def test_stream_text_delta_trims_suffix_prefix_overlap_without_dropping_new_text(self) -> None:
         delta, merged = _MODULE.stream_text_delta("rustup", "up toolchain support")

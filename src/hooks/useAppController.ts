@@ -5,6 +5,8 @@ import { listen } from "@tauri-apps/api/event";
 import { makeFridayAssistantMessage, normalizeFridayMessage, normalizeFridayMessages, toFridayChatMessages } from "../lib/friday-chat";
 import { TauriChatTransport } from "../lib/tauri-chat-transport";
 import type {
+  AppUpdateInfo,
+  AppUpdateInstallResult,
   AppSettings,
   AppSettingsInput,
   BackendStatus,
@@ -304,6 +306,13 @@ export function useAppController() {
   const [knowledgeEnabled, setKnowledgeEnabled] = useState(false);
   const [thinkingEnabled, setThinkingEnabled] = useState(false);
   const [generationStatus, setGenerationStatus] = useState<string | null>(null);
+  const [availableAppUpdate, setAvailableAppUpdate] =
+    useState<AppUpdateInfo | null>(null);
+  const [installedAppUpdateVersion, setInstalledAppUpdateVersion] = useState<
+    string | null
+  >(null);
+  const [appUpdateError, setAppUpdateError] = useState<string | null>(null);
+  const [isInstallingAppUpdate, setIsInstallingAppUpdate] = useState(false);
 
   const activeSessionRef = useRef<Session | null>(null);
   const activeRequestSessionIdRef = useRef<string | null>(null);
@@ -570,6 +579,66 @@ export function useAppController() {
     return (await warmBackendIfNeeded(status)) ?? status;
   };
 
+  const checkForAppUpdate = async () => {
+    try {
+      const update =
+        (await invoke<AppUpdateInfo | null>("check_for_app_update")) ?? null;
+      setAvailableAppUpdate(update);
+      setAppUpdateError(null);
+      return update;
+    } catch (error) {
+      const message = toErrorMessage(error);
+      if (message === "Auto-update signing key is not configured.") {
+        setAvailableAppUpdate(null);
+        setAppUpdateError(null);
+        return null;
+      }
+      console.warn("check_for_app_update failed:", error);
+      setAvailableAppUpdate(null);
+      setAppUpdateError(message);
+      return null;
+    }
+  };
+
+  const installAppUpdate = async () => {
+    if (isInstallingAppUpdate) {
+      return;
+    }
+
+    setIsInstallingAppUpdate(true);
+    setAppUpdateError(null);
+    try {
+      const result = await invoke<AppUpdateInstallResult>("install_app_update");
+      if (result.installed) {
+        setInstalledAppUpdateVersion(result.version);
+        setAvailableAppUpdate(null);
+      }
+      return result;
+    } catch (error) {
+      const message = toErrorMessage(error);
+      setAppUpdateError(message);
+      throw error;
+    } finally {
+      setIsInstallingAppUpdate(false);
+    }
+  };
+
+  const restartApp = async () => {
+    await invoke("restart_app");
+  };
+
+  const dismissAppUpdate = () => {
+    setAvailableAppUpdate(null);
+  };
+
+  const clearAppUpdateError = () => {
+    setAppUpdateError(null);
+  };
+
+  const clearInstalledAppUpdateVersion = () => {
+    setInstalledAppUpdateVersion(null);
+  };
+
   const bootstrap = async () => {
     setIsBootstrapping(true);
     setBootstrapError(null);
@@ -609,6 +678,10 @@ export function useAppController() {
           knowledgeResult.reason,
         );
       }
+
+      // Keep startup resilient offline: update check runs in the background and
+      // must not delay chat readiness.
+      void checkForAppUpdate();
 
       void warmBackendIfNeeded(payload.backendStatus);
       if (
@@ -1120,6 +1193,10 @@ export function useAppController() {
     knowledgeEnabled,
     thinkingEnabled,
     generationStatus,
+    availableAppUpdate,
+    installedAppUpdateVersion,
+    appUpdateError,
+    isInstallingAppUpdate,
     nativeToolSupportAvailable: backendStatus?.supports_native_tools ?? false,
     webSearchToggleAvailable,
     knowledgeToggleAvailable,
@@ -1131,5 +1208,10 @@ export function useAppController() {
     ingestKnowledgeFile,
     ingestKnowledgeUrl,
     deleteKnowledgeSource,
+    installAppUpdate,
+    restartApp,
+    dismissAppUpdate,
+    clearAppUpdateError,
+    clearInstalledAppUpdateVersion,
   };
 }

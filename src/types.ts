@@ -160,6 +160,19 @@ export interface BootstrapPayload {
   knowledgeStatus: KnowledgeStatus;
 }
 
+export interface AppUpdateInfo {
+  version: string;
+  currentVersion: string;
+  notes?: string | null;
+  publishedAt?: string | null;
+}
+
+export interface AppUpdateInstallResult {
+  installed: boolean;
+  version: string;
+  restartRequired: boolean;
+}
+
 export interface SessionSelectionResult {
   session: Session;
   messages: Message[];

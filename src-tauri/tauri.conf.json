@@ -40,5 +40,14 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "active": true,
+      "endpoints": [
+        "https://github.com/skundu42/friday/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDYyNzQxOUEyNUM2MkUyMkIKUldRcjRtSmNvaGwwWXZZSXVwcUw4NVRjREIwaGhLRm04ZkV1Ujk0RWpqV25PR3lGNVRJcFdNMHoK"
+    }
   }
 }

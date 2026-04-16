@@ -865,5 +865,4 @@ mod tests {
         assert!(path.starts_with(std::env::temp_dir()));
         assert!(path_text.contains("friday-python-worker-%p.profraw"));
     }
-
 }

@@ -724,8 +724,8 @@ export default function SetupWizard({
 
   return (
     <div className="setup-shell">
-      <div className="setup-panel">
-        <div className="setup-rail surface-card">
+      <div className="setup-panel surface-card">
+        <div className="setup-rail">
           <div className="setup-rail__brand">
             <AppLogo size={54} />
             <div>
@@ -761,7 +761,7 @@ export default function SetupWizard({
           <Text className="setup-rail__footer">Friday v0.1.0</Text>
         </div>
 
-        <div className="setup-stage surface-card">{renderStep()}</div>
+        <div className="setup-stage">{renderStep()}</div>
       </div>
     </div>
   );

@@ -2,6 +2,7 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useAppController } from "./useAppController";
 import type {
+  AppUpdateInfo,
   AppSettings,
   AppSettingsInput,
   BackendStatus,
@@ -104,6 +105,7 @@ describe("useAppController", () => {
   let sessionMessages: Record<string, Message[]>;
   let bootstrapSettings: AppSettings;
   let sessions: Session[];
+  let availableAppUpdate: AppUpdateInfo | null;
 
   beforeEach(() => {
     listeners.clear();
@@ -116,6 +118,7 @@ describe("useAppController", () => {
       "session-b": [],
     };
     bootstrapSettings = makeSettings();
+    availableAppUpdate = null;
 
     invokeMock.mockImplementation(
       (command: string, args?: { sessionId?: string; input?: AppSettingsInput }) => {
@@ -212,6 +215,8 @@ describe("useAppController", () => {
               },
             };
             return Promise.resolve(bootstrapSettings);
+          case "check_for_app_update":
+            return Promise.resolve(availableAppUpdate);
           default:
             return Promise.resolve(undefined);
         }
@@ -260,6 +265,22 @@ describe("useAppController", () => {
       model_used: "gemma-4-e2b-it",
       session_id: "session-a",
     });
+  });
+
+  it("checks for stable app updates during bootstrap", async () => {
+    availableAppUpdate = {
+      version: "0.2.0",
+      currentVersion: "0.1.0",
+      notes: "Stable improvements",
+      publishedAt: "2026-04-16T10:00:00Z",
+    };
+
+    const { result } = renderHook(() => useAppController());
+    await waitForBootstrap(result);
+
+    await waitFor(() =>
+      expect(result.current.availableAppUpdate?.version).toBe("0.2.0"),
+    );
   });
 
   it("refreshes the persisted session transcript after a streamed turn completes", async () => {

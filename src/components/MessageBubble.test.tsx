@@ -70,6 +70,24 @@ describe("MessageBubble", () => {
     );
   });
 
+  it("repairs spaced markdown link URLs so labels render as links", () => {
+    render(
+      <MessageBubble
+        message={{
+          id: "m-link-spaced-url",
+          role: "assistant",
+          content:
+            "[The Rust Programming Language Book](https://doc. rust-lang. org/book/)",
+        }}
+      />,
+    );
+
+    const link = screen.getByRole("link", {
+      name: "The Rust Programming Language Book",
+    });
+    expect(link.getAttribute("href")).toBe("https://doc.rust-lang.org/book/");
+  });
+
   it("does not use window.open when system browser command fails", async () => {
     const openSpy = vi.spyOn(window, "open").mockImplementation(() => null);
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
@@ -148,37 +166,38 @@ print("Hello, world!")
     expect(screen.getByRole("columnheader", { name: "Example" })).not.toBeNull();
   });
 
-  it("repairs jammed multi-part assistant replies into readable markdown", () => {
+  it("does not rewrite jammed prose into synthetic bullet lists", () => {
+    const content =
+      "I can help you with a variety of tasks including:Answering questions on a wide range of topicsProviding summaries and explanationsGenerating drafts and codeHelping plan and organize informationHow can I help right now?";
     const normalized = normalizeAssistantMarkdownForDisplay(
-      "I can help you with a variety of tasks including:Answering questions on a wide range of topicsProviding summaries and explanationsGenerating drafts and codeHelping plan and organize informationHow can I help right now?",
+      content,
     );
 
-    expect(normalized).toContain("including:\n\n- Answering");
-    expect(normalized).toContain("\n- Providing summaries and explanations");
-    expect(normalized).toContain("\n- Generating drafts and code");
-    expect(normalized).toContain("\n- Helping plan and organize information");
-    expect(normalized).toContain("\n\nHow can I help right now?");
+    expect(normalized).toBe(content);
+    expect(normalized).not.toContain("\n- ");
   });
 
-  it("repairs jammed technical step lists into separate bullets", () => {
+  it("does not rewrite jammed technical prose into synthetic bullets", () => {
+    const content =
+      "The main steps are:Define the recurrence relationCompute the base casesDerive the closed formHow do we verify it?";
     const normalized = normalizeAssistantMarkdownForDisplay(
-      "The main steps are:Define the recurrence relationCompute the base casesDerive the closed formHow do we verify it?",
+      content,
     );
 
-    expect(normalized).toContain("The main steps are:\n\n- Define the recurrence relation");
-    expect(normalized).toContain("\n- Compute the base cases");
-    expect(normalized).toContain("\n- Derive the closed form");
-    expect(normalized).toContain("\n\nHow do we verify it?");
+    expect(normalized).toBe(content);
+    expect(normalized).not.toContain("\n- ");
   });
 
-  it("repairs malformed inline fenced code blocks before rendering", () => {
+  it("repairs malformed inline fenced code blocks by closing at line end", () => {
     const content =
       'Here are few Python code examples demonstrating different concepts:\n\n###1. Basic "Hello World and VariablesThis is the simplest program to get started```python A greetingprint(", world!") Defining printing variablesname =Fridayage30My name {} I am years old.")2 List Manipulation shows how create list add items loop through';
 
     const normalized = normalizeAssistantMarkdownForDisplay(content);
 
     expect(normalized).toContain("```python\nA greetingprint(");
-    expect(normalized).toContain('\n```\n\n2 List Manipulation shows how create list add items loop through');
+    expect(normalized).toContain(
+      'My name {} I am years old.")2 List Manipulation shows how create list add items loop through\n```',
+    );
   });
 
   it("does not split valid fenced code blocks that already use multiline markdown fences", () => {
@@ -279,15 +298,22 @@ print("Hello, world!")
     expect(screen.queryByText(/\$\$\\det\\begin\{pmatrix\}/)).toBeNull();
   });
 
-  it("repairs collapsed text-part boundaries in persisted assistant prose", () => {
+  it("leaves collapsed legacy prose boundaries unchanged", () => {
     const normalized = normalizeAssistantMarkdownForDisplay(
       "Here is a short story for you:\n\nThe old lighthouse keeper, Silas lived life measured by the rhythm of tides. His world was granite tower endless sea and steady sweepOne evening storm rolled in beast wind spray The flickered then sputtered threatening go dark worked tirelessly his hands rough from years rope iron coax lamp backAs raged outside small wooden boat drifted near base A single glowing lantern hung its mast peered through rain-streaked glass He saw not ship but solitary figure clinging waving bright cloth realized that wasn't just ships; beacon hope too polished lens one last time ensuring beam cut darkness promise against next morning calm gone smooth iridescent shell lay rocks below smiled rare quiet thing returned watch",
     );
 
-    expect(normalized).toContain("steady sweep One evening");
-    expect(normalized).not.toContain("steady sweepOne evening");
-    expect(normalized).toContain("lamp back As raged outside");
-    expect(normalized).not.toContain("lamp backAs raged outside");
+    expect(normalized).toContain("steady sweepOne evening");
+    expect(normalized).toContain("lamp backAs raged outside");
+  });
+
+  it("does not apply English-centric rewrites to Bengali prose", () => {
+    const content =
+      "আমি সাহায্য করতে পারি:প্রশ্নের উত্তর, সারাংশ এবং ব্যাখ্যা দিতে।আপনি কী জানতে চান?";
+    const normalized = normalizeAssistantMarkdownForDisplay(content);
+
+    expect(normalized).toBe(content);
+    expect(normalized).not.toContain("\n- ");
   });
 
   it("keeps compact nested lists from being normalized into loose lists", () => {

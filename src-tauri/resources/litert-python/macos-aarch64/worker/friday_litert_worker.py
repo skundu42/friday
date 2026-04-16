@@ -514,16 +514,6 @@ def chunk_to_events(
     return events
 
 
-COLLAPSED_TEXT_BOUNDARY_PATTERN = (
-    "A|An|The|This|That|These|Those|One|He|She|They|We|I|It|As|When|While|"
-    "After|Before|Then|Later|Meanwhile|Suddenly|Eventually|Soon|How|What|Why|"
-    "Where|Can|Could|Would|Should|Let me know if|If you'd like|Would you like"
-)
-COLLAPSED_TEXT_BOUNDARY_RE = re.compile(
-    rf"^(?:{COLLAPSED_TEXT_BOUNDARY_PATTERN})\b"
-)
-
-
 def should_insert_text_separator(previous_text: str, next_text: str) -> bool:
     if not previous_text or not next_text:
         return False
@@ -540,10 +530,17 @@ def should_insert_text_separator(previous_text: str, next_text: str) -> bool:
     if next_first in "#-*`~>":
         return False
 
-    if not COLLAPSED_TEXT_BOUNDARY_RE.match(next_text):
-        return False
+    # Low-risk separator insertion only for structural boundary cases.
+    if previous_last in ".!?:;" and next_first.isupper():
+        return True
 
-    return previous_last.isalnum() or previous_last in ",.;:!?)\"'’]"
+    if previous_last.islower() and next_first.isupper():
+        return True
+
+    if previous_last.isdigit() and next_first.isupper():
+        return True
+
+    return False
 
 
 def join_text_fragments(fragments: list[str]) -> str:
