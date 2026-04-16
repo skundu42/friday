@@ -134,6 +134,18 @@ export default function App() {
     void controller.createSession();
   };
 
+  const handleInstallUpdate = () => {
+    void controller.installAppUpdate().catch((error) => {
+      console.error("[App] installAppUpdate error:", error);
+    });
+  };
+
+  const handleRestartForUpdate = () => {
+    void controller.restartApp().catch((error) => {
+      console.error("[App] restartApp error:", error);
+    });
+  };
+
   useEffect(() => {
     const settings = controller.settings;
     if (
@@ -256,6 +268,63 @@ export default function App() {
               <PanelFallback label="Starting Friday..." />
             ) : (
               <>
+                {controller.availableAppUpdate ? (
+                  <div className="app-update-banner">
+                    <Alert
+                      type="info"
+                      showIcon
+                      message={`Update available: v${controller.availableAppUpdate.version}`}
+                      description={
+                        controller.availableAppUpdate.notes ??
+                        "A new stable Friday release is ready to install."
+                      }
+                      action={
+                        <Button
+                          type="primary"
+                          size="small"
+                          loading={controller.isInstallingAppUpdate}
+                          onClick={handleInstallUpdate}
+                        >
+                          Download & install
+                        </Button>
+                      }
+                      closable
+                      onClose={controller.dismissAppUpdate}
+                    />
+                  </div>
+                ) : null}
+
+                {controller.installedAppUpdateVersion ? (
+                  <div className="app-update-banner">
+                    <Alert
+                      type="success"
+                      showIcon
+                      message={`Update installed: v${controller.installedAppUpdateVersion}`}
+                      description="Restart Friday to finish applying the update."
+                      action={
+                        <Button type="primary" size="small" onClick={handleRestartForUpdate}>
+                          Restart now
+                        </Button>
+                      }
+                      closable
+                      onClose={controller.clearInstalledAppUpdateVersion}
+                    />
+                  </div>
+                ) : null}
+
+                {controller.appUpdateError ? (
+                  <div className="app-update-banner">
+                    <Alert
+                      type="warning"
+                      showIcon
+                      message="Auto-update failed"
+                      description={controller.appUpdateError}
+                      closable
+                      onClose={controller.clearAppUpdateError}
+                    />
+                  </div>
+                ) : null}
+
                 <div
                   className={`app-view${activeView === "chat" ? " is-active" : " is-hidden"}`}
                 >

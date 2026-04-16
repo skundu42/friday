@@ -41,17 +41,6 @@ const WINDOWS_ABSOLUTE_PATH_RE = /^[A-Za-z]:[\\/]/;
 const FENCED_CODE_BLOCK_RE = /((?:```|~~~)[\s\S]*?(?:```|~~~))/g;
 const MALFORMED_INLINE_CODE_FENCE_RE =
   /(^|\n|[^\n`~])(```|~~~)([A-Za-z0-9_-]+)[ \t]+([^\n]+)/g;
-const CODE_FENCE_TRAILING_SECTION_RE =
-  /(?=\b(?:[2-9]\.?\s+[A-Z][A-Za-z]|\bThen\b|\bNext\b|\bAfter\b|\bFinally\b|\bHow\b|\bWhat\b|\bWhy\b|\bWhen\b|\bWhere\b|\bCan\b|\bCould\b|\bWould\b|\bShould\b|\bLet me know if\b|\bIf you'd like\b|\bWould you like\b))/;
-const LIST_ITEM_VERB_PATTERN =
-  "Answering|Providing|Generating|Helping|Explaining|Summarizing|Planning|Organizing|Writing|Creating|Debugging|Reviewing|Analyzing|Researching|Translating|Drafting|Brainstorming|Comparing|Solving|Building|Refactoring|Teaching|Implementing|Testing|Defining|Computing|Deriving|Define|Compute|Derive|Implement|Test|Validate|Check|Validating|Checking";
-const LIST_ITEM_VERB_RE = new RegExp(`\\b(${LIST_ITEM_VERB_PATTERN})\\b`, "g");
-const COLLAPSED_TEXT_BOUNDARY_PATTERN =
-  "A|An|The|This|That|These|Those|One|He|She|They|We|I|It|As|When|While|After|Before|Then|Later|Meanwhile|Suddenly|Eventually|Soon";
-const COLLAPSED_TEXT_BOUNDARY_RE = new RegExp(
-  `([a-z0-9,;:)"'’\\]])(?=(?:${COLLAPSED_TEXT_BOUNDARY_PATTERN})\\b)`,
-  "g",
-);
 
 interface Props {
   message: FridayRenderableMessage;
@@ -101,27 +90,19 @@ export function summarizeUserMessageForDisplay(content: string): string {
 function repairMalformedInlineCodeFences(content: string): string {
   return content.replace(
     MALFORMED_INLINE_CODE_FENCE_RE,
-    (_match, prefix: string, fence: string, language: string, inlineBody: string) => {
+    (match, prefix: string, fence: string, language: string, inlineBody: string) => {
       const closingFenceIndex = inlineBody.indexOf(fence);
-      const trailingSectionIndex =
-        closingFenceIndex >= 0
-          ? -1
-          : inlineBody.search(CODE_FENCE_TRAILING_SECTION_RE);
       const codeBody =
         closingFenceIndex >= 0
           ? inlineBody.slice(0, closingFenceIndex).trim()
-          : trailingSectionIndex >= 0
-            ? inlineBody.slice(0, trailingSectionIndex).trim()
-            : inlineBody.trim();
+          : inlineBody.trim();
       const trailingBody =
         closingFenceIndex >= 0
           ? inlineBody.slice(closingFenceIndex + fence.length).trim()
-          : trailingSectionIndex >= 0
-            ? inlineBody.slice(trailingSectionIndex).trim()
-            : "";
+          : "";
 
       if (!codeBody) {
-        return `${prefix}${fence}${language}`;
+        return match;
       }
 
       return trailingBody
@@ -154,6 +135,29 @@ function normalizeDisplayMathBlocks(content: string): string {
   );
 }
 
+function normalizeSpacedHttpUrlsInParentheses(content: string): string {
+  return content.replace(/\((https?:\/\/[^)\n]+)\)/g, (match, rawUrl: string) => {
+    const candidate = rawUrl.trim();
+    if (!candidate.includes(" ")) {
+      return match;
+    }
+    if (candidate.includes('"') || candidate.includes("'")) {
+      return match;
+    }
+
+    const compact = candidate.replace(/\s+/g, "");
+    try {
+      const parsed = new URL(compact);
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+        return match;
+      }
+      return `(${parsed.toString()})`;
+    } catch {
+      return match;
+    }
+  });
+}
+
 function normalizeMarkdownTextSegment(content: string): string {
   let normalized = content.replace(/\r\n?/g, "\n");
 
@@ -181,10 +185,6 @@ function normalizeMarkdownTextSegment(content: string): string {
     /(#{1,6}\s+[^\n#]*?[a-z0-9\)])(?=[A-Z][a-z])/g,
     "$1\n",
   );
-  normalized = normalized.replace(
-    /([.?!])([A-Z])/g,
-    "$1 $2",
-  );
   normalized = normalized
     .split("\n")
     .flatMap((line) => {
@@ -203,27 +203,6 @@ function normalizeMarkdownTextSegment(content: string): string {
     })
     .join("\n");
 
-  LIST_ITEM_VERB_RE.lastIndex = 0;
-  if (normalized.includes(":") && LIST_ITEM_VERB_RE.test(normalized)) {
-    normalized = normalized.replace(
-      new RegExp(`:\\s*(?=(?:${LIST_ITEM_VERB_PATTERN})\\b)`, "g"),
-      ":\n\n- ",
-    );
-    normalized = normalized.replace(
-      new RegExp(`([a-z0-9)])(?=(?:${LIST_ITEM_VERB_PATTERN})\\b)`, "g"),
-      "$1\n- ",
-    );
-    normalized = normalized.replace(
-      /([a-z0-9)])(?=(?:How|What|Why|When|Where|Can|Could|Would|Should|Do|Does|Did|Is|Are)\b)/g,
-      "$1\n\n",
-    );
-  }
-
-  // Compatibility repair for persisted messages created before text-part
-  // boundaries were preserved during streaming. Keep this narrow: only restore
-  // missing spaces on likely sentence-starter joins such as "sweepOne".
-  normalized = normalized.replace(COLLAPSED_TEXT_BOUNDARY_RE, "$1 ");
-
   return normalized.replace(/\n{3,}/g, "\n\n");
 }
 
@@ -234,7 +213,9 @@ export function normalizeAssistantMarkdownForDisplay(content: string): string {
     .map((segment) =>
       segment.startsWith("```") || segment.startsWith("~~~")
         ? segment
-        : normalizeMarkdownTextSegment(normalizeDisplayMathBlocks(segment)),
+        : normalizeMarkdownTextSegment(
+            normalizeSpacedHttpUrlsInParentheses(normalizeDisplayMathBlocks(segment)),
+          ),
     )
     .join("")
     .trim();

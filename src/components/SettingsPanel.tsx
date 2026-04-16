@@ -43,12 +43,6 @@ const REPLY_LANGUAGE_OPTIONS: { label: string; value: ReplyLanguage }[] = [
   { label: "Tamil", value: "tamil" },
   { label: "Punjabi", value: "punjabi" },
 ];
-type SettingsOverviewItem = {
-  label: string;
-  value: string;
-  meta?: string;
-};
-
 function coerceMaxTokens(value: unknown) {
   if (typeof value !== "number" || !Number.isFinite(value)) {
     return 16384;
@@ -82,21 +76,6 @@ function formatCompactTokenCount(value: number) {
     return `${Number.isInteger(compact) ? compact : compact.toFixed(1)}K`;
   }
   return value.toString();
-}
-
-function displayNameForModelId(modelId: string) {
-  switch (modelId) {
-    case "gemma-4-e2b-it":
-      return "Gemma 4 E2B";
-    case "gemma-4-e4b-it":
-      return "Gemma 4 E4B";
-    default:
-      return modelId || "Not selected";
-  }
-}
-
-function labelForReplyLanguage(value: ReplyLanguage) {
-  return REPLY_LANGUAGE_OPTIONS.find((option) => option.value === value)?.label ?? value;
 }
 
 interface SettingsPanelProps {
@@ -345,20 +324,6 @@ export default function SettingsPanel({
   const isCustomTokenValue = !TOKEN_PRESETS.includes(
     maxTokens as (typeof TOKEN_PRESETS)[number],
   );
-  const settingsOverview: SettingsOverviewItem[] = [
-    {
-      label: "Active model",
-      value: displayNameForModelId(activeModelId),
-    },
-    {
-      label: "Reply defaults",
-      value: labelForReplyLanguage(replyLanguage),
-    },
-    {
-      label: "Privacy",
-      value: "Local and Private",
-    },
-  ];
 
   useEffect(() => {
     setThemeMode(settings.theme_mode);
@@ -472,18 +437,6 @@ export default function SettingsPanel({
             Friday looks.
           </Paragraph>
         </div>
-
-        <div className="settings-overview-grid">
-          {settingsOverview.map((item) => (
-            <div key={item.label} className="settings-overview-card">
-              <Text className="settings-overview-card__label">{item.label}</Text>
-              <Text className="settings-overview-card__value">{item.value}</Text>
-              {item.meta ? (
-                <Text className="settings-overview-card__meta">{item.meta}</Text>
-              ) : null}
-            </div>
-          ))}
-        </div>
       </section>
 
       {error ? (
@@ -495,140 +448,141 @@ export default function SettingsPanel({
         />
       ) : null}
 
-      <div className="settings-layout">
-        <div className="settings-stack settings-stack--main">
-          <section className="settings-section surface-card">
-            <div className="section-heading">
-              <div>
-                <h3 className="section-heading__title">Conversation</h3>
+      <div className="settings-workbench surface-card">
+        <div className="settings-layout">
+          <div className="settings-stack settings-stack--main">
+            <section className="settings-section">
+              <div className="section-heading">
+                <div>
+                  <h3 className="section-heading__title">Conversation</h3>
+                </div>
               </div>
-            </div>
 
-            <div className="settings-field">
-              <Text className="settings-field__label">Reply language</Text>
-              <Text className="settings-field__body">
-                Friday defaults to this language unless a prompt explicitly asks
-                for translation or quoted text in another one.
-              </Text>
-              <Select
-                value={replyLanguage}
-                onChange={(value) => void persistReplyLanguage(value)}
-                className="friday-compact-select"
-                style={{ width: 220, maxWidth: "100%" }}
-                options={REPLY_LANGUAGE_OPTIONS}
-                loading={isSaving}
-              />
-            </div>
-
-            <div className="settings-field">
-              <Text className="settings-field__label">Response budget</Text>
-              <Text className="settings-field__body">
-                Higher budgets allow longer answers, but they can increase latency
-                and memory use.
-              </Text>
-              <div className="settings-slider-shell">
-                <Slider
-                  min={0}
-                  max={TOKEN_PRESETS.length - 1}
-                  step={null}
-                  marks={Object.fromEntries(
-                    TOKEN_PRESET_LABELS.map((label, index) => [index, label]),
-                  )}
-                  value={maxTokenSliderIndex}
-                  onChange={(value) => {
-                    const nextIndex = Array.isArray(value) ? value[0] : value;
-                    const nextValue = TOKEN_PRESETS[nextIndex] ?? TOKEN_PRESETS[0];
-                    setMaxTokenSliderIndex(nextIndex);
-                    setMaxTokens(nextValue);
-                  }}
-                  onChangeComplete={(value) => {
-                    const nextIndex = Array.isArray(value) ? value[0] : value;
-                    void persistMaxTokens(
-                      TOKEN_PRESETS[nextIndex] ?? TOKEN_PRESETS[0],
-                    );
-                  }}
-                  tooltip={{ open: false }}
+              <div className="settings-field">
+                <Text className="settings-field__label">Reply language</Text>
+                <Text className="settings-field__body">
+                  Friday defaults to this language unless a prompt explicitly asks
+                  for translation or quoted text in another one.
+                </Text>
+                <Select
+                  value={replyLanguage}
+                  onChange={(value) => void persistReplyLanguage(value)}
+                  className="friday-compact-select"
+                  style={{ width: 220, maxWidth: "100%" }}
+                  options={REPLY_LANGUAGE_OPTIONS}
+                  loading={isSaving}
                 />
-                <div className="settings-token-summary">
-                  Current budget: {formatTokenCount(maxTokens)}
-                  {isCustomTokenValue ? " (custom saved value)" : ""}
-                  {isSaving || isSavingMaxTokens ? " · Applying..." : ""}
+              </div>
+
+              <div className="settings-field">
+                <Text className="settings-field__label">Response budget</Text>
+                <Text className="settings-field__body">
+                  Higher budgets allow longer answers, but they can increase latency
+                  and memory use.
+                </Text>
+                <div className="settings-slider-shell">
+                  <Slider
+                    min={0}
+                    max={TOKEN_PRESETS.length - 1}
+                    step={null}
+                    marks={Object.fromEntries(
+                      TOKEN_PRESET_LABELS.map((label, index) => [index, label]),
+                    )}
+                    value={maxTokenSliderIndex}
+                    onChange={(value) => {
+                      const nextIndex = Array.isArray(value) ? value[0] : value;
+                      const nextValue = TOKEN_PRESETS[nextIndex] ?? TOKEN_PRESETS[0];
+                      setMaxTokenSliderIndex(nextIndex);
+                      setMaxTokens(nextValue);
+                    }}
+                    onChangeComplete={(value) => {
+                      const nextIndex = Array.isArray(value) ? value[0] : value;
+                      void persistMaxTokens(
+                        TOKEN_PRESETS[nextIndex] ?? TOKEN_PRESETS[0],
+                      );
+                    }}
+                    tooltip={{ open: false }}
+                  />
+                  <div className="settings-token-summary">
+                    Current budget: {formatTokenCount(maxTokens)}
+                    {isCustomTokenValue ? " (custom saved value)" : ""}
+                    {isSaving || isSavingMaxTokens ? " · Applying..." : ""}
+                  </div>
                 </div>
               </div>
-            </div>
-          </section>
+            </section>
 
-          <section className="settings-section surface-card">
-            <div className="section-heading">
-              <div>
-                <h3 className="section-heading__title">App</h3>
-              </div>
-            </div>
-
-            <div className="settings-field">
-              <Text className="settings-field__label">Appearance</Text>
-              <Radio.Group
-                optionType="button"
-                buttonStyle="solid"
-                value={themeMode}
-                className="settings-theme-toggle"
-                onChange={(event) =>
-                  void persistThemeMode(event.target.value as ThemeMode)
-                }
-              >
-                <Radio.Button value="light">Light</Radio.Button>
-                <Radio.Button value="dark">Dark</Radio.Button>
-              </Radio.Group>
-            </div>
-          </section>
-        </div>
-
-        <div className="settings-stack settings-stack--side">
-          <section className="settings-section surface-card">
-            <div className="section-heading">
-              <div>
-                <h3 className="section-heading__title">Model</h3>
-                <p className="section-heading__body">
-                  Keep only the models you need. Switching models may restart the
-                  local runtime before the next reply.
-                </p>
-              </div>
-            </div>
-
-            <ModelCard
-              totalRamGb={backendStatus.total_ram_gb}
-              activeModelId={activeModelId}
-              isSwitchingModel={isSwitchingModel}
-              onModelChange={onModelChange}
-            />
-          </section>
-
-          <section className="settings-section surface-card">
-            <div className="section-heading">
-              <div>
-                <h3 className="section-heading__title">System</h3>
-              </div>
-            </div>
-
-            <div className="settings-meta-grid">
-              {[
-                {
-                  label: "App",
-                  value: "Friday v0.1.0",
-                },
-                {
-                  label: "System RAM",
-                  value: `${backendStatus.total_ram_gb.toFixed(1)} GB`,
-                },
-
-              ].map((item) => (
-                <div key={item.label} className="settings-meta-card">
-                  <Text className="settings-meta-card__label">{item.label}</Text>
-                  <Text className="settings-meta-card__value">{item.value}</Text>
+            <section className="settings-section">
+              <div className="section-heading">
+                <div>
+                  <h3 className="section-heading__title">Appearance</h3>
                 </div>
-              ))}
-            </div>
-          </section>
+              </div>
+
+              <div className="settings-appearance-control">
+                <Radio.Group
+                  optionType="button"
+                  buttonStyle="solid"
+                  value={themeMode}
+                  className="settings-theme-toggle"
+                  onChange={(event) =>
+                    void persistThemeMode(event.target.value as ThemeMode)
+                  }
+                >
+                  <Radio.Button value="light">Light</Radio.Button>
+                  <Radio.Button value="dark">Dark</Radio.Button>
+                </Radio.Group>
+              </div>
+            </section>
+          </div>
+
+          <div className="settings-stack settings-stack--side">
+            <section className="settings-section">
+              <div className="section-heading">
+                <div>
+                  <h3 className="section-heading__title">Model</h3>
+                  <p className="section-heading__body">
+                    Keep only the models you need. Switching models may restart the
+                    local runtime before the next reply.
+                  </p>
+                </div>
+              </div>
+
+              <ModelCard
+                totalRamGb={backendStatus.total_ram_gb}
+                activeModelId={activeModelId}
+                isSwitchingModel={isSwitchingModel}
+                onModelChange={onModelChange}
+              />
+            </section>
+
+            <section className="settings-section">
+              <div className="section-heading">
+                <div>
+                  <h3 className="section-heading__title">System</h3>
+                </div>
+              </div>
+
+              <div className="settings-meta-grid">
+                {[
+                  {
+                    label: "App",
+                    value: "Friday v0.1.0",
+                  },
+                  {
+                    label: "System RAM",
+                    value: `${backendStatus.total_ram_gb.toFixed(1)} GB`,
+                  },
+
+                ].map((item) => (
+                  <div key={item.label} className="settings-meta-card">
+                    <Text className="settings-meta-card__label">{item.label}</Text>
+                    <Text className="settings-meta-card__value">{item.value}</Text>
+                  </div>
+                ))}
+              </div>
+            </section>
+          </div>
         </div>
       </div>
     </div>

@@ -24,6 +24,7 @@ Friday still uses the network in a few cases:
 - first-run runtime and model setup
 - explicit model downloads
 - optional web-assisted replies when the user enables the web toggle and Friday downloads the pinned local SearXNG source/dependency set on first use
+- optional app update checks against the GitHub release manifest endpoint
 
 If web assist is off, normal chatting does not require network access after setup.
 
@@ -189,7 +190,8 @@ Current release behavior:
 - frontend typecheck, tests, build, `cargo check`, `cargo test`, and `cargo clippy` run before publishing
 - GitHub release notes are generated automatically
 - prereleases can fall back to ad-hoc signing when Apple signing secrets are missing
-- stable releases require the full macOS signing and notarization secret set
+- stable releases can also fall back to ad-hoc signing when Apple signing secrets are missing
+- updater-enabled stable releases also require `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
 - Apple Silicon is the supported packaging target today because `src-tauri/build.rs` only vendors the managed runtime for `macos/aarch64`
 
 Accepted tag formats:

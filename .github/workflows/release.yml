@@ -160,31 +160,8 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Require signing secrets for production releases
-        if: needs.verify-tag.outputs.prerelease == 'false'
-        shell: bash
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: |
-          missing=0
-          for secret_name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD KEYCHAIN_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
-            if [ -z "${!secret_name}" ]; then
-              echo "Missing required production signing secret: $secret_name" >&2
-              missing=1
-            fi
-          done
-
-          if [ "$missing" -ne 0 ]; then
-            echo "Stable release tags require full signing and notarization secrets." >&2
-            exit 1
-          fi
-
       - name: Configure macOS signing
+        id: configure_signing
         shell: bash
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -219,10 +196,12 @@ jobs:
             fi
 
             echo "APPLE_SIGNING_IDENTITY=$CERT_ID" >> "$GITHUB_ENV"
+            echo "notarization_enabled=true" >> "$GITHUB_OUTPUT"
             rm -f certificate.p12
           else
             echo "APPLE_SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
-            echo "Apple signing secrets are not configured. Falling back to ad-hoc signing for a prerelease build."
+            echo "notarization_enabled=false" >> "$GITHUB_OUTPUT"
+            echo "Apple signing secrets are not configured. Falling back to ad-hoc signing."
           fi
 
       - name: Build and upload release assets
@@ -233,6 +212,8 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ needs.verify-tag.outputs.tag_name }}
           releaseDraft: false
@@ -282,7 +263,7 @@ jobs:
             --python-wheel "$PYTHON_WHEEL_PATH"
 
       - name: Validate notarization staples
-        if: needs.verify-tag.outputs.prerelease == 'false'
+        if: needs.verify-tag.outputs.prerelease == 'false' && steps.configure_signing.outputs.notarization_enabled == 'true'
         shell: bash
         run: |
           BUNDLE_DIR="src-tauri/target/${{ matrix.target }}/release/bundle"

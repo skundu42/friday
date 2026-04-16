@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
-import type { BackendStatus } from "./types";
+import type { AppUpdateInfo, BackendStatus } from "./types";
 
 const invokeMock = vi.fn();
 const listenMock = vi.fn();
@@ -110,6 +110,10 @@ function makeController() {
       storageDir: "/Users/sk/Library/Application Support/com.friday.app/rag",
     },
     thinkingEnabled: true,
+    availableAppUpdate: null as AppUpdateInfo | null,
+    installedAppUpdateVersion: null,
+    appUpdateError: null,
+    isInstallingAppUpdate: false,
     nativeToolSupportAvailable: true,
     webSearchToggleAvailable: true,
     knowledgeToggleAvailable: true,
@@ -144,6 +148,15 @@ function makeController() {
     ingestKnowledgeFile: vi.fn(async () => undefined),
     ingestKnowledgeUrl: vi.fn(async () => undefined),
     deleteKnowledgeSource: vi.fn(async () => undefined),
+    installAppUpdate: vi.fn(async () => ({
+      installed: true,
+      version: "0.2.0",
+      restartRequired: true,
+    })),
+    restartApp: vi.fn(async () => undefined),
+    dismissAppUpdate: vi.fn(),
+    clearAppUpdateError: vi.fn(),
+    clearInstalledAppUpdateVersion: vi.fn(),
   };
 }
 
@@ -237,6 +250,25 @@ describe("App", () => {
       expect(getChatView()?.classList.contains("is-hidden")).toBe(false),
     );
     expect(controller.refreshBackendStatus).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows update banner and triggers install action", async () => {
+    const controller = makeController();
+    controller.availableAppUpdate = {
+      version: "0.2.0",
+      currentVersion: "0.1.0",
+      notes: "Stable improvements",
+    };
+    controllerState.mockReturnValue(controller);
+
+    render(<App />);
+
+    await waitFor(() =>
+      expect(screen.getByText("Update available: v0.2.0")).not.toBeNull(),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /download & install/i }));
+    expect(controller.installAppUpdate).toHaveBeenCalledTimes(1);
   });
 
   it("shows setup wizard when setup status load fails", async () => {

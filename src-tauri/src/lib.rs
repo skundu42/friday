@@ -24,6 +24,8 @@ use std::time::Duration;
 use tauri::Emitter;
 use tauri::Manager;
 use tauri::State;
+use tauri_plugin_updater::Error as UpdaterError;
+use tauri_plugin_updater::UpdaterExt;
 
 const CURRENT_SESSION_KEY: &str = "current_session";
 pub(crate) const ACTIVE_MODEL_KEY: &str = "active_model_id";
@@ -37,6 +39,8 @@ const KNOWLEDGE_SEARCH_TIMEOUT: Duration = Duration::from_secs(8);
 const DEFAULT_SESSION_TITLE: &str = "New chat";
 const SESSION_TITLE_PREVIEW_CHARS: usize = 48;
 const MAIN_WINDOW_LABEL: &str = "main";
+const UPDATER_PUBKEY_PLACEHOLDER: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDYyNzQxOUEyNUM2MkUyMkIKUldRcjRtSmNvaGwwWXZZSXVwcUw4NVRjREIwaGhLRm04ZkV1Ujk0RWpqV25PR3lGNVRJcFdNMHoK";
+const UPDATER_CHECK_TIMEOUT: Duration = Duration::from_secs(4);
 
 static OBSERVABILITY_INIT: OnceLock<Result<(), String>> = OnceLock::new();
 
@@ -88,6 +92,23 @@ struct BootstrapPayload {
     backend_status: sidecar::BackendStatus,
     web_search_status: searxng::WebSearchStatus,
     knowledge_status: knowledge::KnowledgeStatus,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppUpdateInfo {
+    version: String,
+    current_version: String,
+    notes: Option<String>,
+    published_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppUpdateInstallResult {
+    installed: bool,
+    version: String,
+    restart_required: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -540,8 +561,7 @@ fn io_error(message: impl Into<String>) -> std::io::Error {
 }
 
 fn parse_openable_external_url(raw_url: &str) -> Result<reqwest::Url, String> {
-    let parsed =
-        reqwest::Url::parse(raw_url).map_err(|error| format!("Invalid URL: {}", error))?;
+    let parsed = reqwest::Url::parse(raw_url).map_err(|error| format!("Invalid URL: {}", error))?;
 
     match parsed.scheme() {
         "http" | "https" | "mailto" => Ok(parsed),
@@ -783,6 +803,7 @@ fn ensure_session_deletable(
 pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(SidecarManager::new())
         .manage(SearXNGManager::new())
         .manage(KnowledgeManager::new())
@@ -827,6 +848,9 @@ pub fn run() {
             sidecar::warm_backend,
             searxng::get_web_search_status,
             open_external_link,
+            check_for_app_update,
+            install_app_update,
+            restart_app,
         ])
         .setup(|app| {
             let data_dir = app
@@ -916,6 +940,95 @@ pub fn run() {
         }
         _ => {}
     });
+}
+
+fn updater_pubkey_configured(app: &tauri::AppHandle) -> bool {
+    app.config()
+        .plugins
+        .0
+        .get("updater")
+        .and_then(|updater| updater.get("pubkey"))
+        .and_then(|pubkey| pubkey.as_str())
+        .map(|pubkey| {
+            let trimmed = pubkey.trim();
+            !trimmed.is_empty() && trimmed != UPDATER_PUBKEY_PLACEHOLDER
+        })
+        .unwrap_or(false)
+}
+
+fn build_stable_updater(app: &tauri::AppHandle) -> Result<tauri_plugin_updater::Updater, String> {
+    if !updater_pubkey_configured(app) {
+        return Err("Auto-update signing key is not configured.".to_string());
+    }
+
+    app.updater_builder()
+        .version_comparator(|current_version, remote_release| {
+            remote_release.version > current_version && remote_release.version.pre.is_empty()
+        })
+        .timeout(UPDATER_CHECK_TIMEOUT)
+        .build()
+        .map_err(|error| format!("Failed to initialize updater: {}", error))
+}
+
+fn is_offline_update_error(error: &UpdaterError) -> bool {
+    match error {
+        UpdaterError::Reqwest(inner) => {
+            inner.is_connect() || inner.is_timeout() || inner.is_request()
+        }
+        _ => false,
+    }
+}
+
+fn map_update_info(update: tauri_plugin_updater::Update) -> AppUpdateInfo {
+    AppUpdateInfo {
+        version: update.version,
+        current_version: update.current_version,
+        notes: update.body,
+        published_at: update.date.map(|value| value.to_string()),
+    }
+}
+
+#[tauri::command]
+async fn check_for_app_update(app: tauri::AppHandle) -> Result<Option<AppUpdateInfo>, String> {
+    let updater = build_stable_updater(&app)?;
+    match updater.check().await {
+        Ok(result) => Ok(result.map(map_update_info)),
+        Err(error) => {
+            if is_offline_update_error(&error) {
+                tracing::info!("Skipping app update check while offline: {}", error);
+                Ok(None)
+            } else {
+                Err(format!("Failed to check for updates: {}", error))
+            }
+        }
+    }
+}
+
+#[tauri::command]
+async fn install_app_update(app: tauri::AppHandle) -> Result<AppUpdateInstallResult, String> {
+    let updater = build_stable_updater(&app)?;
+    let update = updater
+        .check()
+        .await
+        .map_err(|error| format!("Failed to check for updates: {}", error))?
+        .ok_or_else(|| "No stable update is currently available.".to_string())?;
+
+    let version = update.version.clone();
+    update
+        .download_and_install(|_, _| {}, || {})
+        .await
+        .map_err(|error| format!("Failed to install update {}: {}", version, error))?;
+
+    Ok(AppUpdateInstallResult {
+        installed: true,
+        version,
+        restart_required: true,
+    })
+}
+
+#[tauri::command]
+fn restart_app(app: tauri::AppHandle) {
+    app.request_restart();
 }
 
 #[tauri::command]

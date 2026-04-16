@@ -181,6 +181,10 @@ a {
   flex-direction: column;
 }
 
+.app-update-banner {
+  padding: 14px 18px 0;
+}
+
 .app-view {
   min-height: 0;
 }
@@ -1161,7 +1165,14 @@ body[data-theme="dark"] .primary-action.ant-btn:disabled {
   line-height: 1.7;
 }
 
-.settings-overview-grid,
+.settings-overview-grid {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 14px;
+}
+
 .knowledge-stats-grid {
   position: relative;
   z-index: 1;
@@ -1170,7 +1181,14 @@ body[data-theme="dark"] .primary-action.ant-btn:disabled {
   gap: 12px;
 }
 
-.settings-overview-card,
+.settings-overview-card {
+  padding: 6px 4px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
 .knowledge-stats-card {
   padding: 16px 18px;
   border-radius: 20px;
@@ -1210,14 +1228,40 @@ body[data-theme="dark"] .primary-action.ant-btn:disabled {
   align-items: start;
 }
 
+.settings-workbench {
+  overflow: hidden;
+}
+
+.settings-panel .settings-layout {
+  gap: 0;
+  align-items: stretch;
+}
+
 .settings-stack,
 .knowledge-stack {
   display: grid;
   gap: 16px;
 }
 
+.settings-panel .settings-stack {
+  gap: 0;
+}
+
+.settings-panel .settings-stack--side {
+  border-left: 1px solid color-mix(in srgb, var(--friday-border-strong) 45%, var(--friday-border));
+}
+
 .settings-section {
   padding: 24px;
+}
+
+.settings-panel .settings-section {
+  padding: 24px 26px;
+  border-bottom: 1px solid color-mix(in srgb, var(--friday-border-strong) 45%, var(--friday-border));
+}
+
+.settings-panel .settings-stack > .settings-section:last-child {
+  border-bottom: 0;
 }
 
 .settings-field + .settings-field {
@@ -1236,6 +1280,10 @@ body[data-theme="dark"] .primary-action.ant-btn:disabled {
   margin-bottom: 12px;
   color: var(--friday-text-secondary);
   line-height: 1.68;
+}
+
+.settings-appearance-control {
+  margin-top: 12px;
 }
 
 .settings-theme-toggle.ant-radio-group {
@@ -1292,10 +1340,10 @@ body[data-theme="dark"] .settings-theme-toggle.ant-radio-group-solid .ant-radio-
 }
 
 .settings-slider-shell {
-  padding: 18px 18px 14px;
-  border-radius: 20px;
-  border: 1px solid var(--friday-border);
-  background: linear-gradient(180deg, var(--friday-surface) 0%, var(--friday-surface-muted) 100%);
+  padding: 16px 18px 14px;
+  border-radius: 14px;
+  border: 1px solid color-mix(in srgb, var(--friday-border-strong) 42%, var(--friday-border));
+  background: color-mix(in srgb, var(--friday-surface-muted) 88%, var(--friday-surface));
 }
 
 .knowledge-hero__header {
@@ -1411,26 +1459,45 @@ body[data-theme="dark"] .settings-theme-toggle.ant-radio-group-solid .ant-radio-
 }
 
 .settings-model-list {
-  display: grid;
-  gap: 12px;
+  display: block;
+  width: 100%;
 }
 
 .settings-model-option {
   display: block;
   width: 100%;
+  margin: 0 !important;
+  padding: 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--friday-border-strong) 38%, var(--friday-border));
+}
+
+.settings-model-option:last-child {
+  border-bottom: 0;
+}
+
+.settings-model-option .ant-radio {
+  display: none;
+}
+
+.settings-model-option > span:last-child {
+  width: 100%;
+  padding-inline-start: 0;
 }
 
 .settings-model-card {
-  border-radius: 20px;
-  border: 1px solid var(--friday-border);
-  background: var(--friday-surface-glass-strong);
-  padding: 18px;
-  transition: border-color 140ms ease, transform 140ms ease, background 140ms ease;
+  border-radius: 0;
+  border: 0;
+  background: transparent;
+  padding: 16px 2px;
+  transition: background 140ms ease, color 140ms ease;
 }
 
 .settings-model-card.is-active {
-  border-color: rgba(47, 143, 87, 0.22);
-  background: linear-gradient(180deg, var(--friday-green-soft) 0%, var(--friday-surface) 100%);
+  border-color: transparent;
+  background: color-mix(in srgb, var(--friday-green-soft) 62%, transparent);
+  border-radius: 12px;
+  margin-inline: -10px;
+  padding-inline: 12px;
 }
 
 .settings-model-card__header {
@@ -1509,15 +1576,25 @@ body[data-theme="dark"] .settings-theme-toggle.ant-radio-group-solid .ant-radio-
 
 .settings-meta-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
-  gap: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0;
+  margin-top: 12px;
+  border: 1px solid color-mix(in srgb, var(--friday-border-strong) 42%, var(--friday-border));
+  border-radius: 14px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--friday-surface-muted) 86%, var(--friday-surface));
 }
 
 .settings-meta-card {
   padding: 16px;
-  border-radius: 18px;
-  border: 1px solid var(--friday-border);
-  background: var(--friday-surface-glass-strong);
+  border-radius: 0;
+  border: 0;
+  border-right: 1px solid color-mix(in srgb, var(--friday-border-strong) 42%, var(--friday-border));
+  background: transparent;
+}
+
+.settings-meta-card:last-child {
+  border-right: 0;
 }
 
 .settings-meta-card__label {
@@ -1547,7 +1624,8 @@ body[data-theme="dark"] .settings-theme-toggle.ant-radio-group-solid .ant-radio-
   width: min(100%, 1080px);
   display: grid;
   grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
-  gap: 22px;
+  gap: 0;
+  overflow: hidden;
 }
 
 .setup-rail,
@@ -1621,6 +1699,7 @@ body[data-theme="dark"] .settings-theme-toggle.ant-radio-group-solid .ant-radio-
 }
 
 .setup-stage {
+  border-left: 1px solid color-mix(in srgb, var(--friday-border-strong) 45%, var(--friday-border));
   min-height: 640px;
   display: flex;
   flex-direction: column;
@@ -1927,11 +2006,19 @@ body[data-theme="dark"] .settings-theme-toggle.ant-radio-group-solid .ant-radio-
     order: -1;
   }
 
+  .settings-panel .settings-stack--side {
+    order: 0;
+    border-left: 0;
+    border-top: 1px solid color-mix(in srgb, var(--friday-border-strong) 45%, var(--friday-border));
+  }
+
   .setup-panel {
     grid-template-columns: 1fr;
   }
 
   .setup-stage {
+    border-left: 0;
+    border-top: 1px solid color-mix(in srgb, var(--friday-border-strong) 45%, var(--friday-border));
     min-height: 0;
   }
 }
@@ -1977,6 +2064,19 @@ body[data-theme="dark"] .settings-theme-toggle.ant-radio-group-solid .ant-radio-
   .settings-token-summary {
     width: 100%;
     justify-content: center;
+  }
+
+  .settings-meta-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-meta-card {
+    border-right: 0;
+    border-bottom: 1px solid color-mix(in srgb, var(--friday-border-strong) 42%, var(--friday-border));
+  }
+
+  .settings-meta-card:last-child {
+    border-bottom: 0;
   }
 
   .chat-thread {
