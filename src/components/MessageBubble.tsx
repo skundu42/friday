@@ -319,57 +319,6 @@ async function openExternalLink(href: string) {
   }
 }
 
-function normalizeExternalHref(href?: string): string | null {
-  if (!href) {
-    return null;
-  }
-
-  try {
-    const url = new URL(href);
-    if (
-      url.protocol === "http:" ||
-      url.protocol === "https:" ||
-      url.protocol === "mailto:"
-    ) {
-      return url.toString();
-    }
-  } catch {
-    return null;
-  }
-
-  return null;
-}
-
-function normalizePermittedImageSrc(src?: string): string | null {
-  if (!src) {
-    return null;
-  }
-
-  const trimmed = src.trim();
-  if (!trimmed) {
-    return null;
-  }
-
-  if (
-    trimmed.startsWith("data:") ||
-    trimmed.startsWith("blob:") ||
-    trimmed.startsWith("file:") ||
-    trimmed.startsWith("/")
-  ) {
-    return trimmed;
-  }
-
-  if (WINDOWS_ABSOLUTE_PATH_RE.test(trimmed)) {
-    return trimmed;
-  }
-
-  return null;
-}
-
-function openExternalLink(href: string) {
-  globalThis.open?.(href, "_blank", "noopener,noreferrer");
-}
-
 function CopyButton({
   text,
   label = "Copy",

@@ -8,10 +8,6 @@ use crate::runtime_manifest::{
     embedded_runtime_manifest, PlatformRuntimeSpec, RuntimeManifest, RuntimeModelSpec,
     RuntimePolicy,
 };
-use crate::runtime_manifest::{
-    embedded_runtime_manifest, PlatformRuntimeSpec, RuntimeManifest, RuntimeModelSpec,
-    RuntimePolicy,
-};
 use crate::settings::GenerationRequestConfig;
 use crate::{persist_active_model_id, AppState};
 use serde::{Deserialize, Serialize};
