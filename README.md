@@ -180,18 +180,15 @@ daksha-ai/
 
 ## Release Workflow
 
-The repo includes a PR/main CI workflow in [`.github/workflows/ci.yml`](.github/workflows/ci.yml) and a tag-driven macOS release workflow in [`.github/workflows/release.yml`](.github/workflows/release.yml).
+The repo uses a tag-driven macOS release workflow in [`.github/workflows/release.yml`](.github/workflows/release.yml).
 
 Current release behavior:
 
 - any pushed tag triggers the release workflow
-- the tag must point to a commit reachable from `main`
-- the tag must match `package.json` and `src-tauri/tauri.conf.json`, with or without a leading `v`
-- frontend typecheck, tests, build, `cargo check`, `cargo test`, and `cargo clippy` run before publishing
+- the workflow builds and uploads the macOS Apple Silicon app assets to the GitHub release for that tag
 - GitHub release notes are generated automatically
-- prereleases can fall back to ad-hoc signing when Apple signing secrets are missing
-- stable releases can also fall back to ad-hoc signing when Apple signing secrets are missing
-- updater-enabled stable releases also require `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
+- tags containing `-` are marked as prereleases (for example: `v0.1.0-rc.1`)
+- releases can fall back to ad-hoc signing when Apple signing secrets are missing
 - Apple Silicon is the supported packaging target today because `src-tauri/build.rs` only vendors the managed runtime for `macos/aarch64`
 
 Accepted tag formats:

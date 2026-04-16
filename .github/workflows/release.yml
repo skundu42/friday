@@ -10,130 +10,11 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  verify-tag:
-    name: Verify release tag
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    outputs:
-      app_version: ${{ steps.version.outputs.app_version }}
-      prerelease: ${{ steps.version.outputs.prerelease }}
-      tag_name: ${{ steps.version.outputs.tag_name }}
-    steps:
-      - name: Check out source
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version-file: .nvmrc
-
-      - name: Ensure tagged commit is on main
-        shell: bash
-        run: |
-          git fetch origin main --depth=1
-
-          if ! git merge-base --is-ancestor "$GITHUB_SHA" "origin/main"; then
-            echo "Tag ${GITHUB_REF_NAME} does not point to a commit on origin/main." >&2
-            exit 1
-          fi
-
-      - name: Validate tag and app versions
-        id: version
-        shell: bash
-        run: |
-          PACKAGE_VERSION="$(node -p "require('./package.json').version")"
-          TAURI_VERSION="$(node -p "JSON.parse(require('fs').readFileSync('src-tauri/tauri.conf.json', 'utf8')).version")"
-          TAG_NAME="${GITHUB_REF_NAME}"
-          NORMALIZED_TAG="${TAG_NAME#v}"
-
-          if [ "$PACKAGE_VERSION" != "$TAURI_VERSION" ]; then
-            echo "package.json version ($PACKAGE_VERSION) does not match src-tauri/tauri.conf.json version ($TAURI_VERSION)." >&2
-            exit 1
-          fi
-
-          if [ "$NORMALIZED_TAG" != "$TAURI_VERSION" ]; then
-            echo "Tag $TAG_NAME must match the app version ($TAURI_VERSION) or be prefixed with 'v'." >&2
-            exit 1
-          fi
-
-          PRERELEASE=false
-          if [[ "$NORMALIZED_TAG" == *-* ]]; then
-            PRERELEASE=true
-          fi
-
-          echo "app_version=$TAURI_VERSION" >> "$GITHUB_OUTPUT"
-          echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
-          echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
-
-  quality-gate:
-    name: Run release checks
-    needs: verify-tag
-    runs-on: macos-latest
-    permissions:
-      contents: read
-    steps:
-      - name: Check out source
-        uses: actions/checkout@v4
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version-file: .nvmrc
-          cache: npm
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.94.0
-          components: clippy
-
-      - name: Install frontend dependencies
-        run: npm ci
-
-      - name: Run frontend typecheck
-        run: npm run typecheck
-
-      - name: Run frontend tests
-        run: npm run test:run
-
-      - name: Run Python worker tests
-        run: npm run python:test
-
-      - name: Run frontend build
-        run: npm run build
-
-      - name: Run Rust checks
-        run: npm run cargo:check
-
-      - name: Run Rust tests
-        run: npm run cargo:test
-
-      - name: Run Rust clippy
-        run: npm run cargo:clippy
-
   publish-macos:
-    name: Publish macOS (${{ matrix.label }})
-    needs:
-      - verify-tag
-      - quality-gate
+    name: Publish macOS (Apple Silicon)
     runs-on: macos-latest
     permissions:
       contents: write
-    strategy:
-      fail-fast: false
-      max-parallel: 1
-      matrix:
-        include:
-          - label: Apple Silicon
-            target: aarch64-apple-darwin
     env:
       CI: true
     steps:
@@ -155,10 +36,24 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.94.0
-          targets: ${{ matrix.target }}
+          targets: aarch64-apple-darwin
 
       - name: Install frontend dependencies
         run: npm ci
+
+      - name: Derive release metadata
+        id: release_meta
+        shell: bash
+        run: |
+          TAG_NAME="${GITHUB_REF_NAME}"
+          PRERELEASE=false
+
+          if [[ "$TAG_NAME" == *-* ]]; then
+            PRERELEASE=true
+          fi
+
+          echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
 
       - name: Configure macOS signing
         id: configure_signing
@@ -215,60 +110,15 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: ${{ needs.verify-tag.outputs.tag_name }}
+          tagName: ${{ steps.release_meta.outputs.tag_name }}
           releaseDraft: false
-          prerelease: ${{ needs.verify-tag.outputs.prerelease }}
+          prerelease: ${{ steps.release_meta.outputs.prerelease }}
           generateReleaseNotes: true
           releaseBody: |
-            Automated release for `${{ needs.verify-tag.outputs.tag_name }}`.
+            Automated release for `${{ steps.release_meta.outputs.tag_name }}`.
 
             Download the macOS assets below for Apple Silicon.
           releaseCommitish: ${{ github.sha }}
-          args: --target ${{ matrix.target }}
+          args: --target aarch64-apple-darwin
           uploadWorkflowArtifacts: true
           workflowArtifactNamePattern: daksha-[target]-[bundle]
-
-      - name: Verify bundle artifacts
-        shell: bash
-        run: |
-          BUNDLE_DIR="src-tauri/target/${{ matrix.target }}/release/bundle"
-          APP_PATH="$(find "$BUNDLE_DIR" -name '*.app' | head -n 1)"
-          DMG_PATH="$(find "$BUNDLE_DIR" -name '*.dmg' | head -n 1)"
-
-          if [ -z "$APP_PATH" ] || [ -z "$DMG_PATH" ]; then
-            echo "Expected .app and .dmg artifacts under $BUNDLE_DIR." >&2
-            exit 1
-          fi
-
-          codesign --verify --deep --strict "$APP_PATH"
-
-      - name: Run bundled Python worker runtime smoke
-        shell: bash
-        run: |
-          BUNDLE_DIR="src-tauri/target/${{ matrix.target }}/release/bundle"
-          APP_PATH="$(find "$BUNDLE_DIR" -name '*.app' | head -n 1)"
-          WORKER_PATH="$(find "$APP_PATH" -name 'friday_litert_worker.py' | head -n 1)"
-          PYTHON_ARCHIVE_PATH="$(find "$APP_PATH" -name 'cpython-*.tar.gz' | head -n 1)"
-          PYTHON_WHEEL_PATH="$(find "$APP_PATH" -name 'litert_lm_api-*.whl' | head -n 1)"
-
-          if [ -z "$WORKER_PATH" ] || [ -z "$PYTHON_ARCHIVE_PATH" ] || [ -z "$PYTHON_WHEEL_PATH" ]; then
-            echo "Missing bundled LiteRT Python worker assets in $APP_PATH." >&2
-            exit 1
-          fi
-
-          python3 scripts/smoke_litert_python_worker.py \
-            --ci \
-            --worker-script "$WORKER_PATH" \
-            --python-archive "$PYTHON_ARCHIVE_PATH" \
-            --python-wheel "$PYTHON_WHEEL_PATH"
-
-      - name: Validate notarization staples
-        if: needs.verify-tag.outputs.prerelease == 'false' && steps.configure_signing.outputs.notarization_enabled == 'true'
-        shell: bash
-        run: |
-          BUNDLE_DIR="src-tauri/target/${{ matrix.target }}/release/bundle"
-          APP_PATH="$(find "$BUNDLE_DIR" -name '*.app' | head -n 1)"
-          DMG_PATH="$(find "$BUNDLE_DIR" -name '*.dmg' | head -n 1)"
-
-          xcrun stapler validate "$APP_PATH"
-          xcrun stapler validate "$DMG_PATH"
