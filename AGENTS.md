@@ -20,7 +20,7 @@ Current user-facing app capabilities:
 - Optional web-assisted replies via the chat composer
 - Friday-managed localhost SearXNG provisioning and startup for web search on first web-assisted use
 - Connection/privacy status pills and inline tool-activity status text during assisted replies
-- Settings for token budget, reply language, model downloads/switching, and startup pre-warming
+- Settings for token budget, reply language, theme selection, and model downloads/switching
 
 Current backend-only or partially surfaced capabilities:
 
@@ -146,7 +146,7 @@ Key files:
 - [`src/hooks/useAppController.ts`](src/hooks/useAppController.ts): frontend state hub, bootstrapping, event listeners, model inventory, send/cancel flow, startup warmup
 - [`src/components/ChatPane.tsx`](src/components/ChatPane.tsx): chat UI, attachments, web/thinking toggles, microphone recording
 - [`src/components/MessageBubble.tsx`](src/components/MessageBubble.tsx): assistant Markdown rendering, reasoning disclosure UI, code-copy actions, KaTeX math
-- [`src/components/SettingsPanel.tsx`](src/components/SettingsPanel.tsx): reply language, token presets, model downloads/switching, startup pre-warm toggle
+- [`src/components/SettingsPanel.tsx`](src/components/SettingsPanel.tsx): reply language, token presets, theme selection, and model downloads/switching
 - [`src/components/SetupWizard.tsx`](src/components/SetupWizard.tsx): first-run onboarding and model download flow
 - [`src/test/setup.ts`](src/test/setup.ts): shared Vitest/jsdom test shims
 - [`vite.config.ts`](vite.config.ts): Vite build config, test environment, and vendor chunk strategy
@@ -191,7 +191,7 @@ High-level flow:
 
 1. The React app boots and calls `bootstrap_app`
 2. Rust loads settings, ensures there is an active session, and reports both model-backend and web-search status
-3. The UI may opportunistically call `warm_backend` when `auto_start_backend` is enabled and the backend is ready but not yet connected
+3. The UI opportunistically calls `warm_backend` during startup when the backend is ready but not yet connected
 4. On first run, the setup wizard calls `get_setup_status` and then `pull_model`
 5. Rust ensures the bundled `lit` binary, embedded CPython runtime, patched LiteRT wheel, and worker script are installed under `app_data/litert-runtime/`
 6. The active model is stored under `app_data/lit-home/models/<model-id>/model.litertlm`
@@ -206,7 +206,7 @@ Frontend surfaces:
 - Chat pane with attachment ingestion, microphone capture, web toggle, and thinking toggle
 - Assistant bubbles with GitHub-flavored Markdown, KaTeX math, copyable code blocks, and collapsible reasoning
 - Footer/header status surfaces that expose session title, backend state, reply language, and generation status
-- Settings drawer for model downloads/switching, token budget, reply language, and startup pre-warm behavior
+- Settings drawer for model downloads/switching, token budget, reply language, and theme selection
 
 Backend responsibilities:
 
@@ -230,7 +230,7 @@ Settings live in SQLite under the `app_settings` JSON key.
 
 Current app settings schema includes:
 
-- `auto_start_backend`
+- `auto_start_backend` (legacy persisted field; startup pre-warm is always enabled)
 - `user_display_name`
 - `chat.reply_language`
 - `chat.max_tokens`
@@ -246,7 +246,7 @@ Current behavior worth remembering:
 - the settings UI uses token presets from `1K` through `128K`
 - `temperature` must be between `0.0` and `2.0`
 - `top_p` must be between `0.0` and `1.0`
-- the settings UI currently exposes reply language, token presets, model downloads/switching, and `auto_start_backend`
+- the settings UI currently exposes reply language, token presets, theme selection, and model downloads/switching
 - `temperature` and `top_p` are supported by the backend schema but are not currently surfaced in the main settings UI
 - the chat composer, not the settings drawer, owns the per-turn web assist and thinking toggles
 
@@ -389,5 +389,5 @@ Friday today is best understood as:
 - with optional thinking mode and optional web-assisted replies in the main chat flow
 - with rich Markdown and reasoning rendering in the conversation UI
 - with a Friday-managed localhost SearXNG process behind `web_search`
-- with startup pre-warming and daemon lifecycle management already implemented
+- with always-on startup pre-warming and daemon lifecycle management already implemented
 - and with RAG infrastructure present but not yet fully productized in the UI

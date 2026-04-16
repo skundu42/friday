@@ -1,5 +1,5 @@
 import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import MessageBubble, {
   areMessageBubblePropsEqual,
   normalizeAssistantMarkdown,
@@ -115,6 +115,16 @@ describe("normalizeAssistantMarkdown", () => {
     );
   });
 
+  it("inserts a line break before inline bullet markers jammed into prose", () => {
+    expect(
+      normalizeAssistantMarkdown(
+        "Here are key things about LLMs:* Scale: They are trained on large text corpora.",
+      ),
+    ).toBe(
+      "Here are key things about LLMs:\n\n* Scale: They are trained on large text corpora.",
+    );
+  });
+
   it("collapses fragmented OCR-style lines that duplicate the next line prefix", () => {
     expect(
       normalizeAssistantMarkdown(
@@ -157,6 +167,44 @@ describe("MessageBubble", () => {
 
     expect(container.querySelector(".katex")).not.toBeNull();
     expect(screen.queryByText(/\$A = P\(1 \+ r\)\^n\$/)).toBeNull();
+  });
+
+  it("opens assistant links out of band instead of navigating inline", () => {
+    const openSpy = vi.spyOn(window, "open").mockImplementation(() => null);
+
+    render(
+      <MessageBubble
+        message={{
+          id: "m-link",
+          role: "assistant",
+          content: "[OpenAI](https://openai.com)",
+        }}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("link", { name: "OpenAI" }));
+
+    expect(openSpy).toHaveBeenCalledWith(
+      "https://openai.com/",
+      "_blank",
+      "noopener,noreferrer",
+    );
+    openSpy.mockRestore();
+  });
+
+  it("blocks remote markdown images from rendering", () => {
+    render(
+      <MessageBubble
+        message={{
+          id: "m-image",
+          role: "assistant",
+          content: "![Remote chart](https://example.com/chart.png)",
+        }}
+      />,
+    );
+
+    expect(screen.getByText("Blocked remote image: Remote chart")).not.toBeNull();
+    expect(screen.queryByAltText("Remote chart")).toBeNull();
   });
 
   it("shows copy actions without requiring hover when the reply is complete", () => {
@@ -242,6 +290,36 @@ describe("MessageBubble", () => {
 
     expect(screen.getByRole("button", { name: /reasoning \(live\)/i })).not.toBeNull();
     expect(screen.getByText("Live reasoning")).not.toBeNull();
+  });
+
+  it("renders stored Knowledge sources in a collapsible section", () => {
+    render(
+      <MessageBubble
+        message={{
+          id: "m5",
+          role: "assistant",
+          content: "Grounded answer",
+          content_parts: {
+            sources: [
+              {
+                sourceId: "source-1",
+                modality: "text",
+                displayName: "Product spec.md",
+                locator: "/tmp/Product spec.md",
+                score: 0.92,
+                chunkIndex: 0,
+                snippet: "A concise grounded excerpt.",
+              },
+            ],
+          },
+        }}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: /show sources/i })).not.toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /show sources/i }));
+    expect(screen.getByText("Product spec.md")).not.toBeNull();
+    expect(screen.getByText("A concise grounded excerpt.")).not.toBeNull();
   });
 
   it("treats unchanged completed bubbles as memo-stable while streamed content changes are not", () => {

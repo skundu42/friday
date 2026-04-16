@@ -23,7 +23,10 @@ pub enum StreamEvent {
     Token(String),
     Thought(String),
     Error(String),
-    Done,
+    Done {
+        final_text: Option<String>,
+        final_thought: Option<String>,
+    },
     ToolCall {
         name: String,
         args: serde_json::Value,
@@ -164,6 +167,10 @@ enum WorkerEvent {
     },
     Done {
         request_id: String,
+        #[serde(default)]
+        final_text: Option<String>,
+        #[serde(default)]
+        final_thought: Option<String>,
     },
 }
 
@@ -260,14 +267,12 @@ impl PythonWorkerClient {
         messages: &[ChatMessage],
         generation_config: GenerationRequestConfig,
         tools_enabled: bool,
-        rag_context: Option<Value>,
     ) -> Result<mpsc::Receiver<StreamEvent>, String> {
         self.ready
             .get_or_try_init(|| async { Ok::<(), String>(()) })
             .await?;
 
-        let augmented_messages = augment_messages_with_rag(messages, rag_context.as_ref())?;
-        let normalized_messages = normalize_messages_for_worker(&augmented_messages)?;
+        let normalized_messages = normalize_messages_for_worker(messages)?;
         let _ = split_preface_and_prompt(&normalized_messages)?;
 
         let request_id = uuid::Uuid::new_v4().to_string();
@@ -526,8 +531,20 @@ async fn dispatch_worker_event(state: &Mutex<WorkerState>, event: WorkerEvent) {
         } => {
             send_if_active(state, &request_id, StreamEvent::ToolResult { name, result }).await;
         }
-        WorkerEvent::Done { request_id } => {
-            finish_request_by_id(state, &request_id, Some(StreamEvent::Done)).await;
+        WorkerEvent::Done {
+            request_id,
+            final_text,
+            final_thought,
+        } => {
+            finish_request_by_id(
+                state,
+                &request_id,
+                Some(StreamEvent::Done {
+                    final_text,
+                    final_thought,
+                }),
+            )
+            .await;
         }
         WorkerEvent::Error {
             request_id,
@@ -676,79 +693,6 @@ fn split_preface_and_prompt(
     Ok((messages[..messages.len() - 1].to_vec(), prompt))
 }
 
-fn augment_messages_with_rag(
-    messages: &[ChatMessage],
-    rag_context: Option<&Value>,
-) -> Result<Vec<ChatMessage>, String> {
-    let Some(rag_context) = rag_context else {
-        return Ok(messages.to_vec());
-    };
-
-    let (mut preface, prompt) = split_preface_and_prompt_chat_messages(messages)?;
-    preface.push(augment_prompt_with_rag(prompt, rag_context));
-    Ok(preface)
-}
-
-fn split_preface_and_prompt_chat_messages(
-    messages: &[ChatMessage],
-) -> Result<(Vec<ChatMessage>, ChatMessage), String> {
-    let prompt = messages
-        .last()
-        .cloned()
-        .ok_or_else(|| "No prompt was provided to LiteRT-LM".to_string())?;
-
-    if prompt.role != "user" {
-        return Err("LiteRT-LM expects the final chat message to be from the user".to_string());
-    }
-
-    Ok((messages[..messages.len() - 1].to_vec(), prompt))
-}
-
-fn augment_prompt_with_rag(prompt: ChatMessage, rag_context: &Value) -> ChatMessage {
-    let Some(results) = rag_context.get("results").and_then(Value::as_array) else {
-        return prompt;
-    };
-
-    if results.is_empty() {
-        return prompt;
-    }
-
-    let mut rag_lines = Vec::new();
-    for result in results.iter().take(5) {
-        let file = result
-            .get("file_name")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown");
-        let text = result.get("text").and_then(Value::as_str).unwrap_or("");
-        if !text.is_empty() {
-            rag_lines.push(format!("[{file}] {text}"));
-        }
-    }
-
-    if rag_lines.is_empty() {
-        return prompt;
-    }
-
-    let prefix = format!(
-        "Relevant local documents for this turn:\n{}\n\nUse this context when it is relevant to the user's request.",
-        rag_lines.join("\n\n")
-    );
-
-    match prompt.content {
-        ChatContent::Text(text) => ChatMessage {
-            role: prompt.role,
-            content: ChatContent::Text(format!("{prefix}\n\nUser request:\n{text}")),
-        },
-        ChatContent::Parts(mut parts) => {
-            parts.insert(0, ChatContentPart::Text { text: prefix });
-            ChatMessage {
-                role: prompt.role,
-                content: ChatContent::Parts(parts),
-            }
-        }
-    }
-}
-
 fn strip_image_data_url_prefix(blob: &str) -> Result<String, String> {
     let trimmed = blob.trim();
     if trimmed.is_empty() {
@@ -872,7 +816,9 @@ mod tests {
         assert_eq!(
             parse_worker_event_line(r#"{"type":"done","request_id":"req"}"#).expect("done event"),
             WorkerEvent::Done {
-                request_id: "req".to_string()
+                request_id: "req".to_string(),
+                final_text: None,
+                final_thought: None,
             }
         );
         assert_eq!(
@@ -920,66 +866,4 @@ mod tests {
         assert!(path_text.contains("friday-python-worker-%p.profraw"));
     }
 
-    #[test]
-    fn rag_context_prefixes_text_prompt() {
-        let messages = vec![
-            ChatMessage::text("system", "You are helpful."),
-            ChatMessage::text("user", "Summarize this."),
-        ];
-
-        let augmented = augment_messages_with_rag(
-            &messages,
-            Some(&serde_json::json!({
-                "results": [
-                    {"file_name": "notes.md", "text": "Friday stores chats locally."}
-                ]
-            })),
-        )
-        .expect("augment messages");
-
-        assert_eq!(augmented.len(), 2);
-        let ChatContent::Text(prompt_text) = &augmented[1].content else {
-            panic!("expected text prompt");
-        };
-        assert!(prompt_text.contains("Relevant local documents for this turn"));
-        assert!(prompt_text.contains("[notes.md] Friday stores chats locally."));
-        assert!(prompt_text.contains("User request:\nSummarize this."));
-    }
-
-    #[test]
-    fn rag_context_prefixes_multimodal_prompt() {
-        let messages = vec![
-            ChatMessage::text("system", "You are helpful."),
-            ChatMessage {
-                role: "user".to_string(),
-                content: ChatContent::Parts(vec![
-                    ChatContentPart::Text {
-                        text: "Describe this image.".to_string(),
-                    },
-                    ChatContentPart::Image {
-                        blob: "data:image/png;base64,ZmFrZQ==".to_string(),
-                    },
-                ]),
-            },
-        ];
-
-        let augmented = augment_messages_with_rag(
-            &messages,
-            Some(&serde_json::json!({
-                "results": [
-                    {"file_name": "notes.md", "text": "Friday stores chats locally."}
-                ]
-            })),
-        )
-        .expect("augment messages");
-
-        let ChatContent::Parts(parts) = &augmented[1].content else {
-            panic!("expected multimodal prompt");
-        };
-        assert!(matches!(
-            parts.first(),
-            Some(ChatContentPart::Text { text })
-                if text.contains("Relevant local documents for this turn")
-        ));
-    }
 }

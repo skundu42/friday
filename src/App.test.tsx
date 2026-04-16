@@ -66,10 +66,12 @@ function makeController() {
     settings: {
       auto_start_backend: true,
       user_display_name: "Asha",
+      theme_mode: "light",
       chat: {
         reply_language: "english",
         max_tokens: 4096,
         web_assist_enabled: false,
+        knowledge_enabled: false,
         generation: {
           thinking_enabled: true,
         },
@@ -85,6 +87,7 @@ function makeController() {
     isSwitchingModel: false,
     generationStatus: null,
     webSearchEnabled: false,
+    knowledgeEnabled: false,
     webSearchStatus: {
       provider: "searxng",
       available: true,
@@ -94,9 +97,22 @@ function makeController() {
       message: "Local web search is installed and will start on demand.",
       base_url: "http://127.0.0.1:8091",
     },
+    knowledgeStatus: {
+      state: "ready",
+      message: "Knowledge is ready.",
+    },
+    knowledgeSources: [],
+    knowledgeStats: {
+      totalSources: 2,
+      readySources: 2,
+      totalTextChunks: 12,
+      totalImageAssets: 1,
+      storageDir: "/Users/sk/Library/Application Support/com.friday.app/rag",
+    },
     thinkingEnabled: true,
     nativeToolSupportAvailable: true,
     webSearchToggleAvailable: true,
+    knowledgeToggleAvailable: true,
     thinkingAvailable: true,
     audioInputAvailable: false,
     createSession: vi.fn(async () => undefined),
@@ -108,10 +124,12 @@ function makeController() {
     saveAppSettings: vi.fn(async (_input) => ({
       auto_start_backend: true,
       user_display_name: "Asha",
+      theme_mode: "light",
       chat: {
         reply_language: "english",
         max_tokens: 4096,
         web_assist_enabled: false,
+        knowledge_enabled: false,
         generation: {
           thinking_enabled: true,
         },
@@ -119,9 +137,18 @@ function makeController() {
     })),
     setReplyLanguage: vi.fn(async () => undefined),
     selectModel: vi.fn(async () => undefined),
+    refreshKnowledge: vi.fn(async () => undefined),
     toggleWebSearch: vi.fn(async () => undefined),
+    toggleKnowledge: vi.fn(async () => undefined),
     toggleThinking: vi.fn(async () => undefined),
+    ingestKnowledgeFile: vi.fn(async () => undefined),
+    ingestKnowledgeUrl: vi.fn(async () => undefined),
+    deleteKnowledgeSource: vi.fn(async () => undefined),
   };
+}
+
+function getChatView() {
+  return screen.getByPlaceholderText("Ask Friday anything...").closest(".app-view");
 }
 
 describe("App", () => {
@@ -185,7 +212,10 @@ describe("App", () => {
     vi.restoreAllMocks();
   });
 
-  it("opens settings in a drawer while keeping the chat mounted", async () => {
+  it("opens settings as a full page view and returns to chat", async () => {
+    const controller = makeController();
+    controllerState.mockReturnValue(controller);
+
     render(<App />);
 
     await waitFor(() =>
@@ -195,9 +225,68 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: /open settings/i }));
 
     await waitFor(() =>
-      expect(screen.getByText("Conversation")).not.toBeNull(),
+      expect(
+        screen.getByRole("heading", { level: 3, name: "Conversation" }),
+      ).not.toBeNull(),
     );
-    expect(screen.getByPlaceholderText("Ask Friday anything...")).not.toBeNull();
+    expect(getChatView()?.classList.contains("is-hidden")).toBe(true);
+
+    fireEvent.click(screen.getByRole("button", { name: /back to chat/i }));
+
+    await waitFor(() =>
+      expect(getChatView()?.classList.contains("is-hidden")).toBe(false),
+    );
+    expect(controller.refreshBackendStatus).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens the Knowledge page from the sidebar", async () => {
+    const controller = makeController();
+    controllerState.mockReturnValue(controller);
+
+    render(<App />);
+
+    await waitFor(() =>
+      expect(screen.getByPlaceholderText("Ask Friday anything...")).not.toBeNull(),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /open knowledge/i }));
+
+    await waitFor(() =>
+      expect(screen.getByRole("heading", { level: 3, name: "Knowledge" })).not.toBeNull(),
+    );
+    expect(controller.refreshKnowledge).toHaveBeenCalledTimes(1);
+    expect(getChatView()?.classList.contains("is-hidden")).toBe(true);
+    expect(screen.queryByRole("button", { name: /add folder/i })).toBeNull();
+    expect(screen.queryByText(/stored under/i)).toBeNull();
+    expect(screen.queryByText("How Friday uses it")).toBeNull();
+  });
+
+  it("returns to chat when creating a new chat from settings", async () => {
+    const controller = makeController();
+    controllerState.mockReturnValue(controller);
+
+    render(<App />);
+
+    await waitFor(() =>
+      expect(screen.getByPlaceholderText("Ask Friday anything...")).not.toBeNull(),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /open settings/i }));
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", { level: 3, name: "Conversation" }),
+      ).not.toBeNull(),
+    );
+    expect(getChatView()?.classList.contains("is-hidden")).toBe(true);
+
+    fireEvent.click(screen.getAllByRole("button", { name: /new chat/i })[0]!);
+
+    await waitFor(() =>
+      expect(getChatView()?.classList.contains("is-hidden")).toBe(false),
+    );
+    expect(controller.createSession).toHaveBeenCalledTimes(1);
+    expect(controller.refreshBackendStatus).toHaveBeenCalledTimes(1);
   });
 
   it("uses a sidebar drawer on narrow layouts", async () => {
@@ -228,5 +317,25 @@ describe("App", () => {
     expect(screen.getByText("Friday could not start")).not.toBeNull();
     expect(screen.getByText("Database not initialized")).not.toBeNull();
     expect(screen.queryByText("Loading Friday...")).toBeNull();
+  });
+
+  it("applies the persisted dark mode to document chrome", async () => {
+    const controller = makeController();
+    controller.settings.theme_mode = "dark";
+    controllerState.mockReturnValue(controller);
+
+    const { unmount } = render(<App />);
+
+    await waitFor(() =>
+      expect(screen.getByPlaceholderText("Ask Friday anything...")).not.toBeNull(),
+    );
+
+    expect(document.body.dataset.theme).toBe("dark");
+    expect(document.documentElement.style.colorScheme).toBe("dark");
+
+    unmount();
+
+    expect(document.body.dataset.theme).toBeUndefined();
+    expect(document.documentElement.style.colorScheme).toBe("");
   });
 });

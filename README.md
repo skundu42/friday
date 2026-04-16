@@ -127,7 +127,7 @@ On first launch, Friday will:
 3. Prepare local runtime, log, RAG, temp, and SearXNG directories.
 4. Install the bundled `lit` binary, embedded CPython runtime, patched LiteRT Python wheel, and worker script if needed.
 5. Download the active model with resumable progress events.
-6. Optionally pre-warm the backend when startup pre-warming is enabled.
+6. Pre-warm the backend during startup so the first reply arrives faster.
 
 The setup wizard listens to `model-download-progress` events to drive the UI.
 
@@ -146,7 +146,7 @@ The setup wizard listens to `model-download-progress` events to drive the UI.
 - Markdown answers with code-copy controls and KaTeX math
 - Collapsible reasoning panel when a reply includes thinking content
 - Connection/privacy status pills and inline tool-activity status text
-- Settings drawer for token budget, model switching/downloads, and startup pre-warm behavior
+- Settings drawer for token budget, theme selection, and model switching/downloads
 
 ## Project Layout
 

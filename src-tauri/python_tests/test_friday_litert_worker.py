@@ -173,6 +173,90 @@ class WorkerProtocolTests(unittest.TestCase):
             ],
         )
 
+    def test_chunk_to_incremental_events_strips_cumulative_answer_and_thought_prefixes(self) -> None:
+        previous_answer = ""
+        previous_thought = ""
+
+        events, previous_answer, previous_thought = _MODULE.chunk_to_incremental_events(
+            "req-1",
+            {
+                "content": [{"type": "text", "text": "Based on the search results"}],
+                "channels": {"thought": "Need date"},
+            },
+            previous_answer,
+            previous_thought,
+        )
+        self.assertEqual(
+            events,
+            [
+                {
+                    "type": "token",
+                    "request_id": "req-1",
+                    "text": "Based on the search results",
+                },
+                {"type": "thought", "request_id": "req-1", "text": "Need date"},
+            ],
+        )
+
+        events, previous_answer, previous_thought = _MODULE.chunk_to_incremental_events(
+            "req-1",
+            {
+                "content": [{"type": "text", "text": "Based on the search results for April 15, 2026"}],
+                "channels": {"thought": "Need date and schedule"},
+            },
+            previous_answer,
+            previous_thought,
+        )
+        self.assertEqual(
+            events,
+            [
+                {
+                    "type": "token",
+                    "request_id": "req-1",
+                    "text": " for April 15, 2026",
+                },
+                {
+                    "type": "thought",
+                    "request_id": "req-1",
+                    "text": " and schedule",
+                },
+            ],
+        )
+
+        events, previous_answer, previous_thought = _MODULE.chunk_to_incremental_events(
+            "req-1",
+            {
+                "content": [{"type": "text", "text": " today."}],
+                "channels": {"thought": ""},
+            },
+            previous_answer,
+            previous_thought,
+        )
+        self.assertEqual(
+            events,
+            [{"type": "token", "request_id": "req-1", "text": " today."}],
+        )
+
+    def test_resolve_final_stream_text_prefers_latest_snapshot_for_cumulative_streams(self) -> None:
+        self.assertEqual(
+            _MODULE.resolve_final_stream_text(
+                "Based on the search results for April 15",
+                "Based on the search results for April 15, 2026",
+                saw_cumulative_growth=True,
+                saw_incremental_updates=False,
+            ),
+            "Based on the search results for April 15, 2026",
+        )
+        self.assertEqual(
+            _MODULE.resolve_final_stream_text(
+                "Hello there",
+                " there",
+                saw_cumulative_growth=False,
+                saw_incremental_updates=True,
+            ),
+            "Hello there",
+        )
+
     def test_cancel_marks_active_request(self) -> None:
         class FakeConversation:
             def __init__(self) -> None:
@@ -202,6 +286,23 @@ class WorkerProtocolTests(unittest.TestCase):
         )
         self.assertIsNone(_MODULE.web_search_time_range("Who is the current US president?"))
         self.assertIsNone(_MODULE.web_search_time_range("Who is the president of the USA now?"))
+
+    def test_classify_web_search_intent_reuses_shared_policy(self) -> None:
+        sports_intent = _MODULE.classify_web_search_intent("What is tomorrow's IPL match?")
+        identity_intent = _MODULE.classify_web_search_intent("Who is the current US president?")
+        evergreen_intent = _MODULE.classify_web_search_intent("history of sqlite")
+
+        self.assertEqual(sports_intent.time_range, "day")
+        self.assertEqual(sports_intent.categories, ["general", "web", "news"])
+        self.assertTrue(sports_intent.requires_verification)
+
+        self.assertIsNone(identity_intent.time_range)
+        self.assertEqual(identity_intent.categories, ["general", "web"])
+        self.assertTrue(identity_intent.requires_verification)
+
+        self.assertIsNone(evergreen_intent.time_range)
+        self.assertIsNone(evergreen_intent.categories)
+        self.assertFalse(evergreen_intent.requires_verification)
 
     def test_normalize_tool_payload_parses_json_string_arguments(self) -> None:
         normalized = _MODULE.normalize_tool_payload('{"query":"today","max_results":5}')
@@ -249,6 +350,30 @@ class WorkerProtocolTests(unittest.TestCase):
         self.assertIn("National holidays in India on today April 14 2026", variants)
         self.assertTrue(any("April 14 2026" in variant for variant in variants))
 
+    def test_search_query_variants_expand_possessive_relative_dates_cleanly(self) -> None:
+        class FixedDateTime(datetime.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                base = cls(2026, 4, 15, 12, 0, 0, tzinfo=datetime.timezone(datetime.timedelta(hours=5, minutes=30)))
+                if tz is None:
+                    return base
+                return base.astimezone(tz)
+
+        with mock.patch.object(_MODULE.datetime, "datetime", FixedDateTime):
+            variants = _MODULE.search_query_variants("What's today's IPL match?")
+
+        self.assertTrue(any("April 15 2026 IPL match" in variant for variant in variants))
+        self.assertFalse(any("2026's" in variant for variant in variants))
+
+    def test_contextualize_web_search_query_rewrites_context_light_followup(self) -> None:
+        effective_query, rewritten = _MODULE.contextualize_web_search_query(
+            "what about tomorrow",
+            "What is today's IPL match?",
+        )
+
+        self.assertTrue(rewritten)
+        self.assertEqual(effective_query, "IPL match tomorrow")
+
     def test_extract_urls_from_text_deduplicates_and_trims_punctuation(self) -> None:
         urls = _MODULE.extract_urls_from_text(
             "Review https://www.sandipank.dev/, then compare with https://www.sandipank.dev/."
@@ -294,6 +419,27 @@ class WorkerProtocolTests(unittest.TestCase):
 
         web_search_mock.assert_called_once_with("Who is the current US president?", 5)
         self.assertEqual(result["results"][0]["title"], "White House")
+        self.assertEqual(result["requested_query"], "Who is the current US president?")
+        self.assertEqual(result["effective_query"], "Who is the current US president?")
+        self.assertIsNone(result["query_rewrite_applied"])
+
+    def test_build_tools_web_search_rewrites_context_light_queries_from_recent_context(self) -> None:
+        tools = _MODULE.build_tools(
+            _MODULE.ToolPermissions(web=True),
+            user_search_context="What is today's IPL match?",
+        )
+        web_search = next(tool for tool in tools if tool.__name__ == "web_search")
+        with mock.patch.object(
+            _MODULE,
+            "web_search_impl",
+            return_value={"results": [{"title": "Tomorrow fixture"}]},
+        ) as web_search_mock:
+            result = web_search("what about tomorrow", 5)
+
+        web_search_mock.assert_called_once_with("IPL match tomorrow", 5)
+        self.assertEqual(result["original_query"], "what about tomorrow")
+        self.assertEqual(result["effective_query"], "IPL match tomorrow")
+        self.assertEqual(result["query_rewrite_applied"], "recent_user_context")
 
     def test_build_tools_omits_web_native_tools_when_web_disabled(self) -> None:
         tools = _MODULE.build_tools(
@@ -310,7 +456,8 @@ class WorkerProtocolTests(unittest.TestCase):
     def test_web_search_impl_normalizes_searxng_json_results(self) -> None:
         body = (
             b'{"query":"friday","results":[{"title":"Example","url":"https://example.com",'
-            b'"content":"Fresh <b>snippet</b>"}],"unresponsive_engines":["duckduckgo"]}'
+            b'"content":"Fresh <b>snippet</b>","engine":"mojeek","source":"release-feed",'
+            b'"publishedDate":"2026-04-15T10:00:00Z"}],"unresponsive_engines":["duckduckgo"]}'
         )
 
         with mock.patch.object(
@@ -329,6 +476,9 @@ class WorkerProtocolTests(unittest.TestCase):
                 "title": "Example",
                 "url": "https://example.com",
                 "snippet": "Fresh snippet",
+                "engine": "mojeek",
+                "source": "release-feed",
+                "publishedDate": "2026-04-15T10:00:00Z",
                 "domain": "example.com",
                 "likely_primary_source": False,
             },
@@ -342,6 +492,12 @@ class WorkerProtocolTests(unittest.TestCase):
         self.assertEqual(result["recommended_fetch_urls"], ["https://example.com"])
         self.assertEqual(result["categories"], ["general", "web", "news"])
         self.assertTrue(result["snippets_are_not_definitive"])
+        self.assertEqual(result["requested_query"], "latest friday release")
+        self.assertEqual(result["effective_query"], "latest friday release")
+        self.assertEqual(result["attempted_queries"], ["latest friday release"])
+        self.assertEqual(result["time_range"], "day")
+        self.assertFalse(result["verification_failed"])
+        self.assertFalse(result["do_not_answer_from_memory"])
 
     def test_perform_searxng_search_retries_transient_connection_error(self) -> None:
         body = (
@@ -423,6 +579,84 @@ class WorkerProtocolTests(unittest.TestCase):
         requested_url = urlopen_mock.call_args.args[0].full_url
         self.assertIn("current+US+president", requested_url)
         self.assertNotIn("%3C%7C", requested_url)
+
+    def test_web_search_impl_adds_inline_verification_for_definitive_current_queries(self) -> None:
+        body = (
+            b'{"query":"current president","results":[{"title":"White House","url":"https://www.whitehouse.gov/",'
+            b'"content":"President Donald J. Trump"}]}'
+        )
+
+        with (
+            mock.patch.object(
+                _MODULE.urllib.request,
+                "urlopen",
+                return_value=self._FakeResponse(body),
+            ),
+            mock.patch.object(
+                _MODULE,
+                "web_fetch_impl",
+                return_value={
+                    "url": "https://www.whitehouse.gov/",
+                    "content": "President Donald J. Trump is the 47th President of the United States.",
+                    "contentType": "text/html",
+                    "length": 72,
+                },
+            ) as web_fetch_mock,
+        ):
+            result = _MODULE.web_search_impl("Who is the current US president?", 5)
+
+        web_fetch_mock.assert_called_once_with("https://www.whitehouse.gov/", 3000)
+        self.assertEqual(
+            result["verification_pages"],
+            [
+                {
+                    "url": "https://www.whitehouse.gov/",
+                    "verified": True,
+                    "content": "President Donald J. Trump is the 47th President of the United States.",
+                    "contentType": "text/html",
+                    "length": 72,
+                }
+            ],
+        )
+        self.assertFalse(result["verification_failed"])
+        self.assertFalse(result["do_not_answer_from_memory"])
+        self.assertIn("verified page content", result["recommended_next_step"])
+
+    def test_web_search_impl_records_inline_verification_failures_without_dropping_results(self) -> None:
+        body = (
+            b'{"query":"ipl","results":[{"title":"Today\\u2019s IPL fixture","url":"https://example.com/ipl",'
+            b'"content":"Royal Challengers Bengaluru vs Chennai Super Kings at 7:30 PM."}]}'
+        )
+
+        with (
+            mock.patch.object(
+                _MODULE.urllib.request,
+                "urlopen",
+                return_value=self._FakeResponse(body),
+            ),
+            mock.patch.object(
+                _MODULE,
+                "web_fetch_impl",
+                return_value={"error": "Fetch failed with HTTP 503"},
+            ) as web_fetch_mock,
+        ):
+            result = _MODULE.web_search_impl("What is today's IPL match?", 5)
+
+        web_fetch_mock.assert_called_once_with("https://example.com/ipl", 3000)
+        self.assertEqual(result["total"], 1)
+        self.assertEqual(
+            result["verification_pages"],
+            [
+                {
+                    "url": "https://example.com/ipl",
+                    "verified": False,
+                    "error": "Fetch failed with HTTP 503",
+                }
+            ],
+        )
+        self.assertTrue(result["verification_failed"])
+        self.assertTrue(result["do_not_answer_from_memory"])
+        self.assertIn("live verification did not succeed", result["recommended_next_step"])
 
     def test_web_search_impl_uses_query_variants_when_original_query_has_no_results(self) -> None:
         first_body = b'{"query":"holiday","results":[]}'
@@ -764,6 +998,83 @@ class WorkerProtocolTests(unittest.TestCase):
         ]
         self.assertEqual(tool_event_calls, [])
 
+    def test_handle_chat_deduplicates_cumulative_stream_chunks(self) -> None:
+        class FakeConversation:
+            def __enter__(self) -> "FakeConversation":
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> None:
+                return None
+
+            def send_message_async(self, prompt: dict[str, object]) -> list[dict[str, object]]:
+                del prompt
+                return [
+                    {"content": [{"type": "text", "text": "Based on the search results"}]},
+                    {"content": [{"type": "text", "text": "Based on the search results for April 15, 2026"}]},
+                    {"content": [{"type": "text", "text": " for today, there is no confirmed fixture yet."}]},
+                ]
+
+        class FakeEngine:
+            def create_conversation(self, **kwargs: object) -> FakeConversation:
+                del kwargs
+                return FakeConversation()
+
+        worker = _MODULE.LiteRtWorker()
+        worker._engine = FakeEngine()
+
+        with mock.patch.object(_MODULE, "write_event") as write_event_mock:
+            worker.handle_chat(
+                {
+                    "request_id": "req-cumulative-stream",
+                    "messages": [
+                        {"role": "user", "content": "What is today's IPL match?"},
+                    ],
+                    "tool_permissions": {
+                        "web": True,
+                        "calculate": True,
+                        "current_datetime": True,
+                    },
+                    "generation_config": {},
+                }
+            )
+
+        token_events = [
+            call
+            for call in write_event_mock.call_args_list
+            if call.args[0] == "token"
+        ]
+        self.assertEqual(
+            token_events,
+            [
+                mock.call(
+                    "token",
+                    request_id="req-cumulative-stream",
+                    text="Based on the search results",
+                ),
+                mock.call(
+                    "token",
+                    request_id="req-cumulative-stream",
+                    text=" for April 15, 2026",
+                ),
+                mock.call(
+                    "token",
+                    request_id="req-cumulative-stream",
+                    text=" for today, there is no confirmed fixture yet.",
+                ),
+            ],
+        )
+        self.assertIn(
+            mock.call(
+                "done",
+                request_id="req-cumulative-stream",
+                final_text=(
+                    "Based on the search results for April 15, 2026"
+                    " for today, there is no confirmed fixture yet."
+                ),
+            ),
+            write_event_mock.call_args_list,
+        )
+
     def test_handle_chat_web_search_tool_is_available_for_model_initiated_use(self) -> None:
         class FakeConversation:
             sent_prompt: dict[str, object] | None = None
@@ -837,6 +1148,108 @@ class WorkerProtocolTests(unittest.TestCase):
             call for call in write_event_mock.call_args_list if call.args[0] in {"tool_call", "tool_result"}
         ]
         self.assertEqual(tool_event_calls, [])
+
+    def test_handle_chat_contextualizes_context_light_model_web_search_from_current_prompt(self) -> None:
+        class FakeConversation:
+            def __enter__(self) -> "FakeConversation":
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> None:
+                return None
+
+            def send_message_async(self, prompt: dict[str, object]) -> list[dict[str, object]]:
+                del prompt
+                self._tool(query="today", max_results=5)
+                return []
+
+        class FakeEngine:
+            def create_conversation(self, **kwargs: object) -> FakeConversation:
+                conversation = FakeConversation()
+                tools = kwargs.get("tools")
+                conversation._tool = next(
+                    tool for tool in tools if tool.__name__ == "web_search"
+                )
+                return conversation
+
+        worker = _MODULE.LiteRtWorker()
+        worker._engine = FakeEngine()
+
+        with (
+            mock.patch.object(
+                _MODULE,
+                "web_search_impl",
+                return_value={"results": [{"title": "Today fixture"}]},
+            ) as web_search_mock,
+            mock.patch.object(_MODULE, "write_event"),
+        ):
+            worker.handle_chat(
+                {
+                    "request_id": "req-contextualized-current-prompt-search",
+                    "messages": [
+                        {"role": "user", "content": "What is today's IPL match?"},
+                    ],
+                    "tool_permissions": {
+                        "web": True,
+                        "calculate": True,
+                        "current_datetime": True,
+                    },
+                    "generation_config": {},
+                }
+            )
+
+        web_search_mock.assert_called_once_with("IPL match today", 5)
+
+    def test_handle_chat_contextualizes_context_light_followup_web_search_from_prior_user_turn(self) -> None:
+        class FakeConversation:
+            def __enter__(self) -> "FakeConversation":
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> None:
+                return None
+
+            def send_message_async(self, prompt: dict[str, object]) -> list[dict[str, object]]:
+                del prompt
+                self._tool(query="what about tomorrow", max_results=5)
+                return []
+
+        class FakeEngine:
+            def create_conversation(self, **kwargs: object) -> FakeConversation:
+                conversation = FakeConversation()
+                tools = kwargs.get("tools")
+                conversation._tool = next(
+                    tool for tool in tools if tool.__name__ == "web_search"
+                )
+                return conversation
+
+        worker = _MODULE.LiteRtWorker()
+        worker._engine = FakeEngine()
+
+        with (
+            mock.patch.object(
+                _MODULE,
+                "web_search_impl",
+                return_value={"results": [{"title": "Tomorrow fixture"}]},
+            ) as web_search_mock,
+            mock.patch.object(_MODULE, "write_event"),
+        ):
+            worker.handle_chat(
+                {
+                    "request_id": "req-contextualized-followup-search",
+                    "messages": [
+                        {"role": "user", "content": "What is today's IPL match?"},
+                        {"role": "assistant", "content": "Today's IPL match is MI vs CSK."},
+                        {"role": "user", "content": "What about tomorrow?"},
+                    ],
+                    "tool_permissions": {
+                        "web": True,
+                        "calculate": True,
+                        "current_datetime": True,
+                    },
+                    "generation_config": {},
+                }
+            )
+
+        web_search_mock.assert_called_once_with("IPL match tomorrow", 5)
 
     def test_handle_chat_sanitizes_model_wrapped_web_search_arguments(self) -> None:
         class FakeConversation:

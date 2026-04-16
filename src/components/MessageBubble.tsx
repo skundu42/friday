@@ -6,7 +6,7 @@ import React, {
   useRef,
   useState,
 } from "react";
-import { Typography, Avatar, Card, Button } from "antd";
+import { Typography, Avatar, Button } from "antd";
 import {
   UserOutlined,
   CopyOutlined,
@@ -18,7 +18,7 @@ import ReactMarkdown from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
-import type { Message } from "../types";
+import type { KnowledgeCitation, Message } from "../types";
 import AppLogo from "./AppLogo";
 
 const { Text } = Typography;
@@ -38,12 +38,15 @@ const BOLD_MARKER_RE = /\*\*/g;
 const BOLD_INNER_WHITESPACE_RE = /\*\*([ \t]+)([^*\n][^*\n]*?)([ \t]+)?\*\*/g;
 const EMPTY_LIST_ITEM_RE = /^\s*[*-]\s*$/;
 const BROKEN_BOLD_LABEL_LIST_ITEM_RE = /^(\s*[*-]\s+)\*\*([^*\n]+?:)\s*(.+)$/;
+const INLINE_LIST_MARKER_NO_BREAK_RE =
+  /([^\s])([*-])\s+(?=[A-Z0-9][^:\n]{0,80}:)/g;
 const ATX_HEADING_NO_SPACE_RE = /^(#{1,6})(?=\S)/;
 const ORDERED_LIST_MARKER_NO_SPACE_RE = /^(\s*\d+\.)(?=\S)/;
 const PLAIN_SECTION_HEADING_RE =
   /^([A-Z][A-Za-z0-9/&()'" -]{1,80}:)$/;
 const MARKDOWN_REMARK_PLUGINS = [remarkGfm, remarkMath];
 const MARKDOWN_REHYPE_PLUGINS = [rehypeKatex];
+const WINDOWS_ABSOLUTE_PATH_RE = /^[A-Za-z]:[\\/]/;
 
 interface Props {
   message: Pick<Message, "id" | "role" | "content" | "content_parts">;
@@ -69,6 +72,15 @@ function getAssistantThinking(contentParts: unknown): string {
 
   const thinking = (contentParts as { thinking?: unknown }).thinking;
   return typeof thinking === "string" ? thinking : "";
+}
+
+function getAssistantSources(contentParts: unknown): KnowledgeCitation[] {
+  if (!contentParts || typeof contentParts !== "object") {
+    return [];
+  }
+
+  const sources = (contentParts as { sources?: unknown }).sources;
+  return Array.isArray(sources) ? (sources as KnowledgeCitation[]) : [];
 }
 
 export function summarizeUserMessageForDisplay(content: string): string {
@@ -176,6 +188,10 @@ export function normalizeAssistantMarkdown(content: string): string {
       }
 
       let normalized = line.replace(MISPLACED_BOLD_RE, "$1**$2$3**");
+      normalized = normalized.replace(
+        INLINE_LIST_MARKER_NO_BREAK_RE,
+        "$1\n\n$2 ",
+      );
       normalized = normalized.replace(ATX_HEADING_NO_SPACE_RE, "$1 ");
       normalized = normalized.replace(
         ORDERED_LIST_MARKER_NO_SPACE_RE,
@@ -229,6 +245,57 @@ export function normalizeAssistantMarkdown(content: string): string {
   return normalizedLines;
 }
 
+function normalizeExternalHref(href?: string): string | null {
+  if (!href) {
+    return null;
+  }
+
+  try {
+    const url = new URL(href);
+    if (
+      url.protocol === "http:" ||
+      url.protocol === "https:" ||
+      url.protocol === "mailto:"
+    ) {
+      return url.toString();
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+function normalizePermittedImageSrc(src?: string): string | null {
+  if (!src) {
+    return null;
+  }
+
+  const trimmed = src.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  if (
+    trimmed.startsWith("data:") ||
+    trimmed.startsWith("blob:") ||
+    trimmed.startsWith("file:") ||
+    trimmed.startsWith("/")
+  ) {
+    return trimmed;
+  }
+
+  if (WINDOWS_ABSOLUTE_PATH_RE.test(trimmed)) {
+    return trimmed;
+  }
+
+  return null;
+}
+
+function openExternalLink(href: string) {
+  globalThis.open?.(href, "_blank", "noopener,noreferrer");
+}
+
 function CopyButton({
   text,
   label = "Copy",
@@ -269,15 +336,8 @@ function CopyButton({
       icon={copied ? <CheckOutlined /> : <CopyOutlined />}
       onClick={() => void handleCopy()}
       type="text"
-      style={{
-        borderRadius: 8,
-        width: 24,
-        minWidth: 24,
-        paddingInline: 0,
-        height: 24,
-        color: copied ? "#52C41A" : "#666",
-        background: "transparent",
-      }}
+      className="copy-button"
+      style={copied ? { color: "var(--friday-green)" } : undefined}
       aria-label={copied ? `${label} copied` : label}
       title={copied ? "Copied" : label}
     />
@@ -320,8 +380,10 @@ function MessageBubble({
 }: Props) {
   const isUser = message.role === "user";
   const [isThinkingExpanded, setIsThinkingExpanded] = useState(isStreaming);
+  const [isSourcesExpanded, setIsSourcesExpanded] = useState(false);
   const streamingStateRef = useRef(isStreaming);
   const rawThinkingContent = getAssistantThinking(message.content_parts);
+  const sources = getAssistantSources(message.content_parts);
   const deferredAssistantSource = useDeferredValue(
     isStreaming ? message.content : "",
   );
@@ -356,6 +418,39 @@ function MessageBubble({
           </CodeBlock>
         );
       },
+      a({ href, children, ...props }: React.ComponentProps<"a">) {
+        const safeHref = normalizeExternalHref(href);
+        if (!safeHref) {
+          return <span>{children}</span>;
+        }
+
+        return (
+          <a
+            {...props}
+            href={safeHref}
+            target="_blank"
+            rel="noreferrer noopener"
+            onClick={(event) => {
+              event.preventDefault();
+              openExternalLink(safeHref);
+            }}
+          >
+            {children}
+          </a>
+        );
+      },
+      img({ src, alt, ...props }: React.ComponentProps<"img">) {
+        const safeSrc = normalizePermittedImageSrc(src);
+        if (!safeSrc) {
+          return (
+            <span className="message-card__blocked-image">
+              {alt ? `Blocked remote image: ${alt}` : "Blocked remote image"}
+            </span>
+          );
+        }
+
+        return <img {...props} src={safeSrc} alt={alt} loading="lazy" />;
+      },
     }),
     [showCopyActions],
   );
@@ -384,101 +479,35 @@ function MessageBubble({
 
   if (isUser) {
     return (
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "flex-end",
-          marginBottom: 16,
-        }}
-      >
-        <div
-          style={{
-            maxWidth: "72ch",
-            display: "flex",
-            gap: 10,
-            flexDirection: "row-reverse",
-          }}
-        >
-          <Avatar
-            size={34}
-            icon={<UserOutlined />}
-            style={{
-              background: "#4DABF7",
-              flexShrink: 0,
-              border: "2px solid #2C2C2C",
-            }}
-          />
-          <Card
-            size="small"
-            style={{
-              background: "#52C41A",
-              color: "#FFF",
-              border: "3px solid #2C2C2C",
-              boxShadow: "4px 4px 0 #2C2C2C",
-              borderRadius: "16px 16px 4px 16px",
-            }}
-            styles={{ body: { padding: "10px 14px" } }}
-          >
-            <Text
-              style={{ color: "#FFF", whiteSpace: "pre-wrap", fontSize: 14 }}
-            >
-              {renderedUserContent}
-            </Text>
+      <div className="message-row message-row--user">
+        <div className="message-row__inner">
+          <div className="message-avatar message-avatar--user">
+            <Avatar size={38} icon={<UserOutlined />} />
+          </div>
+          <div className="message-card message-card--user">
+            <Text className="message-card__user-text">{renderedUserContent}</Text>
             {(hasFileMarkers || hasAttachmentTag) && (
-              <div style={{ marginTop: 6, fontSize: 11, opacity: 0.8 }}>
-                📎 Files included in context
+              <div className="message-card__attachment-note">
+                Files included in context
               </div>
             )}
-          </Card>
+          </div>
         </div>
       </div>
     );
   }
 
   return (
-    <div
-      data-testid={`assistant-bubble-${message.id}`}
-      style={{ display: "flex", marginBottom: 16 }}
-    >
-      <div
-        style={{
-          width: "100%",
-          display: "flex",
-          gap: 10,
-          alignItems: "flex-start",
-        }}
-      >
-        <div style={{ flexShrink: 0 }}>
+    <div data-testid={`assistant-bubble-${message.id}`} className="message-row">
+      <div className="message-row__inner">
+        <div className="message-avatar">
           <AppLogo size={34} />
         </div>
-        <Card
-          size="small"
-          style={{
-            flex: 1,
-            width: "100%",
-            position: "relative",
-            background: "#FFFFFF",
-            border: "3px solid #2C2C2C",
-            boxShadow: "4px 4px 0 #2C2C2C",
-            borderRadius: "16px 16px 16px 4px",
-          }}
-          styles={{ body: { padding: "10px 16px" } }}
-        >
-          <Text
-            type="secondary"
-            style={{
-              fontSize: 11,
-              display: "block",
-              marginBottom: 6,
-              color: "#52C41A",
-            }}
-          >
+        <div className="message-card message-card--assistant">
+          <Text type="secondary" className="message-card__eyebrow">
             Friday
           </Text>
-          <div
-            className="markdown-body"
-            style={{ fontSize: 14, lineHeight: 1.7, maxWidth: "72ch" }}
-          >
+          <div className="markdown-body message-card__body">
             <ReactMarkdown
               remarkPlugins={MARKDOWN_REMARK_PLUGINS}
               rehypePlugins={MARKDOWN_REHYPE_PLUGINS}
@@ -488,26 +517,13 @@ function MessageBubble({
             </ReactMarkdown>
           </div>
           {thinkingContent ? (
-            <div
-              style={{
-                marginTop: 12,
-                padding: "10px 12px",
-                borderRadius: 12,
-                border: "2px solid #D4B106",
-                background: "#FFFBE6",
-              }}
-            >
+            <div className="message-reasoning">
               <Button
                 type="text"
                 size="small"
                 onClick={() => setIsThinkingExpanded((current) => !current)}
                 icon={isThinkingExpanded ? <UpOutlined /> : <DownOutlined />}
-                style={{
-                  paddingInline: 0,
-                  height: "auto",
-                  fontWeight: 700,
-                  color: "#8C6D1F",
-                }}
+                className="message-reasoning__toggle"
               >
                 {isStreaming
                   ? "Reasoning (live)"
@@ -516,13 +532,11 @@ function MessageBubble({
                     : "Show reasoning"}
               </Button>
               {isThinkingExpanded ? (
-                <div
-                  className="markdown-body"
-                  style={{ fontSize: 13, lineHeight: 1.6, marginTop: 8 }}
-                >
+                <div className="markdown-body message-reasoning__body">
                   <ReactMarkdown
                     remarkPlugins={MARKDOWN_REMARK_PLUGINS}
                     rehypePlugins={MARKDOWN_REHYPE_PLUGINS}
+                    components={markdownComponents}
                   >
                     {thinkingContent}
                   </ReactMarkdown>
@@ -530,20 +544,53 @@ function MessageBubble({
               ) : null}
             </div>
           ) : null}
+          {sources.length > 0 ? (
+            <div className="message-sources">
+              <Button
+                type="text"
+                size="small"
+                onClick={() => setIsSourcesExpanded((current) => !current)}
+                icon={isSourcesExpanded ? <UpOutlined /> : <DownOutlined />}
+                className="message-sources__toggle"
+              >
+                {isSourcesExpanded ? "Hide sources" : `Show sources (${sources.length})`}
+              </Button>
+              {isSourcesExpanded ? (
+                <div className="message-sources__body">
+                  {sources.map((source, index) => (
+                    <div
+                      key={`${source.sourceId}-${source.chunkIndex ?? index}`}
+                      className="message-source-item"
+                    >
+                      <div className="message-source-item__head">
+                        <Text strong>{source.displayName}</Text>
+                        <Text type="secondary">
+                          {source.modality}
+                          {Number.isFinite(source.score)
+                            ? ` · ${source.score.toFixed(2)}`
+                            : ""}
+                        </Text>
+                      </div>
+                      <Text type="secondary" className="message-source-item__locator">
+                        {source.locator}
+                      </Text>
+                      {source.snippet ? (
+                        <div className="message-source-item__snippet">
+                          {source.snippet}
+                        </div>
+                      ) : null}
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
           {showCopyActions ? (
-            <div
-              style={{
-                position: "absolute",
-                right: 10,
-                top: 8,
-                display: "flex",
-                justifyContent: "flex-end",
-              }}
-            >
+            <div className="message-card__copy">
               <CopyButton text={assistantContent} label="Copy reply" />
             </div>
           ) : null}
-        </Card>
+        </div>
       </div>
     </div>
   );

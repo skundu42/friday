@@ -4,6 +4,10 @@ use crate::python_runtime::{
     bundled_resource_source_path, ensure_embedded_python_runtime, install_python_wheel,
     sync_file_if_changed,
 };
+use crate::runtime_manifest::{
+    embedded_runtime_manifest, PlatformRuntimeSpec, RuntimeManifest, RuntimeModelSpec,
+    RuntimePolicy,
+};
 use crate::settings::GenerationRequestConfig;
 use crate::{persist_active_model_id, AppState};
 use serde::{Deserialize, Serialize};
@@ -18,23 +22,12 @@ use tauri::State;
 use tokio::io::AsyncReadExt;
 use tokio::sync::{mpsc, Mutex as AsyncMutex};
 
-const LITERT_LM_VERSION: &str = "0.10.1";
-const BUNDLED_LITERT_RESOURCE_PATH: &str = env!("FRIDAY_BUNDLED_LITERT_RESOURCE_PATH");
-const BUNDLED_PYTHON_WHEEL_RESOURCE_PATH: &str = env!("FRIDAY_BUNDLED_PYTHON_WHEEL_RESOURCE_PATH");
-const BUNDLED_PYTHON_WORKER_RESOURCE_PATH: &str =
-    env!("FRIDAY_BUNDLED_PYTHON_WORKER_RESOURCE_PATH");
-const DAEMON_IDLE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
-const DAEMON_IDLE_CHECK_INTERVAL: Duration = Duration::from_secs(30);
-const HIGH_RAM_DEFAULT_MODEL_THRESHOLD_GB: f64 = 16.0;
-const PROCESS_OUTPUT_TAIL_LIMIT: usize = 32 * 1024;
-const PYTHON_WORKER_BINARY_NAME: &str = "friday-worker";
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelInfo {
-    pub id: &'static str,
-    pub repo: &'static str,
-    pub filename: &'static str,
-    pub display_name: &'static str,
+    pub id: String,
+    pub repo: String,
+    pub filename: String,
+    pub display_name: String,
     pub size_bytes: u64,
     pub size_gb: f64,
     pub min_ram_gb: f64,
@@ -46,64 +39,81 @@ pub struct ModelInfo {
     pub recommended_max_output_tokens: u32,
 }
 
-const MODELS: &[ModelInfo] = &[
-    ModelInfo {
-        id: "gemma-4-e2b-it",
-        repo: "litert-community/gemma-4-E2B-it-litert-lm",
-        filename: "gemma-4-E2B-it.litertlm",
-        display_name: "Gemma 4 E2B",
-        size_bytes: 2_583_085_056,
-        size_gb: 2.41,
-        min_ram_gb: 4.0,
-        supports_image_input: true,
-        supports_audio_input: true,
-        supports_video_input: false,
-        supports_thinking: true,
-        max_context_tokens: 131_072,
-        recommended_max_output_tokens: 4_096,
-    },
-    ModelInfo {
-        id: "gemma-4-e4b-it",
-        repo: "litert-community/gemma-4-E4B-it-litert-lm",
-        filename: "gemma-4-E4B-it.litertlm",
-        display_name: "Gemma 4 E4B",
-        size_bytes: 3_654_467_584,
-        size_gb: 3.40,
-        min_ram_gb: 8.0,
-        supports_image_input: true,
-        supports_audio_input: true,
-        supports_video_input: false,
-        supports_thinking: true,
-        max_context_tokens: 131_072,
-        recommended_max_output_tokens: 8_192,
-    },
-];
-
-fn default_model_for_ram_gb(total_ram_gb: f64) -> &'static ModelInfo {
-    if total_ram_gb > HIGH_RAM_DEFAULT_MODEL_THRESHOLD_GB {
-        find_model("gemma-4-e4b-it").unwrap_or(&MODELS[0])
-    } else {
-        &MODELS[0]
+impl From<&RuntimeModelSpec> for ModelInfo {
+    fn from(model: &RuntimeModelSpec) -> Self {
+        Self {
+            id: model.id.clone(),
+            repo: model.repo.clone(),
+            filename: model.filename.clone(),
+            display_name: model.display_name.clone(),
+            size_bytes: model.size_bytes,
+            size_gb: model.size_gb,
+            min_ram_gb: model.min_ram_gb,
+            supports_image_input: model.supports_image_input,
+            supports_audio_input: model.supports_audio_input,
+            supports_video_input: model.supports_video_input,
+            supports_thinking: model.supports_thinking,
+            max_context_tokens: model.max_context_tokens,
+            recommended_max_output_tokens: model.recommended_max_output_tokens,
+        }
     }
 }
 
-fn default_model() -> &'static ModelInfo {
+fn runtime_manifest() -> &'static RuntimeManifest {
+    embedded_runtime_manifest().expect("embedded runtime manifest should parse")
+}
+
+fn runtime_platform() -> &'static PlatformRuntimeSpec {
+    runtime_manifest()
+        .platform_for_current_target()
+        .expect("supported runtime platform should exist")
+}
+
+fn runtime_policy() -> &'static RuntimePolicy {
+    &runtime_manifest().policy
+}
+
+fn runtime_models() -> &'static [RuntimeModelSpec] {
+    runtime_manifest().models.as_slice()
+}
+
+fn runtime_version() -> &'static str {
+    runtime_platform().runtime_version.as_str()
+}
+
+fn python_worker_binary_name() -> &'static str {
+    runtime_platform().python_worker_binary_name.as_str()
+}
+
+fn default_model_for_ram_gb(total_ram_gb: f64) -> &'static RuntimeModelSpec {
+    runtime_manifest()
+        .default_model_for_ram_gb(total_ram_gb)
+        .or_else(|| runtime_models().first())
+        .expect("runtime manifest should include at least one model")
+}
+
+fn default_model() -> &'static RuntimeModelSpec {
     default_model_for_ram_gb(get_system_ram_gb())
 }
 
-fn find_model(id: &str) -> Option<&'static ModelInfo> {
-    MODELS.iter().find(|m| m.id == id)
+fn find_model(id: &str) -> Option<&'static RuntimeModelSpec> {
+    runtime_manifest().model_by_id(id)
 }
 
-fn model_download_url(model: &ModelInfo) -> String {
+fn model_info(model: &RuntimeModelSpec) -> ModelInfo {
+    ModelInfo::from(model)
+}
+
+fn model_download_url(model: &RuntimeModelSpec) -> String {
     format!(
         "https://huggingface.co/{}/resolve/main/{}",
-        model.repo, model.filename
+        model.repo.as_str(),
+        model.filename.as_str()
     )
 }
 
 fn default_backend() -> &'static str {
-    "gpu"
+    runtime_policy().default_backend.as_str()
 }
 
 fn backend_label(backend: &str) -> &'static str {
@@ -123,7 +133,7 @@ struct RuntimeFeatureSupport {
     supports_thinking: bool,
 }
 
-fn runtime_feature_support(model: &ModelInfo) -> RuntimeFeatureSupport {
+fn runtime_feature_support(model: &RuntimeModelSpec) -> RuntimeFeatureSupport {
     RuntimeFeatureSupport {
         supports_native_tools: true,
         supports_audio_input: model.supports_audio_input,
@@ -139,11 +149,13 @@ fn get_system_ram_gb() -> f64 {
     system.total_memory() as f64 / (1024.0 * 1024.0 * 1024.0)
 }
 
-fn ram_support_error(model: &ModelInfo, total_ram: f64) -> Option<String> {
+fn ram_support_error(model: &RuntimeModelSpec, total_ram: f64) -> Option<String> {
     if total_ram < model.min_ram_gb {
         Some(format!(
             "Not enough RAM for {} ({:.1} GB required, {:.1} GB available)",
-            model.display_name, model.min_ram_gb, total_ram
+            model.display_name.as_str(),
+            model.min_ram_gb,
+            total_ram
         ))
     } else {
         None
@@ -313,7 +325,7 @@ impl SidecarManager {
         self.selected_backend.lock().unwrap().clone()
     }
 
-    pub fn active_model(&self) -> &'static ModelInfo {
+    pub fn active_model(&self) -> &'static RuntimeModelSpec {
         let id = self.active_model_id.lock().unwrap().clone();
         find_model(&id).unwrap_or(default_model())
     }
@@ -323,14 +335,17 @@ impl SidecarManager {
         *self.active_model_id.lock().unwrap() = selected.id.to_string();
     }
 
-    pub fn model_for_request(&self, model_id: Option<&str>) -> Result<&'static ModelInfo, String> {
+    pub fn model_for_request(
+        &self,
+        model_id: Option<&str>,
+    ) -> Result<&'static RuntimeModelSpec, String> {
         match model_id {
             Some(id) => find_model(id).ok_or_else(|| format!("Unknown model: {}", id)),
             None => Ok(self.active_model()),
         }
     }
 
-    pub fn ensure_model_ram_supported(&self, model: &ModelInfo) -> Result<(), String> {
+    pub fn ensure_model_ram_supported(&self, model: &RuntimeModelSpec) -> Result<(), String> {
         let total_ram = get_system_ram_gb();
         if let Some(error) = ram_support_error(model, total_ram) {
             return Err(error);
@@ -342,13 +357,13 @@ impl SidecarManager {
         self.has_model_for(self.active_model())
     }
 
-    pub fn has_model_for(&self, model: &ModelInfo) -> bool {
+    pub fn has_model_for(&self, model: &RuntimeModelSpec) -> bool {
         self.downloaded_model_ids()
             .into_iter()
-            .any(|id| id == model.id)
+            .any(|id| id == model.id.as_str())
     }
 
-    fn partial_model_download_bytes(&self, model: &ModelInfo) -> u64 {
+    fn partial_model_download_bytes(&self, model: &RuntimeModelSpec) -> u64 {
         self.model_storage_path(model)
             .ok()
             .and_then(|path| std::fs::metadata(path).ok().map(|metadata| metadata.len()))
@@ -413,7 +428,7 @@ impl SidecarManager {
 
         SetupStatus {
             model_id: model.id.to_string(),
-            model_display_name: model.display_name.to_string(),
+            model_display_name: model.display_name.clone(),
             model_downloaded,
             model_size_gb: model.size_gb,
             min_ram_gb: model.min_ram_gb,
@@ -454,8 +469,8 @@ impl SidecarManager {
                 state: "connected".to_string(),
                 message: format!(
                     "LiteRT-LM {} with {} is ready in Friday's Python worker on {}.",
-                    LITERT_LM_VERSION,
-                    model.display_name,
+                    runtime_version(),
+                    model.display_name.as_str(),
                     backend_label(&self.selected_backend())
                 ),
                 supports_native_tools: features.supports_native_tools,
@@ -476,8 +491,8 @@ impl SidecarManager {
                 state: "ready".to_string(),
                 message: format!(
                     "LiteRT-LM {} with {} is ready to start in Friday's Python worker on {}.",
-                    LITERT_LM_VERSION,
-                    model.display_name,
+                    runtime_version(),
+                    model.display_name.as_str(),
                     backend_label(default_backend())
                 ),
                 supports_native_tools: features.supports_native_tools,
@@ -498,7 +513,7 @@ impl SidecarManager {
                 "model_missing",
                 format!(
                     "{} is not downloaded yet. Complete setup to download it.",
-                    model.display_name
+                    model.display_name.as_str()
                 ),
             )
         };
@@ -513,7 +528,7 @@ impl SidecarManager {
         if !self.has_model_for(model) {
             return Err(format!(
                 "{} is not downloaded yet. Complete setup to download it.",
-                model.display_name
+                model.display_name.as_str()
             ));
         }
         self.ensure_runtime(None).await?;
@@ -619,7 +634,7 @@ impl SidecarManager {
 
         tracing::info!(
             "Starting Friday LiteRT Python worker (model={}, max_num_tokens={}, backend={})…",
-            model.id,
+            model.id.as_str(),
             max_tokens,
             preferred_backend,
         );
@@ -693,7 +708,6 @@ impl SidecarManager {
         messages: &[ChatMessage],
         generation_config: GenerationRequestConfig,
         tools_enabled: bool,
-        rag_context: Option<serde_json::Value>,
     ) -> Result<mpsc::Receiver<StreamEvent>, String> {
         self.ensure_daemon().await?;
 
@@ -703,22 +717,22 @@ impl SidecarManager {
             .ok_or_else(|| "Friday LiteRT Python worker is not available".to_string())?;
 
         daemon
-            .send_chat_with_options(messages, generation_config, tools_enabled, rag_context)
+            .send_chat_with_options(messages, generation_config, tools_enabled)
             .await
     }
 
     pub async fn download_model(
         &self,
         app: &tauri::AppHandle,
-        model: &'static ModelInfo,
+        model: &RuntimeModelSpec,
     ) -> Result<(), String> {
         self.ensure_runtime(Some(app)).await?;
         if self.has_model_for(model) {
-            Self::emit_progress(Some(app), "complete", model.display_name);
+            Self::emit_progress(Some(app), "complete", &model.display_name);
             return Ok(());
         }
 
-        Self::emit_progress(Some(app), "downloading", model.display_name);
+        Self::emit_progress(Some(app), "downloading", &model.display_name);
         let url = model_download_url(model);
         let stop_progress = Arc::new(AtomicBool::new(false));
         let progress_handle = self.spawn_model_download_progress_monitor(
@@ -727,10 +741,10 @@ impl SidecarManager {
             Arc::clone(&stop_progress),
         );
         self.run_lit_with_progress(
-            &["pull", &url, "--alias", model.id],
+            &["pull", &url, "--alias", model.id.as_str()],
             "Downloading model",
             Some(app),
-            model.display_name,
+            &model.display_name,
         )
         .await
         .inspect_err(|error| {
@@ -739,7 +753,7 @@ impl SidecarManager {
                 Some(app),
                 &DownloadProgressPayload {
                     state: "error",
-                    display_name: model.display_name,
+                    display_name: &model.display_name,
                     downloaded_bytes: self.partial_model_download_bytes(model),
                     total_bytes: model.size_bytes,
                     speed_bps: 0,
@@ -754,7 +768,7 @@ impl SidecarManager {
             let _ = handle.await;
         }
         self.invalidate_downloaded_model_ids_cache();
-        Self::emit_progress(Some(app), "complete", model.display_name);
+        Self::emit_progress(Some(app), "complete", &model.display_name);
         self.set_status(self.auto_detect().await);
         Ok(())
     }
@@ -776,7 +790,7 @@ impl SidecarManager {
         let activity = Arc::clone(&self.daemon_activity);
 
         tauri::async_runtime::spawn(async move {
-            let mut interval = tokio::time::interval(DAEMON_IDLE_CHECK_INTERVAL);
+            let mut interval = tokio::time::interval(runtime_policy().daemon_idle_check_interval());
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
             loop {
@@ -803,7 +817,7 @@ impl SidecarManager {
 
                 tracing::info!(
                     "Stopping Friday LiteRT Python worker after {:?} of inactivity to free RAM",
-                    DAEMON_IDLE_TIMEOUT
+                    runtime_policy().daemon_idle_timeout()
                 );
 
                 if daemon.send_shutdown().await.is_err() {
@@ -826,7 +840,7 @@ impl SidecarManager {
         Ok(self
             .app_data_dir()?
             .join("litert-runtime")
-            .join(LITERT_LM_VERSION))
+            .join(runtime_version()))
     }
 
     fn resource_dir_path(&self) -> Result<PathBuf, String> {
@@ -841,17 +855,20 @@ impl SidecarManager {
         Ok(self.app_data_dir()?.join("lit-home"))
     }
 
-    fn model_storage_path(&self, model: &ModelInfo) -> Result<PathBuf, String> {
+    fn model_storage_path(&self, model: &RuntimeModelSpec) -> Result<PathBuf, String> {
         Ok(self
             .lit_home_dir_path()?
             .join("models")
-            .join(model.id)
+            .join(&model.id)
             .join("model.litertlm"))
     }
 
     fn lit_binary_path(&self) -> Result<PathBuf, String> {
         let runtime_dir = self.runtime_dir_path()?;
-        Ok(runtime_dir.join(if cfg!(windows) { "lit.exe" } else { "lit" }))
+        let file_name = runtime_platform()
+            .litert_binary
+            .file_name("LiteRT runtime")?;
+        Ok(runtime_dir.join(file_name))
     }
 
     fn python_runtime_dir_path(&self) -> Result<PathBuf, String> {
@@ -870,7 +887,7 @@ impl SidecarManager {
         Ok(self
             .python_runtime_dir_path()?
             .join("bin")
-            .join(PYTHON_WORKER_BINARY_NAME))
+            .join(python_worker_binary_name()))
     }
 
     fn python_site_packages_path(&self) -> Result<PathBuf, String> {
@@ -882,10 +899,10 @@ impl SidecarManager {
     }
 
     fn python_worker_script_path(&self) -> Result<PathBuf, String> {
-        Ok(self
-            .runtime_dir_path()?
-            .join("worker")
-            .join("friday_litert_worker.py"))
+        let file_name = runtime_platform()
+            .worker_script
+            .file_name("Python worker script")?;
+        Ok(self.runtime_dir_path()?.join("worker").join(file_name))
     }
 
     fn bundled_resource_source_path(&self, relative_path: &str) -> Result<PathBuf, String> {
@@ -896,15 +913,15 @@ impl SidecarManager {
     }
 
     fn bundled_runtime_source_path(&self) -> Result<PathBuf, String> {
-        self.bundled_resource_source_path(BUNDLED_LITERT_RESOURCE_PATH)
+        self.bundled_resource_source_path(&runtime_platform().litert_binary.relative_resource_path)
     }
 
     fn bundled_python_wheel_source_path(&self) -> Result<PathBuf, String> {
-        self.bundled_resource_source_path(BUNDLED_PYTHON_WHEEL_RESOURCE_PATH)
+        self.bundled_resource_source_path(&runtime_platform().python_wheel.relative_resource_path)
     }
 
     fn bundled_python_worker_source_path(&self) -> Result<PathBuf, String> {
-        self.bundled_resource_source_path(BUNDLED_PYTHON_WORKER_RESOURCE_PATH)
+        self.bundled_resource_source_path(&runtime_platform().worker_script.relative_resource_path)
     }
 
     fn cleanup_stale_runtime_processes(&self) {
@@ -992,14 +1009,11 @@ impl SidecarManager {
     pub async fn ensure_runtime(&self, app: Option<&tauri::AppHandle>) -> Result<(), String> {
         Self::emit_progress(app, "verifying", "");
         let runtime_dir = self.runtime_dir_path()?;
+        let platform = runtime_platform();
         std::fs::create_dir_all(&runtime_dir)
             .map_err(|e| format!("Failed to create runtime directory: {}", e))?;
         std::fs::create_dir_all(self.lit_home_dir_path()?)
             .map_err(|e| format!("Failed to create LiteRT home directory: {}", e))?;
-        validate_bundled_python_asset_paths(
-            BUNDLED_PYTHON_WHEEL_RESOURCE_PATH,
-            BUNDLED_PYTHON_WORKER_RESOURCE_PATH,
-        )?;
 
         let lit_source_path = self.bundled_runtime_source_path()?;
         let python_wheel_source_path = self.bundled_python_wheel_source_path()?;
@@ -1048,7 +1062,12 @@ impl SidecarManager {
                 .map_err(|e| format!("Failed to finalize LiteRT-LM runtime install: {}", e))?;
         }
 
-        ensure_embedded_python_runtime(&self.app_data_dir()?, &self.resource_dir_path()?)?;
+        ensure_embedded_python_runtime(
+            &self.app_data_dir()?,
+            &self.resource_dir_path()?,
+            &platform.runtime_version,
+            &platform.python_runtime_archive.relative_resource_path,
+        )?;
         install_python_worker_launcher(
             &self.python_binary_path()?,
             &self.python_worker_binary_path()?,
@@ -1057,11 +1076,8 @@ impl SidecarManager {
         let wheelhouse_dir = self.python_wheelhouse_dir_path()?;
         std::fs::create_dir_all(&wheelhouse_dir)
             .map_err(|e| format!("Failed to create Python wheelhouse directory: {}", e))?;
-        let wheel_target_path = wheelhouse_dir.join(
-            python_wheel_source_path
-                .file_name()
-                .ok_or_else(|| "Bundled Python wheel is missing a file name.".to_string())?,
-        );
+        let wheel_target_path =
+            wheelhouse_dir.join(platform.python_wheel.file_name("LiteRT Python wheel")?);
         let wheel_changed =
             sync_file_if_changed(&python_wheel_source_path, &wheel_target_path, false)?;
         let python_site_packages = self.python_site_packages_path()?;
@@ -1247,7 +1263,7 @@ impl SidecarManager {
     fn spawn_model_download_progress_monitor(
         &self,
         app: tauri::AppHandle,
-        model: &'static ModelInfo,
+        model: &RuntimeModelSpec,
         stop_flag: Arc<AtomicBool>,
     ) -> Option<tauri::async_runtime::JoinHandle<()>> {
         let model_path = self.model_storage_path(model).ok()?;
@@ -1326,8 +1342,9 @@ async fn read_process_stream<R>(
 
 fn append_limited(target: &mut String, chunk: &str) {
     target.push_str(chunk);
-    if target.len() > PROCESS_OUTPUT_TAIL_LIMIT {
-        let overflow = target.len() - PROCESS_OUTPUT_TAIL_LIMIT;
+    let limit = runtime_policy().process_output_tail_limit_bytes;
+    if target.len() > limit {
+        let overflow = target.len() - limit;
         target.drain(..overflow);
     }
 }
@@ -1463,19 +1480,9 @@ fn unavailable_status(state: &str, message: impl AsRef<str>) -> BackendStatus {
     }
 }
 
-fn validate_bundled_python_asset_paths(wheel_path: &str, worker_path: &str) -> Result<(), String> {
-    if wheel_path.trim().is_empty() || worker_path.trim().is_empty() {
-        return Err(
-            "Friday currently bundles its managed LiteRT Python worker only for macOS Apple Silicon. Build on macOS arm64 or vendor per-platform Python assets before enabling this target."
-                .to_string(),
-        );
-    }
-
-    Ok(())
-}
-
 fn active_uses_idle(active_uses: usize, last_activity: Instant, now: Instant) -> bool {
-    active_uses == 0 && now.saturating_duration_since(last_activity) >= DAEMON_IDLE_TIMEOUT
+    active_uses == 0
+        && now.saturating_duration_since(last_activity) >= runtime_policy().daemon_idle_timeout()
 }
 
 fn normalize_incomplete_download_percentage(percentage: u64) -> u64 {
@@ -1604,7 +1611,7 @@ pub async fn pull_model(
     let model = manager.model_for_request(model_id.as_deref())?;
     manager.ensure_model_ram_supported(model)?;
     manager.download_model(&app, model).await?;
-    Ok(format!("{} downloaded", model.display_name))
+    Ok(format!("{} downloaded", model.display_name.as_str()))
 }
 
 #[tauri::command]
@@ -1645,12 +1652,12 @@ pub async fn get_system_info(manager: State<'_, SidecarManager>) -> Result<Syste
 
 #[tauri::command]
 pub fn list_models() -> Vec<ModelInfo> {
-    MODELS.to_vec()
+    runtime_models().iter().map(model_info).collect()
 }
 
 #[tauri::command]
 pub fn get_active_model(manager: State<'_, SidecarManager>) -> ModelInfo {
-    manager.active_model().clone()
+    model_info(manager.active_model())
 }
 
 #[tauri::command]
@@ -1670,7 +1677,7 @@ pub async fn select_model(
     if !manager.has_model_for(model) {
         return Err(format!(
             "{} is not downloaded yet. Download it before switching.",
-            model.display_name
+            model.display_name.as_str()
         ));
     }
 
@@ -1683,7 +1690,7 @@ pub async fn select_model(
     }
 
     let _ = manager.cancel_inference().await;
-    Ok(model.clone())
+    Ok(model_info(model))
 }
 
 #[tauri::command]
@@ -1696,9 +1703,13 @@ pub async fn warm_backend(manager: State<'_, SidecarManager>) -> Result<BackendS
 mod tests {
     use super::*;
 
+    fn manifest_model(id: &str) -> &'static RuntimeModelSpec {
+        find_model(id).expect("manifest model")
+    }
+
     #[test]
-    fn model_constants_are_consistent() {
-        for model in MODELS {
+    fn manifest_model_metadata_is_consistent() {
+        for model in runtime_models() {
             assert!(model.filename.ends_with(".litertlm"));
             assert!(!model.repo.is_empty());
             assert!(model.size_bytes > 0);
@@ -1722,12 +1733,14 @@ mod tests {
     }
 
     #[test]
-    fn bundled_python_assets_must_all_be_present() {
-        assert!(validate_bundled_python_asset_paths("wheel.whl", "worker.py").is_ok());
-
-        let error = validate_bundled_python_asset_paths("", "worker.py")
-            .expect_err("missing asset paths should fail");
-        assert!(error.contains("macOS Apple Silicon"));
+    fn runtime_platform_assets_resolve_from_manifest() {
+        let platform = runtime_platform();
+        assert_eq!(platform.runtime_version, "0.10.1");
+        assert_eq!(platform.python_worker_binary_name, "friday-worker");
+        assert_eq!(
+            platform.worker_script.relative_resource_path,
+            "litert-python/macos-aarch64/worker/friday_litert_worker.py"
+        );
     }
 
     #[test]
@@ -1754,7 +1767,8 @@ mod tests {
             state: "ready".to_string(),
             message: format!(
                 "LiteRT-LM {} with {} is ready to start.",
-                LITERT_LM_VERSION, model.display_name
+                runtime_version(),
+                model.display_name.as_str()
             ),
             supports_native_tools: features.supports_native_tools,
             supports_audio_input: features.supports_audio_input,
@@ -1781,9 +1795,10 @@ mod tests {
 
     #[test]
     fn ram_support_error_reports_insufficient_memory() {
-        let error = ram_support_error(&MODELS[1], 4.0).expect("ram check should fail");
+        let error = ram_support_error(manifest_model("gemma-4-e4b-it"), 4.0)
+            .expect("ram check should fail");
         assert!(error.contains("Not enough RAM"));
-        assert!(ram_support_error(&MODELS[0], 8.0).is_none());
+        assert!(ram_support_error(manifest_model("gemma-4-e2b-it"), 8.0).is_none());
     }
 
     #[test]
@@ -1853,20 +1868,21 @@ mod tests {
     #[test]
     fn idle_shutdown_requires_timeout_and_no_active_use() {
         let last_activity = Instant::now();
+        let idle_timeout = runtime_policy().daemon_idle_timeout();
         assert!(!active_uses_idle(
             0,
             last_activity,
-            last_activity + Duration::from_secs(599),
+            last_activity + idle_timeout - Duration::from_secs(1),
         ));
         assert!(active_uses_idle(
             0,
             last_activity,
-            last_activity + Duration::from_secs(600),
+            last_activity + idle_timeout,
         ));
         assert!(!active_uses_idle(
             1,
             last_activity,
-            last_activity + Duration::from_secs(600),
+            last_activity + idle_timeout,
         ));
     }
 
@@ -1892,7 +1908,7 @@ mod tests {
                 .expect("set python binary permissions");
         }
 
-        let launcher_path = python_dir.join(PYTHON_WORKER_BINARY_NAME);
+        let launcher_path = python_dir.join(python_worker_binary_name());
         install_python_worker_launcher(&python_binary, &launcher_path).expect("install launcher");
 
         assert!(launcher_path.exists());

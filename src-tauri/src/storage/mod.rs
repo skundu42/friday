@@ -22,10 +22,6 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
     conn.execute_batch(include_str!("../../migrations/001_initial.sql"))
         .map_err(|e| format!("Migration 001 failed: {}", e))?;
 
-    // Migration 002: RAG tables
-    conn.execute_batch(include_str!("../../migrations/002_rag.sql"))
-        .map_err(|e| format!("Migration 002 failed: {}", e))?;
-
     // Migration 003: Persist structured message content for multimodal rebuilds.
     match conn.execute_batch(include_str!(
         "../../migrations/003_message_content_parts.sql"
@@ -37,6 +33,10 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
                 .contains("duplicate column name: content_parts") => {}
         Err(err) => return Err(format!("Migration 003 failed: {}", err)),
     }
+
+    // Migration 004: Knowledge sources and legacy knowledge-store cleanup.
+    conn.execute_batch(include_str!("../../migrations/004_knowledge.sql"))
+        .map_err(|e| format!("Migration 004 failed: {}", e))?;
 
     tracing::info!("Database migrations applied successfully");
     Ok(())
@@ -114,6 +114,9 @@ mod tests {
         assert!(tables.contains(&"audit_log".to_string()));
         assert!(tables.contains(&"workspace_memory".to_string()));
         assert!(tables.contains(&"settings".to_string()));
+        assert!(tables.contains(&"knowledge_sources".to_string()));
+        assert!(!tables.contains(&"rag_documents".to_string()));
+        assert!(!tables.contains(&"rag_chunks".to_string()));
     }
 
     #[test]

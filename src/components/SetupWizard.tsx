@@ -4,9 +4,7 @@ import {
   Card,
   Input,
   Progress,
-  Result,
   Space,
-  Steps,
   Typography,
 } from "antd";
 import {
@@ -175,11 +173,7 @@ export default function SetupWizard({
   }, []);
 
   const startAssistantWarmup = () => {
-    if (
-      !settings.auto_start_backend ||
-      !setupStatus?.readyToChat ||
-      warmupPromiseRef.current
-    ) {
+    if (!setupStatus?.readyToChat || warmupPromiseRef.current) {
       return warmupPromiseRef.current;
     }
 
@@ -198,11 +192,11 @@ export default function SetupWizard({
   };
 
   useEffect(() => {
-    if (!setupStatus?.readyToChat || !settings.auto_start_backend) {
+    if (!setupStatus?.readyToChat) {
       return;
     }
     void startAssistantWarmup();
-  }, [settings.auto_start_backend, setupStatus?.readyToChat]);
+  }, [setupStatus?.readyToChat]);
 
   useEffect(() => {
     let unlisten: UnlistenFn | undefined;
@@ -291,6 +285,7 @@ export default function SetupWizard({
       await onSaveSettings({
         auto_start_backend: settings.auto_start_backend,
         user_display_name: normalizedName,
+        theme_mode: settings.theme_mode,
         chat: settings.chat,
       });
       setCurrentStepKey(requiresModelSetup ? "system" : "ready");
@@ -322,42 +317,32 @@ export default function SetupWizard({
         return { title: "Ready", icon: <RocketOutlined /> };
     }
   });
-  const stepRailMinWidth = Math.max(stepItems.length * 120, 480);
-
   const renderWelcome = () => (
-    <div style={{ textAlign: "center", maxWidth: 480, margin: "0 auto" }}>
-      <div style={{ display: "flex", justifyContent: "center", marginBottom: 24 }}>
+    <div className="setup-stage__inner">
+      <div className="setup-hero-logo">
         <AppLogo
           size={120}
-          borderColor="#52C41A"
-          borderWidth={3}
-          background="#F6FFED"
+          borderColor="rgba(47, 143, 87, 0.18)"
+          borderWidth={1}
+          background="var(--friday-green-soft)"
           padding={10}
+          imageOffsetY={2}
         />
       </div>
-      <Title level={2} style={{ marginBottom: 8 }}>
+      <Title level={2} style={{ textAlign: "center", marginBottom: 8 }}>
         Welcome to Friday
       </Title>
       <Paragraph
         type="secondary"
-        style={{ fontSize: 16, lineHeight: 1.7, marginBottom: 32 }}
+        style={{ fontSize: 16, lineHeight: 1.7, marginBottom: 28, textAlign: "center" }}
       >
         Your private AI assistant that runs <strong>on this device</strong> by
         default. Setup installs the local runtime and downloads your chosen
         model once.
       </Paragraph>
       {requiresModelSetup ? (
-        <div
-          style={{
-            background: "#FFF7E6",
-            border: "2px solid #FFD666",
-            borderRadius: 12,
-            padding: "16px 20px",
-            marginBottom: 32,
-            textAlign: "left",
-          }}
-        >
-          <Text strong style={{ color: "#AD6800" }}>
+        <div className="setup-notice">
+          <Text strong style={{ color: "var(--friday-warning)" }}>
             One-time setup
           </Text>
           <br />
@@ -369,32 +354,26 @@ export default function SetupWizard({
           </Text>
         </div>
       ) : null}
-      <Button
-        type="primary"
-        size="large"
-        block
-        style={{
-          height: 56,
-          fontSize: 18,
-          fontWeight: 600,
-          borderRadius: 12,
-          background: "#52C41A",
-          border: "3px solid #2C2C2C",
-          boxShadow: "4px 4px 0px #2C2C2C",
-        }}
-        onClick={() =>
-          setCurrentStepKey(
-            needsDisplayName ? "name" : requiresModelSetup ? "system" : "ready",
-          )
-        }
-      >
-        Let&apos;s Get Started →
-      </Button>
+      <div className="setup-stage__actions">
+        <Button
+          type="primary"
+          size="large"
+          block
+          className="primary-action"
+          onClick={() =>
+            setCurrentStepKey(
+              needsDisplayName ? "name" : requiresModelSetup ? "system" : "ready",
+            )
+          }
+        >
+          Let&apos;s Get Started
+        </Button>
+      </div>
     </div>
   );
 
   const renderDisplayName = () => (
-    <div style={{ maxWidth: 480, margin: "0 auto" }}>
+    <div className="setup-stage__inner">
       <Title level={3} style={{ textAlign: "center", marginBottom: 8 }}>
         What Should Friday Call You?
       </Title>
@@ -405,12 +384,8 @@ export default function SetupWizard({
         Friday uses this in the app greeting and empty chat state.
       </Paragraph>
       <Card
-        style={{
-          border: "3px solid #2C2C2C",
-          borderRadius: 12,
-          boxShadow: "4px 4px 0px #2C2C2C",
-          marginBottom: 20,
-        }}
+        className="setup-form-card"
+        style={{ marginBottom: 20 }}
       >
         <Text strong style={{ display: "block", marginBottom: 8 }}>
           Your name
@@ -434,24 +409,18 @@ export default function SetupWizard({
             "This is only used for Friday's greeting inside the app."}
         </Text>
       </Card>
-      <Button
-        type="primary"
-        size="large"
-        block
-        loading={isSavingName}
-        style={{
-          height: 52,
-          fontSize: 16,
-          fontWeight: 600,
-          borderRadius: 12,
-          background: "#52C41A",
-          border: "3px solid #2C2C2C",
-          boxShadow: "4px 4px 0px #2C2C2C",
-        }}
-        onClick={() => void saveDisplayName()}
-      >
-        Continue →
-      </Button>
+      <div className="setup-stage__actions">
+        <Button
+          type="primary"
+          size="large"
+          block
+          loading={isSavingName}
+          className="primary-action"
+          onClick={() => void saveDisplayName()}
+        >
+          Continue
+        </Button>
+      </div>
     </div>
   );
 
@@ -488,22 +457,16 @@ export default function SetupWizard({
     const allPassed = checks.every((check) => check.pass);
 
     return (
-      <div style={{ maxWidth: 480, margin: "0 auto" }}>
+      <div className="setup-stage__inner">
         <Title level={3} style={{ textAlign: "center", marginBottom: 24 }}>
           System Check
         </Title>
-        <Space direction="vertical" style={{ width: "100%" }} size={16}>
+        <div className="setup-check-list">
           {checks.map((check) => (
             <Card
               key={check.label}
               size="small"
-              style={{
-                border: `3px solid ${check.pass ? "#52C41A" : "#FF4D4F"}`,
-                borderRadius: 12,
-                boxShadow: check.pass
-                  ? "3px 3px 0px #52C41A33"
-                  : "3px 3px 0px #FF4D4F33",
-              }}
+              className={`setup-check-card ${check.pass ? "is-pass" : "is-fail"}`}
             >
               <div
                 style={{
@@ -525,42 +488,35 @@ export default function SetupWizard({
                   <Text strong>{check.value}</Text>
                   {check.pass ? (
                     <CheckCircleFilled
-                      style={{ color: "#52C41A", fontSize: 20 }}
+                      style={{ color: "var(--friday-green)", fontSize: 20 }}
                     />
                   ) : (
                     <CloseCircleFilled
-                      style={{ color: "#FF4D4F", fontSize: 20 }}
+                      style={{ color: "var(--friday-danger)", fontSize: 20 }}
                     />
                   )}
                 </div>
               </div>
             </Card>
           ))}
-        </Space>
-        <Button
-          type="primary"
-          size="large"
-          block
-          disabled={!allPassed}
-          style={{
-            height: 52,
-            fontSize: 16,
-            fontWeight: 600,
-            borderRadius: 12,
-            marginTop: 28,
-            background: "#52C41A",
-            border: "3px solid #2C2C2C",
-            boxShadow: "4px 4px 0px #2C2C2C",
-          }}
-          onClick={() => {
-            setCurrentStepKey("download");
-            void startDownload();
-          }}
-        >
-          {allPassed
-            ? "Looks Good — Download Model →"
-            : "System Requirements Not Met"}
-        </Button>
+        </div>
+        <div className="setup-stage__actions">
+          <Button
+            type="primary"
+            size="large"
+            block
+            disabled={!allPassed}
+            className="primary-action"
+            onClick={() => {
+              setCurrentStepKey("download");
+              void startDownload();
+            }}
+          >
+            {allPassed
+              ? "Looks Good — Download Model"
+              : "System Requirements Not Met"}
+          </Button>
+        </div>
       </div>
     );
   };
@@ -573,7 +529,7 @@ export default function SetupWizard({
     const hasConcreteProgress = hasConcreteDownloadProgress(progress);
 
     return (
-      <div style={{ maxWidth: 480, margin: "0 auto" }}>
+      <div className="setup-stage__inner">
         <Title level={3} style={{ textAlign: "center", marginBottom: 8 }}>
           {isComplete
               ? "Setup Complete!"
@@ -594,14 +550,7 @@ export default function SetupWizard({
                 : "This usually takes a few minutes, depending on your connection."}
         </Paragraph>
 
-        <Card
-          style={{
-            border: "3px solid #2C2C2C",
-            borderRadius: 12,
-            boxShadow: "4px 4px 0px #2C2C2C",
-            marginBottom: 20,
-          }}
-        >
+        <Card className="setup-progress-card" style={{ marginBottom: 20 }}>
           {hasConcreteProgress ? (
             <>
               <Progress
@@ -610,37 +559,30 @@ export default function SetupWizard({
                   downloadError ? "exception" : isComplete ? "success" : "active"
                 }
                 strokeColor={{
-                  "0%": "#52C41A",
-                  "100%": "#73D13D",
+                  "0%": "var(--friday-green)",
+                  "100%": "var(--friday-green-strong)",
                 }}
-                trailColor="#F0F0F0"
+                trailColor="var(--friday-surface-muted)"
                 size={["100%", 20]}
                 style={{ marginBottom: 16 }}
               />
 
-              <div
-                style={{
-                  display: "grid",
-                  gridTemplateColumns: "1fr 1fr 1fr",
-                  gap: 12,
-                  textAlign: "center",
-                }}
-              >
-                <div>
+              <div className="setup-progress-grid">
+                <div className="setup-progress-stat">
                   <Text type="secondary" style={{ fontSize: 11 }}>
                     Downloaded
                   </Text>
                   <br />
                   <Text strong>{formatBytes(progress?.downloadedBytes ?? 0)}</Text>
                 </div>
-                <div>
+                <div className="setup-progress-stat">
                   <Text type="secondary" style={{ fontSize: 11 }}>
                     Speed
                   </Text>
                   <br />
                   <Text strong>{formatSpeed(progress?.speedBps ?? 0)}</Text>
                 </div>
-                <div>
+                <div className="setup-progress-stat">
                   <Text type="secondary" style={{ fontSize: 11 }}>
                     ETA
                   </Text>
@@ -653,7 +595,7 @@ export default function SetupWizard({
             <div style={{ textAlign: "center", padding: "12px 0 4px" }}>
               <CloudDownloadOutlined
                 spin
-                style={{ fontSize: 28, color: "#52C41A", marginBottom: 12 }}
+                style={{ fontSize: 28, color: "var(--friday-green)", marginBottom: 12 }}
               />
               <div>
                 <Text strong>
@@ -672,16 +614,8 @@ export default function SetupWizard({
         {(setupStatus?.partialDownloadBytes ?? 0) > 0 &&
         !isDownloading &&
         !downloadError ? (
-          <div
-            style={{
-              background: "#E6F7FF",
-              border: "2px solid #91D5FF",
-              borderRadius: 8,
-              padding: "10px 14px",
-              marginBottom: 16,
-            }}
-          >
-            <Text style={{ color: "#0050B3", fontSize: 13 }}>
+          <div className="setup-inline-message setup-inline-message--info">
+            <Text style={{ color: "var(--friday-info)", fontSize: 13 }}>
               Resuming from {formatBytes(setupStatus?.partialDownloadBytes ?? 0)}{" "}
               already downloaded
             </Text>
@@ -689,16 +623,8 @@ export default function SetupWizard({
         ) : null}
 
         {downloadError ? (
-          <div
-            style={{
-              background: "#FFF2F0",
-              border: "2px solid #FFCCC7",
-              borderRadius: 8,
-              padding: "10px 14px",
-              marginBottom: 16,
-            }}
-          >
-            <Text style={{ color: "#CF1322", fontSize: 13 }}>
+          <div className="setup-inline-message setup-inline-message--error">
+            <Text style={{ color: "var(--friday-danger)", fontSize: 13 }}>
               {downloadError}
             </Text>
           </div>
@@ -708,12 +634,8 @@ export default function SetupWizard({
           <Button
             size="large"
             block
-            style={{
-              height: 48,
-              borderRadius: 12,
-              border: "3px solid #2C2C2C",
-              fontWeight: 600,
-            }}
+            className="secondary-action"
+            style={{ height: 48 }}
             onClick={() => {
               setDownloadError(null);
               void startDownload();
@@ -727,46 +649,40 @@ export default function SetupWizard({
   };
 
   const renderReady = () => (
-    <Result
-      icon={<span style={{ fontSize: 72 }}>🎉</span>}
-      title={
-        <Title level={2}>
+    <div className="setup-stage__inner">
+      <div className="setup-ready-card">
+        <AppLogo
+          size={108}
+          borderColor="rgba(47, 143, 87, 0.18)"
+          borderWidth={1}
+          background="var(--friday-green-soft)"
+          padding={10}
+          imageOffsetY={2}
+        />
+        <Title level={2} className="setup-ready-card__title">
           {(settings.user_display_name.trim() || displayName.trim())
             ? `You're All Set, ${(settings.user_display_name.trim() || displayName.trim())}!`
             : "You're All Set!"}
         </Title>
-      }
-      subTitle={
-        <Paragraph style={{ fontSize: 16, maxWidth: 400, margin: "0 auto" }}>
+        <Paragraph className="setup-ready-card__body">
           <strong>{setupStatus?.modelDisplayName ?? "Your local model"}</strong>{" "}
           is ready. Friday now runs on-device by default and keeps your chats on
           this machine.
         </Paragraph>
-      }
-      extra={
         <Button
           type="primary"
           size="large"
           loading={isLaunchingAssistant}
-          style={{
-            height: 56,
-            fontSize: 18,
-            fontWeight: 600,
-            borderRadius: 12,
-            background: "#52C41A",
-            border: "3px solid #2C2C2C",
-            boxShadow: "4px 4px 0px #2C2C2C",
-            minWidth: 240,
-          }}
+          className="primary-action"
+          style={{ minWidth: 240 }}
           onClick={() => {
             void handleComplete();
           }}
         >
           <RocketOutlined /> Start Chatting
         </Button>
-      }
-      style={{ padding: "40px 0" }}
-    />
+      </div>
+    </div>
   );
 
   const renderStep = () => {
@@ -787,43 +703,46 @@ export default function SetupWizard({
   };
 
   return (
-    <div
-      style={{
-        height: "100vh",
-        background: "#FFF9F0",
-        display: "flex",
-        flexDirection: "column",
-        alignItems: "center",
-        justifyContent: "center",
-        padding: 40,
-      }}
-    >
-      <div style={{ width: "100%", maxWidth: 720, marginBottom: 48 }}>
-        <div style={{ overflowX: "auto", paddingBottom: 8 }}>
-          <div style={{ minWidth: stepRailMinWidth, paddingInline: 8 }}>
-            <Steps
-              current={currentStep}
-              items={stepItems}
-              size="small"
-              responsive={false}
-            />
+    <div className="setup-shell">
+      <div className="setup-panel">
+        <div className="setup-rail surface-card">
+          <div className="setup-rail__brand">
+            <AppLogo size={54} />
+            <div>
+              <Title level={4} className="setup-rail__title">
+                Friday
+              </Title>
+              <Paragraph className="setup-rail__body">
+                Private local AI setup with one guided flow.
+              </Paragraph>
+            </div>
           </div>
+
+          <div className="setup-step-list">
+            {stepItems.map((item, index) => {
+              const stateClass =
+                index === currentStep
+                  ? " is-current"
+                  : index < currentStep
+                    ? " is-complete"
+                    : "";
+
+              return (
+                <div key={item.title} className={`setup-step${stateClass}`}>
+                  <span className="setup-step__icon">{item.icon}</span>
+                  <div>
+                    <Text strong>{item.title}</Text>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          <Text className="setup-rail__footer">Friday v0.1.0</Text>
         </div>
+
+        <div className="setup-stage surface-card">{renderStep()}</div>
       </div>
-
-      <div style={{ width: "100%", maxWidth: 520 }}>{renderStep()}</div>
-
-      <Text
-        type="secondary"
-        style={{
-          position: "fixed",
-          bottom: 20,
-          fontSize: 12,
-          opacity: 0.5,
-        }}
-      >
-        Friday v0.1.0
-      </Text>
     </div>
   );
 }

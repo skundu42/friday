@@ -8,12 +8,14 @@ pub const DEFAULT_MAX_TOKENS: u32 = 4096;
 pub const HIGH_RAM_DEFAULT_MAX_TOKENS: u32 = 16384;
 pub const MIN_MAX_TOKENS: u32 = 1024;
 pub const MAX_MAX_TOKENS: u32 = 131072;
+const DEFAULT_THEME_MODE: &str = "light";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct AppSettings {
     pub auto_start_backend: bool,
     pub user_display_name: String,
+    pub theme_mode: String,
     pub chat: ChatSettings,
 }
 
@@ -23,6 +25,7 @@ pub struct ChatSettings {
     pub reply_language: String,
     pub max_tokens: u32,
     pub web_assist_enabled: bool,
+    pub knowledge_enabled: bool,
     pub generation: GenerationSettings,
 }
 
@@ -31,6 +34,7 @@ pub struct ChatSettings {
 pub struct AppSettingsInput {
     pub auto_start_backend: bool,
     pub user_display_name: String,
+    pub theme_mode: String,
     pub chat: ChatSettingsInput,
 }
 
@@ -40,6 +44,7 @@ pub struct ChatSettingsInput {
     pub reply_language: String,
     pub max_tokens: u32,
     pub web_assist_enabled: bool,
+    pub knowledge_enabled: bool,
     pub generation: GenerationSettingsInput,
 }
 
@@ -72,6 +77,7 @@ pub struct GenerationRequestConfig {
 struct StoredAppSettings {
     auto_start_backend: bool,
     user_display_name: String,
+    theme_mode: String,
     chat: StoredChatSettings,
 }
 
@@ -81,6 +87,7 @@ struct StoredChatSettings {
     reply_language: String,
     max_tokens: u32,
     web_assist_enabled: bool,
+    knowledge_enabled: bool,
     generation: StoredGenerationSettings,
 }
 
@@ -97,6 +104,7 @@ impl Default for AppSettings {
         Self {
             auto_start_backend: true,
             user_display_name: String::new(),
+            theme_mode: DEFAULT_THEME_MODE.to_string(),
             chat: ChatSettings::default(),
         }
     }
@@ -108,6 +116,7 @@ impl Default for ChatSettings {
             reply_language: "english".to_string(),
             max_tokens: DEFAULT_MAX_TOKENS,
             web_assist_enabled: false,
+            knowledge_enabled: false,
             generation: GenerationSettings::default(),
         }
     }
@@ -118,6 +127,7 @@ impl Default for AppSettingsInput {
         Self {
             auto_start_backend: true,
             user_display_name: String::new(),
+            theme_mode: DEFAULT_THEME_MODE.to_string(),
             chat: ChatSettingsInput::default(),
         }
     }
@@ -129,6 +139,7 @@ impl Default for ChatSettingsInput {
             reply_language: "english".to_string(),
             max_tokens: DEFAULT_MAX_TOKENS,
             web_assist_enabled: false,
+            knowledge_enabled: false,
             generation: GenerationSettingsInput::default(),
         }
     }
@@ -139,6 +150,7 @@ impl Default for StoredAppSettings {
         Self {
             auto_start_backend: true,
             user_display_name: String::new(),
+            theme_mode: DEFAULT_THEME_MODE.to_string(),
             chat: StoredChatSettings::default(),
         }
     }
@@ -150,6 +162,7 @@ impl Default for StoredChatSettings {
             reply_language: "english".to_string(),
             max_tokens: DEFAULT_MAX_TOKENS,
             web_assist_enabled: false,
+            knowledge_enabled: false,
             generation: StoredGenerationSettings::default(),
         }
     }
@@ -158,12 +171,14 @@ impl Default for StoredChatSettings {
 impl From<StoredAppSettings> for AppSettings {
     fn from(value: StoredAppSettings) -> Self {
         Self {
-            auto_start_backend: value.auto_start_backend,
+            auto_start_backend: true,
             user_display_name: value.user_display_name,
+            theme_mode: value.theme_mode,
             chat: ChatSettings {
                 reply_language: value.chat.reply_language,
                 max_tokens: value.chat.max_tokens,
                 web_assist_enabled: value.chat.web_assist_enabled,
+                knowledge_enabled: value.chat.knowledge_enabled,
                 generation: GenerationSettings {
                     temperature: value.chat.generation.temperature,
                     top_p: value.chat.generation.top_p,
@@ -177,12 +192,14 @@ impl From<StoredAppSettings> for AppSettings {
 impl From<&AppSettingsInput> for StoredAppSettings {
     fn from(value: &AppSettingsInput) -> Self {
         Self {
-            auto_start_backend: value.auto_start_backend,
+            auto_start_backend: true,
             user_display_name: value.user_display_name.clone(),
+            theme_mode: value.theme_mode.clone(),
             chat: StoredChatSettings {
                 reply_language: value.chat.reply_language.clone(),
                 max_tokens: value.chat.max_tokens,
                 web_assist_enabled: value.chat.web_assist_enabled,
+                knowledge_enabled: value.chat.knowledge_enabled,
                 generation: StoredGenerationSettings {
                     temperature: value.chat.generation.temperature,
                     top_p: value.chat.generation.top_p,
@@ -248,6 +265,12 @@ fn validate_settings_input(input: &AppSettingsInput) -> Result<(), String> {
     if input.user_display_name.trim().len() > 60 {
         return Err("user_display_name must be 60 characters or fewer".to_string());
     }
+
+    let theme_mode = input.theme_mode.as_str();
+    if !matches!(theme_mode, "light" | "dark") {
+        return Err(format!("Unsupported theme mode: {}", theme_mode));
+    }
+
     Ok(())
 }
 
@@ -291,10 +314,12 @@ mod tests {
             &AppSettingsInput {
                 auto_start_backend: false,
                 user_display_name: "Asha".to_string(),
+                theme_mode: "dark".to_string(),
                 chat: ChatSettingsInput {
                     reply_language: "hindi".to_string(),
                     max_tokens: 6144,
                     web_assist_enabled: true,
+                    knowledge_enabled: true,
                     generation: GenerationSettingsInput {
                         temperature: Some(0.7),
                         top_p: Some(0.9),
@@ -305,11 +330,13 @@ mod tests {
         )
         .unwrap();
 
-        assert!(!saved.auto_start_backend);
+        assert!(saved.auto_start_backend);
         assert_eq!(saved.user_display_name, "Asha");
+        assert_eq!(saved.theme_mode, "dark");
         assert_eq!(saved.chat.reply_language, "hindi");
         assert_eq!(saved.chat.max_tokens, 6144);
         assert!(saved.chat.web_assist_enabled);
+        assert!(saved.chat.knowledge_enabled);
         assert_eq!(saved.chat.generation.temperature, Some(0.7));
         assert_eq!(saved.chat.generation.top_p, Some(0.9));
 
@@ -326,6 +353,7 @@ mod tests {
             &AppSettingsInput {
                 auto_start_backend: true,
                 user_display_name: String::new(),
+                theme_mode: DEFAULT_THEME_MODE.to_string(),
                 chat: ChatSettingsInput {
                     reply_language: "spanish".to_string(),
                     ..ChatSettingsInput::default()
@@ -346,6 +374,7 @@ mod tests {
             &AppSettingsInput {
                 auto_start_backend: true,
                 user_display_name: String::new(),
+                theme_mode: DEFAULT_THEME_MODE.to_string(),
                 chat: ChatSettingsInput {
                     max_tokens: MAX_MAX_TOKENS + 1,
                     ..ChatSettingsInput::default()
@@ -381,6 +410,7 @@ mod tests {
             reply_language: "english".to_string(),
             max_tokens: 8192,
             web_assist_enabled: false,
+            knowledge_enabled: true,
             generation: GenerationSettings {
                 temperature: Some(0.6),
                 top_p: Some(0.8),
@@ -405,6 +435,7 @@ mod tests {
             &AppSettingsInput {
                 auto_start_backend: true,
                 user_display_name: String::new(),
+                theme_mode: DEFAULT_THEME_MODE.to_string(),
                 chat: ChatSettingsInput {
                     generation: GenerationSettingsInput {
                         temperature: Some(2.1),
@@ -421,6 +452,7 @@ mod tests {
             &AppSettingsInput {
                 auto_start_backend: true,
                 user_display_name: String::new(),
+                theme_mode: DEFAULT_THEME_MODE.to_string(),
                 chat: ChatSettingsInput {
                     generation: GenerationSettingsInput {
                         top_p: Some(1.1),
@@ -445,11 +477,30 @@ mod tests {
             &AppSettingsInput {
                 auto_start_backend: true,
                 user_display_name: "a".repeat(61),
+                theme_mode: DEFAULT_THEME_MODE.to_string(),
                 chat: ChatSettingsInput::default(),
             },
         )
         .unwrap_err();
 
         assert!(error.contains("user_display_name"));
+    }
+
+    #[test]
+    fn save_settings_rejects_unknown_theme_mode() {
+        let conn = test_conn();
+
+        let error = save_settings(
+            &conn,
+            &AppSettingsInput {
+                auto_start_backend: true,
+                user_display_name: String::new(),
+                theme_mode: "system".to_string(),
+                chat: ChatSettingsInput::default(),
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.contains("Unsupported theme mode"));
     }
 }

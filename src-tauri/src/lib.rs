@@ -1,17 +1,20 @@
+mod knowledge;
 mod models;
 mod python_runtime;
-mod rag;
+mod runtime_manifest;
 mod searxng;
 mod session;
 mod settings;
 mod sidecar;
 mod storage;
 
+use knowledge::KnowledgeManager;
 use models::python_worker::StreamEvent;
 use searxng::SearXNGManager;
 use serde::{Deserialize, Serialize};
 use session::{Message, Session};
 use sidecar::SidecarManager;
+use std::collections::BTreeSet;
 use std::fs::OpenOptions;
 use std::io::{Cursor, Read, Write};
 use std::path::Path;
@@ -28,6 +31,7 @@ const MAX_PROMPT_HISTORY_CHARS: usize = 120_000;
 const MAX_PROMPT_HISTORY_QUERY_LIMIT: usize = 24;
 const MAX_ATTACHMENT_TEXT_CHARS_PER_FILE: usize = 40_000;
 const MAX_ATTACHMENT_TEXT_CHARS_TOTAL: usize = 80_000;
+const MAX_KNOWLEDGE_PROMPT_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
 const DEFAULT_SESSION_TITLE: &str = "New chat";
 const SESSION_TITLE_PREVIEW_CHARS: usize = 48;
 const MAIN_WINDOW_LABEL: &str = "main";
@@ -36,11 +40,10 @@ static OBSERVABILITY_INIT: OnceLock<Result<(), String>> = OnceLock::new();
 
 pub struct AppState {
     pub db: Mutex<Option<rusqlite::Connection>>,
+    pub db_path: Mutex<Option<std::path::PathBuf>>,
     pub current_session: Mutex<Option<String>>,
     pub active_generation_session: Mutex<Option<String>>,
     pub cancel_flag: AtomicBool,
-    // RAG remains ephemeral until Friday has a dedicated persisted RAG UI.
-    pub rag_enabled: AtomicBool,
     pub tools_enabled: AtomicBool,
 }
 
@@ -82,6 +85,7 @@ struct BootstrapPayload {
     settings: settings::AppSettings,
     backend_status: sidecar::BackendStatus,
     web_search_status: searxng::WebSearchStatus,
+    knowledge_status: knowledge::KnowledgeStatus,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -89,6 +93,292 @@ struct BootstrapPayload {
 struct SessionSelectionResult {
     session: Session,
     messages: Vec<Message>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct WebAssistTrace {
+    tools: Vec<WebAssistToolEvent>,
+}
+
+#[derive(Debug, Clone)]
+struct WebAssistToolEvent {
+    order: usize,
+    name: String,
+    args: serde_json::Value,
+    result: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct WebAssistLogRecord {
+    session_id: String,
+    status: String,
+    failure_stage: Option<String>,
+    failure_reason: Option<String>,
+    tool_order: Vec<String>,
+    tools: Vec<WebAssistToolLogSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct WebAssistToolLogSummary {
+    order: usize,
+    name: String,
+    query: Option<String>,
+    requested_query: Option<String>,
+    effective_query: Option<String>,
+    attempted_queries: Vec<String>,
+    url: Option<String>,
+    final_url: Option<String>,
+    domains: Vec<String>,
+    result_count: Option<usize>,
+    verification_outcome: Option<String>,
+    error: Option<String>,
+    local_datetime: Option<String>,
+}
+
+impl WebAssistTrace {
+    fn record_tool_call(&mut self, name: &str, args: serde_json::Value) {
+        if !tracked_web_assist_tool(name) {
+            return;
+        }
+
+        self.tools.push(WebAssistToolEvent {
+            order: self.tools.len() + 1,
+            name: name.to_string(),
+            args,
+            result: None,
+        });
+    }
+
+    fn record_tool_result(&mut self, name: &str, result: serde_json::Value) {
+        if !tracked_web_assist_tool(name) {
+            return;
+        }
+
+        if let Some(tool) = self
+            .tools
+            .iter_mut()
+            .rev()
+            .find(|tool| tool.name == name && tool.result.is_none())
+        {
+            tool.result = Some(result);
+            return;
+        }
+
+        self.tools.push(WebAssistToolEvent {
+            order: self.tools.len() + 1,
+            name: name.to_string(),
+            args: serde_json::Value::Null,
+            result: Some(result),
+        });
+    }
+
+    fn has_tracked_activity(&self) -> bool {
+        !self.tools.is_empty()
+    }
+}
+
+fn tracked_web_assist_tool(name: &str) -> bool {
+    matches!(name, "web_search" | "web_fetch" | "get_current_datetime")
+}
+
+fn json_string_field(value: &serde_json::Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(ToString::to_string)
+}
+
+fn json_string_list_field(value: &serde_json::Value, key: &str) -> Vec<String> {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(ToString::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn domain_from_url(url: &str) -> Option<String> {
+    let host = reqwest::Url::parse(url).ok()?.host_str()?.to_string();
+    Some(host.strip_prefix("www.").unwrap_or(&host).to_string())
+}
+
+fn domains_from_web_assist_tool(
+    tool: &WebAssistToolEvent,
+    result: Option<&serde_json::Value>,
+) -> Vec<String> {
+    let mut domains = BTreeSet::new();
+
+    if let Some(url) = json_string_field(&tool.args, "url") {
+        if let Some(domain) = domain_from_url(&url) {
+            domains.insert(domain);
+        }
+    }
+
+    if let Some(result) = result {
+        if let Some(url) = json_string_field(result, "url") {
+            if let Some(domain) = domain_from_url(&url) {
+                domains.insert(domain);
+            }
+        }
+
+        if let Some(results) = result.get("results").and_then(serde_json::Value::as_array) {
+            for item in results {
+                if let Some(url) = item.get("url").and_then(serde_json::Value::as_str) {
+                    if let Some(domain) = domain_from_url(url) {
+                        domains.insert(domain);
+                    }
+                }
+            }
+        }
+
+        if let Some(urls) = result
+            .get("recommended_fetch_urls")
+            .and_then(serde_json::Value::as_array)
+        {
+            for url in urls.iter().filter_map(serde_json::Value::as_str) {
+                if let Some(domain) = domain_from_url(url) {
+                    domains.insert(domain);
+                }
+            }
+        }
+    }
+
+    domains.into_iter().collect()
+}
+
+fn verification_outcome_for_tool(name: &str, result: Option<&serde_json::Value>) -> Option<String> {
+    let result = result?;
+    match name {
+        "get_current_datetime" => Some("resolved".to_string()),
+        "web_fetch" => Some(
+            if result.get("error").is_some() {
+                "failed"
+            } else {
+                "fetched"
+            }
+            .to_string(),
+        ),
+        "web_search" => {
+            let verified = result
+                .get("verification_pages")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|pages| {
+                    pages.iter().any(|page| {
+                        page.get("verified")
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(false)
+                    })
+                });
+            if verified {
+                Some("verified".to_string())
+            } else if result
+                .get("verification_failed")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                Some("failed".to_string())
+            } else if result
+                .get("do_not_answer_from_memory")
+                .and_then(serde_json::Value::as_bool)
+                == Some(false)
+            {
+                Some("not_required".to_string())
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+fn summarize_web_assist_tool(tool: &WebAssistToolEvent) -> WebAssistToolLogSummary {
+    let result = tool.result.as_ref();
+    let query = json_string_field(&tool.args, "query");
+    let url = json_string_field(&tool.args, "url");
+
+    WebAssistToolLogSummary {
+        order: tool.order,
+        name: tool.name.clone(),
+        query: query.clone(),
+        requested_query: result
+            .and_then(|value| json_string_field(value, "requested_query"))
+            .or(query.clone()),
+        effective_query: result
+            .and_then(|value| json_string_field(value, "effective_query"))
+            .or(query),
+        attempted_queries: result
+            .map(|value| json_string_list_field(value, "attempted_queries"))
+            .unwrap_or_default(),
+        url,
+        final_url: result.and_then(|value| json_string_field(value, "url")),
+        domains: domains_from_web_assist_tool(tool, result),
+        result_count: result
+            .and_then(|value| value.get("total"))
+            .and_then(serde_json::Value::as_u64)
+            .map(|value| value as usize),
+        verification_outcome: verification_outcome_for_tool(&tool.name, result),
+        error: result.and_then(|value| json_string_field(value, "error")),
+        local_datetime: result.and_then(|value| json_string_field(value, "local_datetime")),
+    }
+}
+
+fn build_web_assist_log_record(
+    session_id: &str,
+    status: &str,
+    trace: &WebAssistTrace,
+    failure_stage: Option<&str>,
+    failure_reason: Option<&str>,
+) -> WebAssistLogRecord {
+    WebAssistLogRecord {
+        session_id: session_id.to_string(),
+        status: status.to_string(),
+        failure_stage: failure_stage.map(ToString::to_string),
+        failure_reason: failure_reason.map(ToString::to_string),
+        tool_order: trace.tools.iter().map(|tool| tool.name.clone()).collect(),
+        tools: trace.tools.iter().map(summarize_web_assist_tool).collect(),
+    }
+}
+
+fn log_web_assist_turn(
+    session_id: &str,
+    status: &str,
+    trace: &WebAssistTrace,
+    failure_stage: Option<&str>,
+    failure_reason: Option<&str>,
+) {
+    let record =
+        build_web_assist_log_record(session_id, status, trace, failure_stage, failure_reason);
+    let payload = serde_json::to_string(&record).unwrap_or_else(|error| {
+        format!(
+            r#"{{"sessionId":"{}","status":"{}","serializationError":"{}"}}"#,
+            session_id, status, error
+        )
+    });
+
+    if status == "failed" {
+        tracing::warn!(
+            target: "web_assist",
+            session_id = %session_id,
+            failure_stage = %failure_stage.unwrap_or(""),
+            failure_reason = %failure_reason.unwrap_or(""),
+            payload = %payload,
+            "Web assist turn failed"
+        );
+    } else {
+        tracing::info!(
+            target: "web_assist",
+            session_id = %session_id,
+            payload = %payload,
+            "Web assist turn summary"
+        );
+    }
 }
 
 // Helper to run DB operations with a callback (avoids cloning Connection)
@@ -99,6 +389,15 @@ where
     let guard = state.db.lock().unwrap();
     let conn = guard.as_ref().ok_or("Database not initialized")?;
     f(conn)
+}
+
+fn current_db_path(state: &AppState) -> Result<std::path::PathBuf, String> {
+    state
+        .db_path
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| "Database path not initialized".to_string())
 }
 
 struct ActiveGenerationGuard<'a> {
@@ -136,6 +435,16 @@ fn acquire_generation_guard<'a>(
     drop(active);
 
     Ok(ActiveGenerationGuard { state })
+}
+
+fn prepare_session_for_generation<'a>(
+    state: &'a AppState,
+    session_id: &str,
+) -> Result<ActiveGenerationGuard<'a>, String> {
+    load_session_inner(state, session_id)?;
+    let guard = acquire_generation_guard(state, session_id)?;
+    set_current_session(state, Some(session_id.to_string()))?;
+    Ok(guard)
 }
 
 fn emit_chat_error(app: &tauri::AppHandle, session_id: Option<&str>, message: &str) {
@@ -364,12 +673,13 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(SidecarManager::new())
         .manage(SearXNGManager::new())
+        .manage(KnowledgeManager::new())
         .manage(AppState {
             db: Mutex::new(None),
+            db_path: Mutex::new(None),
             current_session: Mutex::new(None),
             active_generation_session: Mutex::new(None),
             cancel_flag: AtomicBool::new(false),
-            rag_enabled: AtomicBool::new(false),
             tools_enabled: AtomicBool::new(false),
         })
         .invoke_handler(tauri::generate_handler![
@@ -391,13 +701,12 @@ pub fn run() {
             bootstrap_app,
             load_settings,
             save_settings,
-            rag_ingest_file,
-            rag_ingest_folder,
-            rag_search,
-            rag_list_documents,
-            rag_delete_document,
-            rag_stats,
-            set_rag_enabled,
+            knowledge_ingest_file,
+            knowledge_ingest_url,
+            knowledge_list_sources,
+            knowledge_delete_source,
+            knowledge_stats,
+            get_knowledge_status,
             set_tools_enabled,
             sidecar::list_models,
             sidecar::list_downloaded_model_ids,
@@ -413,7 +722,7 @@ pub fn run() {
                 .map_err(|e| io_error(format!("Failed to resolve app data directory: {}", e)))?;
             let temp_dir = data_dir.join("temp");
             let models_dir = data_dir.join("models");
-            let rag_dir = data_dir.join("rag");
+            let knowledge_storage_dir = data_dir.join("rag");
             let lit_home_dir = data_dir.join("lit-home");
             let logs_dir = data_dir.join("logs");
 
@@ -421,7 +730,7 @@ pub fn run() {
                 &data_dir,
                 &temp_dir,
                 &models_dir,
-                &rag_dir,
+                &knowledge_storage_dir,
                 &lit_home_dir,
                 &logs_dir,
             ] {
@@ -446,6 +755,11 @@ pub fn run() {
                 sidecar.set_resource_dir(resource_dir);
             }
 
+            let knowledge: tauri::State<KnowledgeManager> = app.state();
+            knowledge
+                .set_root_dir(knowledge_storage_dir.clone())
+                .map_err(io_error)?;
+
             let searxng: tauri::State<SearXNGManager> = app.state();
             searxng.set_app_handle(app.handle().clone());
             searxng.set_app_data_dir(data_dir.clone());
@@ -462,6 +776,7 @@ pub fn run() {
             }
             let state: tauri::State<AppState> = app.state();
             *state.db.lock().unwrap() = Some(conn);
+            *state.db_path.lock().unwrap() = Some(db_path.clone());
             tracing::info!("Database initialized at {:?}", db_path);
 
             if let Err(error) =
@@ -495,14 +810,16 @@ async fn bootstrap_app(
     state: State<'_, AppState>,
     sidecar: State<'_, SidecarManager>,
     searxng: State<'_, SearXNGManager>,
+    knowledge: State<'_, KnowledgeManager>,
 ) -> Result<BootstrapPayload, String> {
-    bootstrap_payload_inner(&state, &sidecar, &searxng).await
+    bootstrap_payload_inner(&state, &sidecar, &searxng, &knowledge).await
 }
 
 async fn bootstrap_payload_inner(
     state: &AppState,
     sidecar: &SidecarManager,
     searxng: &SearXNGManager,
+    knowledge: &KnowledgeManager,
 ) -> Result<BootstrapPayload, String> {
     let settings = with_db(state, settings::load_settings)?;
     sidecar.set_max_tokens(settings.chat.max_tokens);
@@ -510,7 +827,7 @@ async fn bootstrap_payload_inner(
         .tools_enabled
         .store(settings.chat.web_assist_enabled, Ordering::SeqCst);
     let mut backend_status = sidecar.auto_detect().await;
-    if settings.auto_start_backend && !backend_status.connected && backend_status.state == "ready" {
+    if !backend_status.connected && backend_status.state == "ready" {
         match sidecar.ensure_daemon().await {
             Ok(()) => {
                 backend_status = sidecar.auto_detect().await;
@@ -533,6 +850,7 @@ async fn bootstrap_payload_inner(
         settings,
         backend_status,
         web_search_status,
+        knowledge_status: knowledge.status(),
     })
 }
 
@@ -958,6 +1276,7 @@ struct SendMessageRequest {
     attachments: Option<Vec<serde_json::Value>>,
     thinking_enabled: Option<bool>,
     web_assist_enabled: Option<bool>,
+    knowledge_enabled: Option<bool>,
 }
 
 #[tauri::command]
@@ -966,6 +1285,7 @@ async fn send_message(
     state: State<'_, AppState>,
     sidecar: State<'_, SidecarManager>,
     searxng: State<'_, SearXNGManager>,
+    knowledge: State<'_, KnowledgeManager>,
     request: SendMessageRequest,
 ) -> Result<(), String> {
     let SendMessageRequest {
@@ -974,6 +1294,7 @@ async fn send_message(
         attachments,
         thinking_enabled,
         web_assist_enabled,
+        knowledge_enabled,
     } = request;
 
     let session_id = match validate_requested_session_id(&requested_session_id) {
@@ -984,12 +1305,11 @@ async fn send_message(
         }
     };
 
-    load_session_inner(&state, &session_id)?;
-    set_current_session(&state, Some(session_id.clone()))?;
-    let _generation_guard = acquire_generation_guard(state.inner(), &session_id)?;
+    let _generation_guard = prepare_session_for_generation(state.inner(), &session_id)?;
     let _daemon_use = sidecar.begin_daemon_use();
 
     let app_settings = with_db(&state, settings::load_settings)?;
+    let db_path = current_db_path(&state)?;
     sidecar.set_max_tokens(app_settings.chat.max_tokens);
     let attachment_count = attachments.as_ref().map(Vec::len).unwrap_or(0);
 
@@ -1015,7 +1335,7 @@ async fn send_message(
         return Err(error);
     }
 
-    let model_name = sidecar.active_model().id;
+    let model_name = sidecar.active_model().id.clone();
     tracing::info!(
         "Message queued in session {} (chars={}, attachments={}, model={})",
         session_id,
@@ -1032,6 +1352,9 @@ async fn send_message(
         .or(app_settings.chat.generation.thinking_enabled)
         .unwrap_or(false);
     let tools_enabled = web_assist_enabled.unwrap_or(app_settings.chat.web_assist_enabled);
+    let mut web_assist_trace = tools_enabled.then(WebAssistTrace::default);
+    let effective_knowledge_enabled =
+        knowledge_enabled.unwrap_or(app_settings.chat.knowledge_enabled);
     let system_prompt = system_prompt_for_preferences(
         &app_settings.chat.reply_language,
         effective_thinking_enabled,
@@ -1041,10 +1364,12 @@ async fn send_message(
         trimmed_history.pop();
     }
     tracing::info!(
-        "Preparing prompt for session {} (lang={}, thinking={}, history_messages={})",
+        "Preparing prompt for session {} (lang={}, thinking={}, web={}, knowledge={}, history_messages={})",
         session_id,
         app_settings.chat.reply_language,
         effective_thinking_enabled,
+        tools_enabled,
+        effective_knowledge_enabled,
         trimmed_history.len()
     );
     let mut chat_messages: Vec<models::ChatMessage> =
@@ -1052,32 +1377,41 @@ async fn send_message(
     for msg in &trimmed_history {
         chat_messages.push(message_to_history_chat_message(msg)?);
     }
+    let knowledge_results = if effective_knowledge_enabled {
+        match knowledge::search(&knowledge, &db_path, &message).await {
+            Ok(results) => results,
+            Err(error) => {
+                tracing::warn!("Knowledge search failed: {}", error);
+                knowledge::KnowledgeSearchResults::default()
+            }
+        }
+    } else {
+        knowledge::KnowledgeSearchResults::default()
+    };
+    let prompt_message = augment_prompt_with_knowledge(prompt_message, &knowledge_results)?;
     chat_messages.push(prompt_message);
 
     // Reset cancel flag
     state.cancel_flag.store(false, Ordering::SeqCst);
 
-    // RAG search (if enabled)
-    let rag_context = if state.rag_enabled.load(Ordering::SeqCst) {
-        match with_db(&state, |conn| {
-            rag::search(conn, &message, 5).and_then(|resp| {
-                serde_json::to_value(resp)
-                    .map_err(|e| format!("Failed to serialize RAG response: {}", e))
-            })
-        }) {
-            Ok(resp) => Some(resp),
-            Err(e) => {
-                tracing::warn!("RAG search failed: {}", e);
-                None
-            }
-        }
-    } else {
-        None
-    };
-
     if tools_enabled {
         if let Err(error) = searxng.ensure_ready().await {
-            persist_and_emit_assistant_error(&app, &state, &session_id, &error, Some(model_name));
+            if let Some(trace) = web_assist_trace.as_ref() {
+                log_web_assist_turn(
+                    &session_id,
+                    "failed",
+                    trace,
+                    Some("ensure_ready"),
+                    Some(&error),
+                );
+            }
+            persist_and_emit_assistant_error(
+                &app,
+                &state,
+                &session_id,
+                &error,
+                Some(model_name.as_str()),
+            );
             return Err(error);
         }
     }
@@ -1091,13 +1425,27 @@ async fn send_message(
             &chat_messages,
             generation_config,
             tools_enabled,
-            rag_context,
         )
         .await
     {
         Ok(rx) => rx,
         Err(error) => {
-            persist_and_emit_assistant_error(&app, &state, &session_id, &error, Some(model_name));
+            if let Some(trace) = web_assist_trace.as_ref() {
+                log_web_assist_turn(
+                    &session_id,
+                    "failed",
+                    trace,
+                    Some("start_inference"),
+                    Some(&error),
+                );
+            }
+            persist_and_emit_assistant_error(
+                &app,
+                &state,
+                &session_id,
+                &error,
+                Some(model_name.as_str()),
+            );
             return Err(error);
         }
     };
@@ -1133,6 +1481,9 @@ async fn send_message(
                         );
                     }
                     Some(StreamEvent::ToolCall { name, args }) => {
+                        if let Some(trace) = web_assist_trace.as_mut() {
+                            trace.record_tool_call(&name, args.clone());
+                        }
                         let _ = app.emit("tool-call-start", serde_json::json!({
                             "sessionId": &session_id,
                             "name": name,
@@ -1140,6 +1491,9 @@ async fn send_message(
                         }));
                     }
                     Some(StreamEvent::ToolResult { name, result }) => {
+                        if let Some(trace) = web_assist_trace.as_mut() {
+                            trace.record_tool_result(&name, result.clone());
+                        }
                         let _ = app.emit("tool-call-result", serde_json::json!({
                             "sessionId": &session_id,
                             "name": name,
@@ -1155,7 +1509,19 @@ async fn send_message(
                         }
                         break;
                     }
-                    Some(StreamEvent::Done) | None => break,
+                    Some(StreamEvent::Done {
+                        final_text,
+                        final_thought,
+                    }) => {
+                        if let Some(final_text) = final_text {
+                            full_response = final_text;
+                        }
+                        if let Some(final_thought) = final_thought {
+                            full_thinking = final_thought;
+                        }
+                        break;
+                    }
+                    None => break,
                 }
             }
             _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {
@@ -1170,17 +1536,38 @@ async fn send_message(
     }
 
     if let Some(error) = stream_error {
-        persist_and_emit_assistant_error(&app, &state, &session_id, &error, Some(model_name));
+        if let Some(trace) = web_assist_trace.as_ref() {
+            let failure_stage = if trace.has_tracked_activity() {
+                "tool_phase"
+            } else {
+                "stream"
+            };
+            log_web_assist_turn(
+                &session_id,
+                "failed",
+                trace,
+                Some(failure_stage),
+                Some(&error),
+            );
+        }
+        persist_and_emit_assistant_error(
+            &app,
+            &state,
+            &session_id,
+            &error,
+            Some(model_name.as_str()),
+        );
         return Err(error);
     }
 
-    if !full_response.trim().is_empty() || !full_thinking.trim().is_empty() {
-        let assistant_parts = (!full_thinking.trim().is_empty()).then(|| {
-            serde_json::json!({
-                "thinking": full_thinking,
-            })
-        });
+    if let Some(trace) = web_assist_trace.as_ref() {
+        let status = if cancelled { "cancelled" } else { "completed" };
+        log_web_assist_turn(&session_id, status, trace, None, None);
+    }
 
+    let assistant_parts = build_assistant_content_parts(&full_thinking, &knowledge_results.citations);
+
+    if !full_response.trim().is_empty() || !full_thinking.trim().is_empty() {
         if let Err(error) = save_message_json_inner(
             &state,
             PersistMessageJson {
@@ -1188,7 +1575,7 @@ async fn send_message(
                 role: "assistant",
                 content: &full_response,
                 content_parts: assistant_parts.as_ref(),
-                model_used: Some(model_name),
+                model_used: Some(model_name.as_str()),
                 latency_ms: None,
                 title_source: None,
             },
@@ -1199,7 +1586,7 @@ async fn send_message(
                 &state,
                 &session_id,
                 &persisted_error,
-                Some(model_name),
+                Some(model_name.as_str()),
             );
             return Err(persisted_error);
         }
@@ -1209,13 +1596,133 @@ async fn send_message(
         "chat-done",
         serde_json::json!({
             "sessionId": &session_id,
-            "model": model_name,
+            "model": &model_name,
             "cancelled": cancelled,
             "hasContent": !full_response.trim().is_empty() || !full_thinking.trim().is_empty(),
+            "content": &full_response,
+            "contentParts": assistant_parts,
         }),
     );
 
     Ok(())
+}
+
+fn augment_prompt_with_knowledge(
+    prompt: models::ChatMessage,
+    knowledge_results: &knowledge::KnowledgeSearchResults,
+) -> Result<models::ChatMessage, String> {
+    let knowledge_text = knowledge::summarize_text_snippets(knowledge_results);
+    let knowledge_images = knowledge_results
+        .images
+        .iter()
+        .take(2)
+        .filter_map(|image| {
+            image_file_to_data_url(&image.asset_path, image.mime_type.as_deref())
+                .ok()
+                .map(|blob| models::ChatContentPart::Image { blob })
+        })
+        .collect::<Vec<_>>();
+    let knowledge_audio = knowledge::audio_prompt_asset(knowledge_results).map(|audio| {
+        models::ChatContentPart::Audio {
+            path: audio.asset_path.to_string_lossy().to_string(),
+        }
+    });
+
+    if knowledge_text.is_none() && knowledge_images.is_empty() && knowledge_audio.is_none() {
+        return Ok(prompt);
+    }
+
+    let mut prefixed_parts = Vec::new();
+    if let Some(text) = knowledge_text {
+        prefixed_parts.push(models::ChatContentPart::Text { text });
+    }
+    prefixed_parts.extend(knowledge_images);
+    if let Some(audio_part) = knowledge_audio {
+        prefixed_parts.push(audio_part);
+    }
+
+    match prompt.content {
+        models::ChatContent::Text(text) => {
+            prefixed_parts.push(models::ChatContentPart::Text { text });
+            Ok(models::ChatMessage {
+                role: prompt.role,
+                content: models::ChatContent::Parts(prefixed_parts),
+            })
+        }
+        models::ChatContent::Parts(mut parts) => {
+            prefixed_parts.append(&mut parts);
+            Ok(models::ChatMessage {
+                role: prompt.role,
+                content: models::ChatContent::Parts(prefixed_parts),
+            })
+        }
+    }
+}
+
+fn build_assistant_content_parts(
+    thinking: &str,
+    citations: &[knowledge::KnowledgeCitation],
+) -> Option<serde_json::Value> {
+    if thinking.trim().is_empty() && citations.is_empty() {
+        return None;
+    }
+
+    let mut payload = serde_json::Map::new();
+    if !thinking.trim().is_empty() {
+        payload.insert(
+            "thinking".to_string(),
+            serde_json::Value::String(thinking.to_string()),
+        );
+    }
+    if !citations.is_empty() {
+        payload.insert(
+            "sources".to_string(),
+            serde_json::to_value(citations).unwrap_or_else(|_| serde_json::json!([])),
+        );
+    }
+    Some(serde_json::Value::Object(payload))
+}
+
+fn image_file_to_data_url(path: &Path, provided_mime: Option<&str>) -> Result<String, String> {
+    let size_bytes = std::fs::metadata(path)
+        .map_err(|e| {
+            format!(
+                "Failed to inspect Knowledge image {}: {}",
+                path.display(),
+                e
+            )
+        })?
+        .len();
+    if size_bytes > MAX_KNOWLEDGE_PROMPT_IMAGE_BYTES {
+        tracing::info!(
+            path = %path.display(),
+            size_bytes,
+            max_bytes = MAX_KNOWLEDGE_PROMPT_IMAGE_BYTES,
+            "Skipping oversized Knowledge image for prompt assembly"
+        );
+        return Err(format!(
+            "Knowledge image {} exceeds the prompt budget.",
+            path.display()
+        ));
+    }
+
+    let bytes = std::fs::read(path)
+        .map_err(|e| format!("Failed to read Knowledge image {}: {}", path.display(), e))?;
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let mime = provided_mime.unwrap_or(match extension.as_str() {
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        "svg" => "image/svg+xml",
+        _ => "image/png",
+    });
+    let encoded = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);
+    Ok(format!("data:{};base64,{}", mime, encoded))
 }
 
 #[tauri::command]
@@ -1314,94 +1821,71 @@ fn delete_session(state: State<'_, AppState>, session_id: String) -> Result<(), 
     Ok(())
 }
 
-// --- RAG Commands ---
+// --- Knowledge Commands ---
 
 #[tauri::command]
-async fn rag_ingest_file(
+async fn knowledge_ingest_file(
     state: State<'_, AppState>,
+    knowledge: State<'_, KnowledgeManager>,
+    app: tauri::AppHandle,
     file_path: String,
 ) -> Result<serde_json::Value, String> {
-    with_db(&state, |conn| {
-        rag::ingest_file(conn, &file_path).and_then(|result| {
-            serde_json::to_value(result)
-                .map_err(|e| format!("Failed to serialize RAG ingest result: {}", e))
-        })
-    })
+    let db_path = current_db_path(&state)?;
+    let result = knowledge::ingest_file(&knowledge, &db_path, Some(&app), &file_path).await?;
+    serde_json::to_value(result)
+        .map_err(|e| format!("Failed to serialize Knowledge ingest result: {}", e))
 }
 
 #[tauri::command]
-async fn rag_ingest_folder(
+async fn knowledge_ingest_url(
     state: State<'_, AppState>,
-    folder_path: String,
-    recursive: Option<bool>,
-) -> Result<serde_json::Value, String> {
-    with_db(&state, |conn| {
-        rag::ingest_folder(conn, &folder_path, recursive.unwrap_or(true)).and_then(|result| {
-            serde_json::to_value(result)
-                .map_err(|e| format!("Failed to serialize RAG ingest result: {}", e))
-        })
-    })
-}
-
-#[tauri::command]
-async fn rag_search(
-    state: State<'_, AppState>,
-    query: String,
-    top_k: Option<usize>,
-) -> Result<serde_json::Value, String> {
-    with_db(&state, |conn| {
-        rag::search(conn, &query, top_k.unwrap_or(5)).and_then(|result| {
-            serde_json::to_value(result)
-                .map_err(|e| format!("Failed to serialize RAG search result: {}", e))
-        })
-    })
-}
-
-#[tauri::command]
-async fn rag_list_documents(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
-    with_db(&state, |conn| {
-        rag::list_documents(conn).and_then(|result| {
-            serde_json::to_value(result)
-                .map_err(|e| format!("Failed to serialize RAG document list: {}", e))
-        })
-    })
-}
-
-#[tauri::command]
-async fn rag_delete_document(
-    state: State<'_, AppState>,
-    doc_id: String,
-) -> Result<serde_json::Value, String> {
-    with_db(&state, |conn| {
-        rag::delete_document(conn, &doc_id).and_then(|result| {
-            serde_json::to_value(result)
-                .map_err(|e| format!("Failed to serialize RAG delete result: {}", e))
-        })
-    })
-}
-
-#[tauri::command]
-async fn rag_stats(
-    state: State<'_, AppState>,
+    knowledge: State<'_, KnowledgeManager>,
     app: tauri::AppHandle,
+    url: String,
 ) -> Result<serde_json::Value, String> {
-    let storage_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("Failed to resolve app data directory: {}", e))?
-        .join("rag");
+    let db_path = current_db_path(&state)?;
+    let result = knowledge::ingest_url(&knowledge, &db_path, Some(&app), &url).await?;
+    serde_json::to_value(result)
+        .map_err(|e| format!("Failed to serialize Knowledge URL ingest result: {}", e))
+}
+
+#[tauri::command]
+fn knowledge_list_sources(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
     with_db(&state, |conn| {
-        rag::stats(conn, &storage_dir).and_then(|result| {
+        knowledge::list_sources(conn).and_then(|result| {
             serde_json::to_value(result)
-                .map_err(|e| format!("Failed to serialize RAG stats: {}", e))
+                .map_err(|e| format!("Failed to serialize Knowledge source list: {}", e))
         })
     })
 }
 
 #[tauri::command]
-async fn set_rag_enabled(state: State<'_, AppState>, enabled: bool) -> Result<(), String> {
-    state.rag_enabled.store(enabled, Ordering::SeqCst);
-    Ok(())
+async fn knowledge_delete_source(
+    state: State<'_, AppState>,
+    knowledge: State<'_, KnowledgeManager>,
+    source_id: String,
+) -> Result<serde_json::Value, String> {
+    let db_path = current_db_path(&state)?;
+    let result = knowledge::delete_source(&knowledge, &db_path, &source_id).await?;
+    serde_json::to_value(result)
+        .map_err(|e| format!("Failed to serialize Knowledge delete result: {}", e))
+}
+
+#[tauri::command]
+async fn knowledge_stats(
+    state: State<'_, AppState>,
+    knowledge: State<'_, KnowledgeManager>,
+) -> Result<serde_json::Value, String> {
+    let db_path = current_db_path(&state)?;
+    let result = knowledge::stats(&knowledge, &db_path).await?;
+    serde_json::to_value(result).map_err(|e| format!("Failed to serialize Knowledge stats: {}", e))
+}
+
+#[tauri::command]
+fn get_knowledge_status(
+    knowledge: State<'_, KnowledgeManager>,
+) -> Result<knowledge::KnowledgeStatus, String> {
+    Ok(knowledge.status())
 }
 
 #[tauri::command]
@@ -1738,30 +2222,46 @@ fn save_message_json_conn(
         None
     };
 
-    conn.execute(
-        "INSERT INTO messages (id, session_id, role, content, content_parts, model_used, latency_ms, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-        rusqlite::params![id, params.session_id, params.role, params.content, serialized_parts, params.model_used, params.latency_ms, now],
-    )
-    .map_err(|e| e.to_string())?;
+    conn.execute_batch("BEGIN IMMEDIATE TRANSACTION;")
+        .map_err(|e| e.to_string())?;
 
-    if let Some(title) = title_candidate {
+    let result = (|| {
         conn.execute(
-            "UPDATE sessions
-             SET title = CASE WHEN title = ?1 THEN ?2 ELSE title END,
-                 updated_at = ?3
-             WHERE id = ?4",
-            rusqlite::params![DEFAULT_SESSION_TITLE, title, now, params.session_id],
+            "INSERT INTO messages (id, session_id, role, content, content_parts, model_used, latency_ms, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![id, params.session_id, params.role, params.content, serialized_parts, params.model_used, params.latency_ms, now],
         )
         .map_err(|e| e.to_string())?;
-    } else {
-        conn.execute(
-            "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
-            rusqlite::params![now, params.session_id],
-        )
-        .map_err(|e| e.to_string())?;
+
+        if let Some(title) = title_candidate {
+            conn.execute(
+                "UPDATE sessions
+                 SET title = CASE WHEN title = ?1 THEN ?2 ELSE title END,
+                     updated_at = ?3
+                 WHERE id = ?4",
+                rusqlite::params![DEFAULT_SESSION_TITLE, title, now, params.session_id],
+            )
+            .map_err(|e| e.to_string())?;
+        } else {
+            conn.execute(
+                "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
+                rusqlite::params![now, params.session_id],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+
+        Ok(())
+    })();
+
+    match result {
+        Ok(()) => conn.execute_batch("COMMIT;").map_err(|e| {
+            let _ = conn.execute_batch("ROLLBACK;");
+            e.to_string()
+        }),
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK;");
+            Err(error)
+        }
     }
-
-    Ok(())
 }
 
 fn save_message_json_inner(state: &AppState, params: PersistMessageJson<'_>) -> Result<(), String> {
@@ -1842,7 +2342,7 @@ fn web_tools_unavailable_instruction() -> &'static str {
 }
 
 fn native_web_tools_instruction() -> &'static str {
-    "Web tools are available in this turn. For current, live, recent, or otherwise time-sensitive public facts, use the available web tools before answering. Carry forward relevant chat context when the latest user message is a short correction or follow-up, and search for the concrete subject instead of the meta wording of the correction. If tool results are missing, inconclusive, or fail, say that verification was incomplete and avoid presenting uncertain current facts as certain."
+    "Web tools are available in this turn. For current, live, recent, or otherwise time-sensitive public facts, use the available web tools before answering. Carry forward relevant chat context when the latest user message is a short correction or follow-up, and search for the concrete subject instead of the meta wording of the correction. Do not finalize a time-sensitive public fact unless the tool output shows successful verification. If tool results are missing, inconclusive, or fail, say that verification was incomplete and avoid presenting uncertain current facts as certain."
 }
 
 fn system_prompt_for_preferences(
@@ -1982,6 +2482,7 @@ fn unique_temp_file_path(temp_dir: &std::path::Path, name: &str) -> std::path::P
 mod tests {
     use super::*;
     use rusqlite::Connection;
+    use uuid::Uuid;
 
     fn session(id: &str) -> Session {
         Session {
@@ -2028,9 +2529,9 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(include_str!("../migrations/001_initial.sql"))
             .unwrap();
-        conn.execute_batch(include_str!("../migrations/002_rag.sql"))
-            .unwrap();
         conn.execute_batch(include_str!("../migrations/003_message_content_parts.sql"))
+            .unwrap();
+        conn.execute_batch(include_str!("../migrations/004_knowledge.sql"))
             .unwrap();
         conn
     }
@@ -2038,10 +2539,10 @@ mod tests {
     fn test_app_state(conn: Connection) -> AppState {
         AppState {
             db: Mutex::new(Some(conn)),
+            db_path: Mutex::new(None),
             current_session: Mutex::new(None),
             active_generation_session: Mutex::new(None),
             cancel_flag: AtomicBool::new(false),
-            rag_enabled: AtomicBool::new(false),
             tools_enabled: AtomicBool::new(false),
         }
     }
@@ -2124,7 +2625,103 @@ mod tests {
         assert!(prompt.contains("Web tools are available in this turn"));
         assert!(prompt.contains("use the available web tools before answering"));
         assert!(prompt.contains("short correction or follow-up"));
+        assert!(prompt.contains("successful verification"));
         assert!(prompt.contains("verification was incomplete"));
+    }
+
+    #[test]
+    fn build_web_assist_log_record_summarizes_web_queries_domains_and_verification() {
+        let mut trace = WebAssistTrace::default();
+        trace.record_tool_call("get_current_datetime", serde_json::json!({}));
+        trace.record_tool_result(
+            "get_current_datetime",
+            serde_json::json!({
+                "local_datetime": "2026-04-15 18:34:00 (UTC+05:30, Wednesday)",
+                "local_date": "2026-04-15",
+            }),
+        );
+        trace.record_tool_call(
+            "web_search",
+            serde_json::json!({
+                "query": "what about tomorrow",
+                "max_results": 5,
+            }),
+        );
+        trace.record_tool_result(
+            "web_search",
+            serde_json::json!({
+                "requested_query": "what about tomorrow",
+                "effective_query": "IPL match tomorrow",
+                "attempted_queries": ["IPL match tomorrow"],
+                "results": [
+                    {
+                        "title": "Fixtures",
+                        "url": "https://www.iplt20.com/matches/fixtures",
+                    }
+                ],
+                "recommended_fetch_urls": ["https://www.iplt20.com/matches/fixtures"],
+                "verification_pages": [
+                    {
+                        "url": "https://www.iplt20.com/matches/fixtures",
+                        "verified": true,
+                    }
+                ],
+                "verification_failed": false,
+                "do_not_answer_from_memory": false,
+            }),
+        );
+
+        let record = build_web_assist_log_record("session-a", "completed", &trace, None, None);
+
+        assert_eq!(record.session_id, "session-a");
+        assert_eq!(record.status, "completed");
+        assert_eq!(
+            record.tool_order,
+            vec!["get_current_datetime".to_string(), "web_search".to_string()]
+        );
+        assert_eq!(record.tools.len(), 2);
+        assert_eq!(
+            record.tools[0].local_datetime.as_deref(),
+            Some("2026-04-15 18:34:00 (UTC+05:30, Wednesday)")
+        );
+        assert_eq!(
+            record.tools[1].requested_query.as_deref(),
+            Some("what about tomorrow")
+        );
+        assert_eq!(
+            record.tools[1].effective_query.as_deref(),
+            Some("IPL match tomorrow")
+        );
+        assert_eq!(
+            record.tools[1].attempted_queries,
+            vec!["IPL match tomorrow".to_string()]
+        );
+        assert_eq!(record.tools[1].domains, vec!["iplt20.com".to_string()]);
+        assert_eq!(
+            record.tools[1].verification_outcome.as_deref(),
+            Some("verified")
+        );
+    }
+
+    #[test]
+    fn build_web_assist_log_record_preserves_turn_level_failure_context() {
+        let trace = WebAssistTrace::default();
+
+        let record = build_web_assist_log_record(
+            "session-a",
+            "failed",
+            &trace,
+            Some("ensure_ready"),
+            Some("Local web search JSON probe failed with HTTP 500"),
+        );
+
+        assert_eq!(record.status, "failed");
+        assert_eq!(record.failure_stage.as_deref(), Some("ensure_ready"));
+        assert_eq!(
+            record.failure_reason.as_deref(),
+            Some("Local web search JSON probe failed with HTTP 500")
+        );
+        assert!(record.tools.is_empty());
     }
 
     #[test]
@@ -2217,6 +2814,83 @@ mod tests {
             Some(models::ChatContent::Parts(parts))
                 if matches!(parts.get(1), Some(models::ChatContentPart::Image { .. }))
         ));
+    }
+
+    #[test]
+    fn augment_prompt_with_knowledge_skips_oversized_images_but_keeps_text_context() {
+        let oversized_path =
+            std::env::temp_dir().join(format!("friday-knowledge-oversized-{}.png", Uuid::new_v4()));
+        let file = std::fs::File::create(&oversized_path).unwrap();
+        file.set_len(MAX_KNOWLEDGE_PROMPT_IMAGE_BYTES + 1).unwrap();
+
+        let results = knowledge::KnowledgeSearchResults {
+            citations: vec![knowledge::KnowledgeCitation {
+                source_id: "src-1".to_string(),
+                modality: knowledge::KnowledgeModality::Image,
+                display_name: "diagram.png".to_string(),
+                locator: oversized_path.to_string_lossy().to_string(),
+                score: 0.91,
+                chunk_index: None,
+                snippet: None,
+            }],
+            text_snippets: vec![knowledge::RetrievedTextSnippet {
+                citation: knowledge::KnowledgeCitation {
+                    source_id: "src-2".to_string(),
+                    modality: knowledge::KnowledgeModality::Text,
+                    display_name: "notes.md".to_string(),
+                    locator: "/tmp/notes.md".to_string(),
+                    score: 0.95,
+                    chunk_index: Some(0),
+                    snippet: Some("Friday keeps knowledge local.".to_string()),
+                },
+                snippet: "Friday keeps knowledge local.".to_string(),
+            }],
+            images: vec![knowledge::RetrievedImage {
+                citation: knowledge::KnowledgeCitation {
+                    source_id: "src-1".to_string(),
+                    modality: knowledge::KnowledgeModality::Image,
+                    display_name: "diagram.png".to_string(),
+                    locator: oversized_path.to_string_lossy().to_string(),
+                    score: 0.91,
+                    chunk_index: None,
+                    snippet: None,
+                },
+                asset_path: oversized_path.clone(),
+                mime_type: Some("image/png".to_string()),
+            }],
+            audio: None,
+        };
+
+        let augmented = augment_prompt_with_knowledge(
+            models::ChatMessage::text("user", "What should I know?"),
+            &results,
+        )
+        .unwrap();
+
+        match augmented.content {
+            models::ChatContent::Parts(parts) => {
+                assert!(parts.iter().any(|part| {
+                    matches!(
+                        part,
+                        models::ChatContentPart::Text { text }
+                            if text.contains("Relevant knowledge sources:")
+                                && text.contains("Friday keeps knowledge local.")
+                    )
+                }));
+                assert!(parts
+                    .iter()
+                    .all(|part| { !matches!(part, models::ChatContentPart::Image { .. }) }));
+                assert!(parts.iter().any(|part| {
+                    matches!(
+                        part,
+                        models::ChatContentPart::Text { text } if text == "What should I know?"
+                    )
+                }));
+            }
+            other => panic!("expected parts prompt content, got {:?}", other),
+        }
+
+        let _ = std::fs::remove_file(&oversized_path);
     }
 
     #[test]
@@ -2465,10 +3139,13 @@ mod tests {
         let state = test_app_state(conn);
         let sidecar = SidecarManager::new();
         let searxng = SearXNGManager::new();
+        let knowledge = KnowledgeManager::new();
 
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let payload = runtime
-            .block_on(async { bootstrap_payload_inner(&state, &sidecar, &searxng).await })
+            .block_on(async {
+                bootstrap_payload_inner(&state, &sidecar, &searxng, &knowledge).await
+            })
             .unwrap();
 
         assert_eq!(payload.current_session.id, "session-a");
@@ -2484,6 +3161,35 @@ mod tests {
 
         let loaded = load_persisted_active_model_id(&conn).unwrap();
         assert_eq!(loaded.as_deref(), Some("gemma-4-e4b-it"));
+    }
+
+    #[test]
+    fn prepare_session_for_generation_keeps_current_session_when_generation_is_busy() {
+        let conn = test_conn();
+        insert_session(&conn, "session-a");
+        insert_session(&conn, "session-b");
+        storage::save_string_setting(&conn, CURRENT_SESSION_KEY, "session-a").unwrap();
+
+        let state = test_app_state(conn);
+        *state.current_session.lock().unwrap() = Some("session-a".to_string());
+        *state.active_generation_session.lock().unwrap() = Some("session-a".to_string());
+
+        let error = match prepare_session_for_generation(&state, "session-b") {
+            Ok(_) => panic!("expected generation guard acquisition to fail"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error,
+            "A response is already in progress in another chat. Cancel it before switching sessions."
+        );
+        assert_eq!(
+            state.current_session.lock().unwrap().as_deref(),
+            Some("session-a")
+        );
+        let persisted = with_db(&state, |conn| storage::load_string_setting(conn, CURRENT_SESSION_KEY)) 
+            .unwrap();
+        assert_eq!(persisted.as_deref(), Some("session-a"));
     }
 
     #[test]
@@ -2596,6 +3302,53 @@ mod tests {
             )
             .unwrap();
         assert_eq!(title, "Project notes");
+    }
+
+    #[test]
+    fn save_message_json_conn_rolls_back_message_insert_when_session_update_fails() {
+        let conn = test_conn();
+        conn.execute(
+            "INSERT INTO sessions (id, title, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![
+                "session-a",
+                DEFAULT_SESSION_TITLE,
+                "2026-01-01T00:00:00Z",
+                "2026-01-01T00:00:00Z"
+            ],
+        )
+        .unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER fail_session_update
+             BEFORE UPDATE ON sessions
+             BEGIN
+               SELECT RAISE(ABORT, 'session update blocked');
+             END;",
+        )
+        .unwrap();
+
+        let error = save_message_json_conn(
+            &conn,
+            PersistMessageJson {
+                session_id: "session-a",
+                role: "assistant",
+                content: "Stored content",
+                content_parts: None,
+                model_used: None,
+                latency_ms: None,
+                title_source: None,
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.contains("session update blocked"));
+        let message_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE session_id = ?1",
+                ["session-a"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(message_count, 0);
     }
 
     #[test]

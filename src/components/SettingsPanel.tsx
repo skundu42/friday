@@ -2,12 +2,10 @@ import { useEffect, useState } from "react";
 import {
   Alert,
   Button,
-  Collapse,
   Radio,
   Select,
   Slider,
   Space,
-  Switch,
   Tag,
   Typography,
 } from "antd";
@@ -23,6 +21,7 @@ import type {
   BackendStatus,
   ModelInfo,
   ReplyLanguage,
+  ThemeMode,
 } from "../types";
 
 const { Title, Text, Paragraph } = Typography;
@@ -44,6 +43,11 @@ const REPLY_LANGUAGE_OPTIONS: { label: string; value: ReplyLanguage }[] = [
   { label: "Tamil", value: "tamil" },
   { label: "Punjabi", value: "punjabi" },
 ];
+type SettingsOverviewItem = {
+  label: string;
+  value: string;
+  meta?: string;
+};
 
 function coerceMaxTokens(value: unknown) {
   if (typeof value !== "number" || !Number.isFinite(value)) {
@@ -80,13 +84,19 @@ function formatCompactTokenCount(value: number) {
   return value.toString();
 }
 
-function modelCapabilityTags(model: ModelInfo) {
-  const tags = ["Text"];
-  if (model.supports_image_input) tags.push("Image");
-  if (model.supports_audio_input) tags.push("Audio");
-  if (model.supports_video_input) tags.push("Video");
-  if (model.supports_thinking) tags.push("Thinking");
-  return tags;
+function displayNameForModelId(modelId: string) {
+  switch (modelId) {
+    case "gemma-4-e2b-it":
+      return "Gemma 4 E2B";
+    case "gemma-4-e4b-it":
+      return "Gemma 4 E4B";
+    default:
+      return modelId || "Not selected";
+  }
+}
+
+function labelForReplyLanguage(value: ReplyLanguage) {
+  return REPLY_LANGUAGE_OPTIONS.find((option) => option.value === value)?.label ?? value;
 }
 
 interface SettingsPanelProps {
@@ -225,7 +235,7 @@ function ModelCard({
         style={{ width: "100%" }}
         disabled={Boolean(downloadingModelId) || switching || isSwitchingModel}
       >
-        <Space direction="vertical" style={{ width: "100%" }} size={10}>
+        <Space direction="vertical" style={{ width: "100%" }} size={10} className="settings-model-list">
           {models.map((model) => {
             const isActive = model.id === activeModelId;
             const progress = downloadProgress[model.display_name];
@@ -238,75 +248,47 @@ function ModelCard({
                 key={model.id}
                 value={model.id}
                 style={{ width: "100%" }}
+                className="settings-model-option"
                 disabled={!isDownloaded && !isActive}
               >
-                <div
-                  style={{
-                    border: isActive
-                      ? "2px solid #52C41A"
-                      : "2px solid #E8E8E8",
-                    borderRadius: 14,
-                    padding: "14px 16px",
-                    background: isActive ? "#F6FFED" : "#FFFFFF",
-                  }}
-                >
-                  <div
-                    style={{
-                      display: "flex",
-                      justifyContent: "space-between",
-                      alignItems: "flex-start",
-                      gap: 16,
-                    }}
-                  >
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <strong>{model.display_name}</strong>
-                      <br />
-                      <Text type="secondary" style={{ fontSize: 11 }}>
+                <div className={`settings-model-card${isActive ? " is-active" : ""}`}>
+                  <div className="settings-model-card__header">
+                    <div className="settings-model-card__content">
+                      <div className="settings-model-card__title-row">
+                        <strong>{model.display_name}</strong>
+                        <Space size={8} wrap>
+                          {isActive ? (
+                            <Tag color="green" style={{ margin: 0, fontSize: 10 }}>
+                              Current
+                            </Tag>
+                          ) : null}
+                          {!ramOk ? (
+                            <Tag color="warning" style={{ margin: 0, fontSize: 10 }}>
+                              Low RAM
+                            </Tag>
+                          ) : null}
+                          {progress !== undefined && progress > 0 && progress < 100 ? (
+                            <Tag color="processing" style={{ margin: 0, fontSize: 10 }}>
+                              {progress}%
+                            </Tag>
+                          ) : null}
+                        </Space>
+                      </div>
+                      <Text type="secondary" className="settings-model-card__meta">
                         {formatCompactTokenCount(model.max_context_tokens)} context
                         {" · "}
                         {model.size_gb.toFixed(1)} GB download
                         {" · "}
                         {model.min_ram_gb} GB RAM minimum
                       </Text>
-                      <div
-                        style={{
-                          marginTop: 8,
-                          display: "flex",
-                          gap: 6,
-                          flexWrap: "wrap",
-                        }}
-                      >
-                        {modelCapabilityTags(model).map((capability) => (
-                          <Tag key={capability} style={{ margin: 0, fontSize: 10 }}>
-                            {capability}
-                          </Tag>
-                        ))}
-                      </div>
                     </div>
 
-                    <div
-                      style={{
-                        flexShrink: 0,
-                        display: "flex",
-                        alignItems: "center",
-                        gap: 8,
-                      }}
-                    >
-                      {!ramOk ? (
-                        <Tag color="warning" style={{ fontSize: 10 }}>
-                          Low RAM
-                        </Tag>
-                      ) : null}
-                      {progress !== undefined && progress > 0 && progress < 100 ? (
-                        <Tag color="processing" style={{ fontSize: 10 }}>
-                          {progress}%
-                        </Tag>
-                      ) : null}
+                    <div className="settings-model-card__actions">
                       {isDownloaded ? (
                         <Tag
                           color="success"
                           icon={<CheckCircleOutlined />}
-                          style={{ fontSize: 11, padding: "2px 8px" }}
+                          style={{ margin: 0, fontSize: 11, padding: "2px 8px" }}
                         >
                           Downloaded
                         </Tag>
@@ -350,6 +332,7 @@ export default function SettingsPanel({
   isSaving,
   onSaveSettings,
 }: SettingsPanelProps) {
+  const [themeMode, setThemeMode] = useState(settings.theme_mode);
   const [replyLanguage, setReplyLanguage] = useState(
     settings.chat.reply_language,
   );
@@ -362,8 +345,23 @@ export default function SettingsPanel({
   const isCustomTokenValue = !TOKEN_PRESETS.includes(
     maxTokens as (typeof TOKEN_PRESETS)[number],
   );
+  const settingsOverview: SettingsOverviewItem[] = [
+    {
+      label: "Active model",
+      value: displayNameForModelId(activeModelId),
+    },
+    {
+      label: "Reply defaults",
+      value: labelForReplyLanguage(replyLanguage),
+    },
+    {
+      label: "Privacy",
+      value: "Local and Private",
+    },
+  ];
 
   useEffect(() => {
+    setThemeMode(settings.theme_mode);
     setReplyLanguage(settings.chat.reply_language);
     setMaxTokens(settings.chat.max_tokens);
     setMaxTokenSliderIndex(findPresetIndex(settings.chat.max_tokens));
@@ -382,10 +380,12 @@ export default function SettingsPanel({
       await onSaveSettings({
         auto_start_backend: settings.auto_start_backend,
         user_display_name: settings.user_display_name,
+        theme_mode: themeMode,
         chat: {
           reply_language: nextReplyLanguage,
           max_tokens: settings.chat.max_tokens,
           web_assist_enabled: settings.chat.web_assist_enabled,
+          knowledge_enabled: settings.chat.knowledge_enabled,
           generation: settings.chat.generation,
         },
       });
@@ -410,10 +410,12 @@ export default function SettingsPanel({
       await onSaveSettings({
         auto_start_backend: settings.auto_start_backend,
         user_display_name: settings.user_display_name,
+        theme_mode: themeMode,
         chat: {
           reply_language: replyLanguage,
           max_tokens: nextMaxTokens,
           web_assist_enabled: settings.chat.web_assist_enabled,
+          knowledge_enabled: settings.chat.knowledge_enabled,
           generation: settings.chat.generation,
         },
       });
@@ -428,24 +430,30 @@ export default function SettingsPanel({
     }
   };
 
-  const persistAutoStartBackend = async (nextValue: boolean) => {
-    if (nextValue === settings.auto_start_backend) {
+  const persistThemeMode = async (nextThemeMode: ThemeMode) => {
+    if (nextThemeMode === settings.theme_mode) {
       return;
     }
 
+    const previousThemeMode = themeMode;
+    setThemeMode(nextThemeMode);
     setError(null);
+
     try {
       await onSaveSettings({
-        auto_start_backend: nextValue,
+        auto_start_backend: settings.auto_start_backend,
         user_display_name: settings.user_display_name,
+        theme_mode: nextThemeMode,
         chat: {
           reply_language: replyLanguage,
-          max_tokens: maxTokens,
+          max_tokens: settings.chat.max_tokens,
           web_assist_enabled: settings.chat.web_assist_enabled,
+          knowledge_enabled: settings.chat.knowledge_enabled,
           generation: settings.chat.generation,
         },
       });
     } catch (saveError) {
+      setThemeMode(previousThemeMode);
       setError(
         saveError instanceof Error ? saveError.message : String(saveError),
       );
@@ -453,14 +461,30 @@ export default function SettingsPanel({
   };
 
   return (
-    <div style={{ maxWidth: 760, margin: "0 auto" }}>
-      <Title level={3} style={{ marginTop: 0, marginBottom: 8 }}>
-        Settings
-      </Title>
-      <Paragraph type="secondary" style={{ marginBottom: 20 }}>
-        Tune conversation behavior, manage the local model, and choose how much
-        work Friday does on startup.
-      </Paragraph>
+    <div className="settings-panel">
+      <section className="settings-hero surface-card surface-card--accent">
+        <div className="settings-header settings-header--page">
+          <Title level={3} className="settings-header__title">
+            Settings
+          </Title>
+          <Paragraph className="settings-header__body">
+            Tune conversation behavior, manage the local model, and choose how
+            Friday looks.
+          </Paragraph>
+        </div>
+
+        <div className="settings-overview-grid">
+          {settingsOverview.map((item) => (
+            <div key={item.label} className="settings-overview-card">
+              <Text className="settings-overview-card__label">{item.label}</Text>
+              <Text className="settings-overview-card__value">{item.value}</Text>
+              {item.meta ? (
+                <Text className="settings-overview-card__meta">{item.meta}</Text>
+              ) : null}
+            </div>
+          ))}
+        </div>
+      </section>
 
       {error ? (
         <Alert
@@ -471,183 +495,142 @@ export default function SettingsPanel({
         />
       ) : null}
 
-      <Collapse
-        defaultActiveKey={["conversation", "model", "app"]}
-        items={[
-          {
-            key: "conversation",
-            label: "Conversation",
-            children: (
-              <Space direction="vertical" style={{ width: "100%" }} size={20}>
-                <div>
-                  <Text strong style={{ display: "block", marginBottom: 8 }}>
-                    Reply language
-                  </Text>
-                  <Text type="secondary" style={{ display: "block", marginBottom: 10 }}>
-                    Friday defaults to this language unless a prompt explicitly
-                    asks for translation or quoted text in another one.
-                  </Text>
-                  <Select
-                    value={replyLanguage}
-                    onChange={(value) => void persistReplyLanguage(value)}
-                    style={{ width: 220, maxWidth: "100%" }}
-                    options={REPLY_LANGUAGE_OPTIONS}
-                    loading={isSaving}
-                  />
-                </div>
+      <div className="settings-layout">
+        <div className="settings-stack settings-stack--main">
+          <section className="settings-section surface-card">
+            <div className="section-heading">
+              <div>
+                <h3 className="section-heading__title">Conversation</h3>
+              </div>
+            </div>
 
-                <div>
-                  <Text strong style={{ display: "block", marginBottom: 8 }}>
-                    Response budget
-                  </Text>
-                  <Text type="secondary" style={{ display: "block", marginBottom: 10 }}>
-                    Higher budgets allow longer answers, but they can increase
-                    latency and memory use.
-                  </Text>
-                  <Slider
-                    min={0}
-                    max={TOKEN_PRESETS.length - 1}
-                    step={null}
-                    marks={Object.fromEntries(
-                      TOKEN_PRESET_LABELS.map((label, index) => [index, label]),
-                    )}
-                    value={maxTokenSliderIndex}
-                    onChange={(value) => {
-                      const nextIndex = Array.isArray(value) ? value[0] : value;
-                      const nextValue = TOKEN_PRESETS[nextIndex] ?? TOKEN_PRESETS[0];
-                      setMaxTokenSliderIndex(nextIndex);
-                      setMaxTokens(nextValue);
-                    }}
-                    onChangeComplete={(value) => {
-                      const nextIndex = Array.isArray(value) ? value[0] : value;
-                      void persistMaxTokens(
-                        TOKEN_PRESETS[nextIndex] ?? TOKEN_PRESETS[0],
-                      );
-                    }}
-                    tooltip={{ open: false }}
-                  />
-                  <Text type="secondary" style={{ fontSize: 12 }}>
-                    Current budget: {formatTokenCount(maxTokens)}
-                    {isCustomTokenValue ? " (custom saved value)" : ""}
-                    {isSaving || isSavingMaxTokens ? " · Applying..." : ""}
-                  </Text>
-                </div>
+            <div className="settings-field">
+              <Text className="settings-field__label">Reply language</Text>
+              <Text className="settings-field__body">
+                Friday defaults to this language unless a prompt explicitly asks
+                for translation or quoted text in another one.
+              </Text>
+              <Select
+                value={replyLanguage}
+                onChange={(value) => void persistReplyLanguage(value)}
+                className="friday-compact-select"
+                style={{ width: 220, maxWidth: "100%" }}
+                options={REPLY_LANGUAGE_OPTIONS}
+                loading={isSaving}
+              />
+            </div>
 
-              </Space>
-            ),
-          },
-          {
-            key: "model",
-            label: "Model",
-            children: (
-              <Space direction="vertical" style={{ width: "100%" }} size={12}>
-                <Paragraph type="secondary" style={{ marginBottom: 0 }}>
-                  Keep only the models you need. Switching models may restart
-                  the local runtime before the next reply.
-                </Paragraph>
-                <ModelCard
-                  totalRamGb={backendStatus.total_ram_gb}
-                  activeModelId={activeModelId}
-                  isSwitchingModel={isSwitchingModel}
-                  onModelChange={onModelChange}
-                />
-              </Space>
-            ),
-          },
-          {
-            key: "app",
-            label: "App",
-            children: (
-              <Space direction="vertical" style={{ width: "100%" }} size={18}>
-                <div>
-                  <Text strong style={{ display: "block", marginBottom: 8 }}>
-                    Pre-warm local model on startup
-                  </Text>
-                  <div
-                    style={{
-                      display: "flex",
-                      alignItems: "flex-start",
-                      gap: 14,
-                      flexWrap: "wrap",
-                      padding: "14px 16px",
-                      border: "2px solid #E8E8E8",
-                      borderRadius: 14,
-                      background: "#FFFFFF",
-                    }}
-                  >
-                    <Switch
-                      aria-label="Pre-warm local model on startup"
-                      checked={settings.auto_start_backend}
-                      onChange={(checked) => void persistAutoStartBackend(checked)}
-                      loading={isSaving}
-                      style={{ marginTop: 2 }}
-                    />
-                    <div style={{ flex: "1 1 260px", minWidth: 220 }}>
-                      <Text strong style={{ display: "block", marginBottom: 4 }}>
-                        Faster first reply
-                      </Text>
-                      <Text type="secondary" style={{ fontSize: 12, lineHeight: 1.7 }}>
-                        Start the runtime during launch so the first reply
-                        arrives faster.
-                      </Text>
-                    </div>
-                  </div>
-                </div>
-
-                <div
-                  style={{
-                    display: "grid",
-                    gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))",
-                    gap: 12,
+            <div className="settings-field">
+              <Text className="settings-field__label">Response budget</Text>
+              <Text className="settings-field__body">
+                Higher budgets allow longer answers, but they can increase latency
+                and memory use.
+              </Text>
+              <div className="settings-slider-shell">
+                <Slider
+                  min={0}
+                  max={TOKEN_PRESETS.length - 1}
+                  step={null}
+                  marks={Object.fromEntries(
+                    TOKEN_PRESET_LABELS.map((label, index) => [index, label]),
+                  )}
+                  value={maxTokenSliderIndex}
+                  onChange={(value) => {
+                    const nextIndex = Array.isArray(value) ? value[0] : value;
+                    const nextValue = TOKEN_PRESETS[nextIndex] ?? TOKEN_PRESETS[0];
+                    setMaxTokenSliderIndex(nextIndex);
+                    setMaxTokens(nextValue);
                   }}
-                >
-                  {[
-                    {
-                      label: "App",
-                      value: "Friday v0.1.0",
-                    },
-                    {
-                      label: "System RAM",
-                      value: `${backendStatus.total_ram_gb.toFixed(1)} GB`,
-                    },
-                    {
-                      label: "Privacy",
-                      value: "On-device by default",
-                    },
-                  ].map((item) => (
-                    <div
-                      key={item.label}
-                      style={{
-                        border: "2px solid #2C2C2C",
-                        borderRadius: 14,
-                        background: "#FFFDF7",
-                        padding: "14px 16px",
-                        boxShadow: "3px 3px 0 #2C2C2C",
-                      }}
-                    >
-                      <Text
-                        type="secondary"
-                        style={{
-                          display: "block",
-                          fontSize: 11,
-                          textTransform: "uppercase",
-                          letterSpacing: 0.6,
-                          marginBottom: 6,
-                        }}
-                      >
-                        {item.label}
-                      </Text>
-                      <Text strong style={{ fontSize: 16, lineHeight: 1.4 }}>
-                        {item.value}
-                      </Text>
-                    </div>
-                  ))}
+                  onChangeComplete={(value) => {
+                    const nextIndex = Array.isArray(value) ? value[0] : value;
+                    void persistMaxTokens(
+                      TOKEN_PRESETS[nextIndex] ?? TOKEN_PRESETS[0],
+                    );
+                  }}
+                  tooltip={{ open: false }}
+                />
+                <div className="settings-token-summary">
+                  Current budget: {formatTokenCount(maxTokens)}
+                  {isCustomTokenValue ? " (custom saved value)" : ""}
+                  {isSaving || isSavingMaxTokens ? " · Applying..." : ""}
                 </div>
-              </Space>
-            ),
-          },
-        ]}
-      />
+              </div>
+            </div>
+          </section>
+
+          <section className="settings-section surface-card">
+            <div className="section-heading">
+              <div>
+                <h3 className="section-heading__title">App</h3>
+              </div>
+            </div>
+
+            <div className="settings-field">
+              <Text className="settings-field__label">Appearance</Text>
+              <Radio.Group
+                optionType="button"
+                buttonStyle="solid"
+                value={themeMode}
+                className="settings-theme-toggle"
+                onChange={(event) =>
+                  void persistThemeMode(event.target.value as ThemeMode)
+                }
+              >
+                <Radio.Button value="light">Light</Radio.Button>
+                <Radio.Button value="dark">Dark</Radio.Button>
+              </Radio.Group>
+            </div>
+          </section>
+        </div>
+
+        <div className="settings-stack settings-stack--side">
+          <section className="settings-section surface-card">
+            <div className="section-heading">
+              <div>
+                <h3 className="section-heading__title">Model</h3>
+                <p className="section-heading__body">
+                  Keep only the models you need. Switching models may restart the
+                  local runtime before the next reply.
+                </p>
+              </div>
+            </div>
+
+            <ModelCard
+              totalRamGb={backendStatus.total_ram_gb}
+              activeModelId={activeModelId}
+              isSwitchingModel={isSwitchingModel}
+              onModelChange={onModelChange}
+            />
+          </section>
+
+          <section className="settings-section surface-card">
+            <div className="section-heading">
+              <div>
+                <h3 className="section-heading__title">System</h3>
+              </div>
+            </div>
+
+            <div className="settings-meta-grid">
+              {[
+                {
+                  label: "App",
+                  value: "Friday v0.1.0",
+                },
+                {
+                  label: "System RAM",
+                  value: `${backendStatus.total_ram_gb.toFixed(1)} GB`,
+                },
+
+              ].map((item) => (
+                <div key={item.label} className="settings-meta-card">
+                  <Text className="settings-meta-card__label">{item.label}</Text>
+                  <Text className="settings-meta-card__value">{item.value}</Text>
+                </div>
+              ))}
+            </div>
+          </section>
+        </div>
+      </div>
     </div>
   );
 }

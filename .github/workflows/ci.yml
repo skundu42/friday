@@ -26,6 +26,9 @@ jobs:
           toolchain: 1.94.0
           components: clippy
 
+      - name: Install protobuf compiler
+        run: brew install protobuf
+
       - name: Install frontend dependencies
         run: npm ci
 
@@ -65,6 +68,9 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.94.0
+
+      - name: Install protobuf compiler
+        run: brew install protobuf
 
       - name: Install frontend dependencies
         run: npm ci

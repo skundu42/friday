@@ -10,6 +10,9 @@ import type {
   ChatErrorPayload,
   ChatTokenPayload,
   FileAttachment,
+  KnowledgeSource,
+  KnowledgeStats,
+  KnowledgeStatus,
   Message,
   ModelInfo,
   ReplyLanguage,
@@ -56,6 +59,15 @@ function unavailableWebSearchStatus(
     state: "unavailable",
     message,
     base_url: "http://127.0.0.1:8091",
+  };
+}
+
+function unavailableKnowledgeStatus(
+  message = "Knowledge is unavailable.",
+): KnowledgeStatus {
+  return {
+    state: "unavailable",
+    message,
   };
 }
 
@@ -126,6 +138,13 @@ function normalizeChatErrorPayload(
     return { message: payload };
   }
   return payload;
+}
+
+function hasOwnPayloadField<K extends string>(
+  payload: object,
+  key: K,
+): payload is Record<K, unknown> {
+  return Object.prototype.hasOwnProperty.call(payload, key);
 }
 
 function makeAssistantMessage(sessionId: string, content: string): Message {
@@ -203,10 +222,12 @@ function settingsToInput(settings: AppSettings): AppSettingsInput {
   return {
     auto_start_backend: settings.auto_start_backend,
     user_display_name: settings.user_display_name,
+    theme_mode: settings.theme_mode,
     chat: {
       reply_language: settings.chat.reply_language,
       max_tokens: settings.chat.max_tokens,
       web_assist_enabled: settings.chat.web_assist_enabled,
+      knowledge_enabled: settings.chat.knowledge_enabled,
       generation: {
         temperature: settings.chat.generation.temperature,
         top_p: settings.chat.generation.top_p,
@@ -242,6 +263,11 @@ function mergeQueuedSettingsInput(
       desired.user_display_name,
       requested.user_display_name,
     ),
+    theme_mode: resolveQueuedSettingValue(
+      committed.theme_mode,
+      desired.theme_mode,
+      requested.theme_mode,
+    ),
     chat: {
       reply_language: resolveQueuedSettingValue(
         committed.chat.reply_language,
@@ -257,6 +283,11 @@ function mergeQueuedSettingsInput(
         committed.chat.web_assist_enabled,
         desired.chat.web_assist_enabled,
         requested.chat.web_assist_enabled,
+      ),
+      knowledge_enabled: resolveQueuedSettingValue(
+        committed.chat.knowledge_enabled,
+        desired.chat.knowledge_enabled,
+        requested.chat.knowledge_enabled,
       ),
       generation: {
         temperature: resolveQueuedSettingValue(
@@ -300,6 +331,14 @@ function canUseWebSearch(
   );
 }
 
+function canUseKnowledge(status: KnowledgeStatus | null) {
+  return Boolean(
+    status &&
+      status.state !== "unavailable" &&
+      status.state !== "error",
+  );
+}
+
 export function useAppController() {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [activeSession, setActiveSession] = useState<Session | null>(null);
@@ -309,6 +348,15 @@ export function useAppController() {
     null,
   );
   const [webSearchStatus, setWebSearchStatus] = useState<WebSearchStatus | null>(
+    null,
+  );
+  const [knowledgeStatus, setKnowledgeStatus] = useState<KnowledgeStatus | null>(
+    null,
+  );
+  const [knowledgeSources, setKnowledgeSources] = useState<KnowledgeSource[]>(
+    [],
+  );
+  const [knowledgeStats, setKnowledgeStats] = useState<KnowledgeStats | null>(
     null,
   );
   const [currentModel, setCurrentModel] = useState("—");
@@ -321,6 +369,7 @@ export function useAppController() {
   const [isGenerating, setIsGenerating] = useState(false);
   const [isSavingSettings, setIsSavingSettings] = useState(false);
   const [webSearchEnabled, setWebSearchEnabled] = useState(false);
+  const [knowledgeEnabled, setKnowledgeEnabled] = useState(false);
   const [thinkingEnabled, setThinkingEnabled] = useState(false);
   const [generationStatus, setGenerationStatus] = useState<string | null>(null);
 
@@ -343,6 +392,7 @@ export function useAppController() {
   const applySavedSettingsState = (nextSettings: AppSettings) => {
     setSettings(nextSettings);
     setWebSearchEnabled(nextSettings.chat.web_assist_enabled);
+    setKnowledgeEnabled(nextSettings.chat.knowledge_enabled);
     setThinkingEnabled(Boolean(nextSettings.chat.generation.thinking_enabled));
   };
 
@@ -412,6 +462,56 @@ export function useAppController() {
     }
     bufferedAnswerTokenRef.current = "";
     bufferedThoughtTokenRef.current = "";
+  };
+
+  const applyCompletedAssistantPayload = (payload: ChatDonePayload) => {
+    const pendingId = pendingAssistantIdRef.current;
+    if (!pendingId) return;
+
+    const hasFinalContent =
+      typeof payload.content === "string" ||
+      hasOwnPayloadField(payload, "content");
+    const hasFinalContentParts = hasOwnPayloadField(payload, "contentParts");
+    if (!hasFinalContent && !hasFinalContentParts) {
+      return;
+    }
+
+    setMessages((previous) => {
+      const existingIndex = previous.findIndex((message) => message.id === pendingId);
+      if (existingIndex === -1) {
+        const sessionId =
+          pendingSessionIdRef.current ??
+          activeSessionRef.current?.id ??
+          previous[previous.length - 1]?.session_id ??
+          "local-session";
+        return [
+          ...previous,
+          {
+            id: pendingId,
+            session_id: sessionId,
+            role: "assistant",
+            content: typeof payload.content === "string" ? payload.content : "",
+            content_parts: hasFinalContentParts ? payload.contentParts : undefined,
+            created_at: new Date().toISOString(),
+          },
+        ];
+      }
+
+      const nextMessages = previous.slice();
+      const existing = nextMessages[existingIndex];
+      nextMessages[existingIndex] = {
+        ...existing,
+        content: hasFinalContent
+          ? typeof payload.content === "string"
+            ? payload.content
+            : ""
+          : existing.content,
+        content_parts: hasFinalContentParts
+          ? payload.contentParts
+          : existing.content_parts,
+      };
+      return nextMessages;
+    });
   };
 
   const clearPendingGenerationState = () => {
@@ -506,19 +606,71 @@ export function useAppController() {
     }
   };
 
+  const detectKnowledgeStatus = async () => {
+    try {
+      const status =
+        (await invoke<KnowledgeStatus>("get_knowledge_status")) ??
+        unavailableKnowledgeStatus();
+      setKnowledgeStatus(status);
+      return status;
+    } catch (error) {
+      const status = unavailableKnowledgeStatus(toErrorMessage(error));
+      setKnowledgeStatus(status);
+      return status;
+    }
+  };
+
+  const refreshKnowledge = async ({
+    includeStatus = true,
+  }: {
+    includeStatus?: boolean;
+  } = {}) => {
+    const [statusResult, sourcesResult, statsResult] = await Promise.allSettled([
+      includeStatus ? detectKnowledgeStatus() : Promise.resolve(knowledgeStatus),
+      invoke<KnowledgeSource[]>("knowledge_list_sources"),
+      invoke<KnowledgeStats>("knowledge_stats"),
+    ]);
+
+    if (statusResult.status === "fulfilled" && statusResult.value) {
+      setKnowledgeStatus(statusResult.value);
+    } else if (includeStatus) {
+      setKnowledgeStatus(
+        unavailableKnowledgeStatus(
+          statusResult.status === "rejected"
+            ? toErrorMessage(statusResult.reason)
+            : undefined,
+        ),
+      );
+    }
+
+    if (sourcesResult.status === "fulfilled" && Array.isArray(sourcesResult.value)) {
+      setKnowledgeSources(sourcesResult.value);
+    } else if (sourcesResult.status === "rejected") {
+      setKnowledgeSources([]);
+    }
+
+    if (
+      statsResult.status === "fulfilled" &&
+      statsResult.value &&
+      typeof statsResult.value === "object"
+    ) {
+      setKnowledgeStats(statsResult.value);
+    } else if (statsResult.status === "rejected") {
+      setKnowledgeStats(null);
+    }
+  };
+
   const refreshBackendStatus = async ({
     includeModelInventory = true,
-    settingsValue = settings,
   }: {
     includeModelInventory?: boolean;
-    settingsValue?: AppSettings | null;
   } = {}) => {
     if (!includeModelInventory) {
       const [status] = await Promise.all([
         detectBackendStatus(),
         detectWebSearchStatus(),
       ]);
-      return (await warmBackendIfNeeded(settingsValue, status)) ?? status;
+      return (await warmBackendIfNeeded(status)) ?? status;
     }
 
     const [status] = await Promise.all([
@@ -526,16 +678,10 @@ export function useAppController() {
       detectWebSearchStatus(),
       refreshModelInventory(),
     ]);
-    return (await warmBackendIfNeeded(settingsValue, status)) ?? status;
+    return (await warmBackendIfNeeded(status)) ?? status;
   };
 
-  const warmBackendIfNeeded = async (
-    settingsValue: AppSettings | null | undefined,
-    statusValue: BackendStatus | null | undefined,
-  ) => {
-    if (!settingsValue?.auto_start_backend) {
-      return statusValue;
-    }
+  const warmBackendIfNeeded = async (statusValue: BackendStatus | null | undefined) => {
     if (!statusValue || statusValue.connected || statusValue.state !== "ready") {
       return statusValue;
     }
@@ -569,8 +715,20 @@ export function useAppController() {
       setWebSearchStatus(
         payload.webSearchStatus ?? unavailableWebSearchStatus(),
       );
-      await refreshModelInventory();
-      void warmBackendIfNeeded(payload.settings, payload.backendStatus);
+      setKnowledgeStatus(
+        payload.knowledgeStatus ?? unavailableKnowledgeStatus(),
+      );
+      const [inventoryResult, knowledgeResult] = await Promise.allSettled([
+        refreshModelInventory(),
+        refreshKnowledge({ includeStatus: false }),
+      ]);
+      if (inventoryResult.status === "rejected") {
+        console.warn("refreshModelInventory during bootstrap failed:", inventoryResult.reason);
+      }
+      if (knowledgeResult.status === "rejected") {
+        console.warn("refreshKnowledge during bootstrap failed:", knowledgeResult.reason);
+      }
+      void warmBackendIfNeeded(payload.backendStatus);
       if (
         payload.backendStatus.connected &&
         payload.backendStatus.models[0] &&
@@ -625,6 +783,7 @@ export function useAppController() {
         }
 
         flushBufferedTokens();
+        applyCompletedAssistantPayload(event.payload);
         setIsGenerating(false);
         setGenerationStatus(null);
         setCurrentModel(formatModelLabel(event.payload.model));
@@ -662,6 +821,13 @@ export function useAppController() {
           if (nextStatus) {
             setGenerationStatus(nextStatus);
           }
+        },
+      );
+
+      const unlistenKnowledgeStatus = await listen<KnowledgeStatus>(
+        "knowledge-status",
+        (event) => {
+          setKnowledgeStatus(event.payload);
         },
       );
 
@@ -724,6 +890,7 @@ export function useAppController() {
         unlistenDone();
         unlistenActivity();
         unlistenWebSearchStatus();
+        unlistenKnowledgeStatus();
         unlistenToolCall();
         unlistenToolResult();
         unlistenError();
@@ -830,6 +997,8 @@ export function useAppController() {
       thinkingEnabled && (backendStatus?.supports_thinking ?? false);
     const effectiveWebAssistEnabled =
       webSearchEnabled && canUseWebSearch(backendStatus, webSearchStatus);
+    const effectiveKnowledgeEnabled =
+      knowledgeEnabled && canUseKnowledge(knowledgeStatus);
 
     // Build display content for the user bubble
     let displayContent = trimmed;
@@ -898,6 +1067,7 @@ export function useAppController() {
           attachments: serializedAttachments,
           thinkingEnabled: effectiveThinkingEnabled,
           webAssistEnabled: effectiveWebAssistEnabled,
+          knowledgeEnabled: effectiveKnowledgeEnabled,
         },
       });
       if (pendingSessionIdRef.current === sessionId) {
@@ -957,10 +1127,11 @@ export function useAppController() {
           desiredSettingsRef.current = savedInput;
           applySavedSettingsState(saved);
         }
-        await refreshBackendStatus({
-          includeModelInventory: false,
-          settingsValue: saved,
-        });
+        try {
+          await refreshBackendStatus({ includeModelInventory: false });
+        } catch (error) {
+          console.warn("refreshBackendStatus after save_settings failed:", error);
+        }
         return saved;
       });
 
@@ -984,10 +1155,12 @@ export function useAppController() {
       await saveAppSettings({
         auto_start_backend: settings.auto_start_backend,
         user_display_name: settings.user_display_name,
+        theme_mode: settings.theme_mode,
         chat: {
           reply_language: lang,
           max_tokens: settings.chat.max_tokens,
           web_assist_enabled: settings.chat.web_assist_enabled,
+          knowledge_enabled: settings.chat.knowledge_enabled,
           generation: settings.chat.generation,
         },
       });
@@ -1007,10 +1180,12 @@ export function useAppController() {
       await saveAppSettings({
         auto_start_backend: settings.auto_start_backend,
         user_display_name: settings.user_display_name,
+        theme_mode: settings.theme_mode,
         chat: {
           reply_language: settings.chat.reply_language,
           max_tokens: settings.chat.max_tokens,
           web_assist_enabled: next,
+          knowledge_enabled: settings.chat.knowledge_enabled,
           generation: settings.chat.generation,
         },
       });
@@ -1030,10 +1205,12 @@ export function useAppController() {
       await saveAppSettings({
         auto_start_backend: settings.auto_start_backend,
         user_display_name: settings.user_display_name,
+        theme_mode: settings.theme_mode,
         chat: {
           reply_language: settings.chat.reply_language,
           max_tokens: settings.chat.max_tokens,
           web_assist_enabled: settings.chat.web_assist_enabled,
+          knowledge_enabled: settings.chat.knowledge_enabled,
           generation: {
             ...settings.chat.generation,
             thinking_enabled: next,
@@ -1043,6 +1220,46 @@ export function useAppController() {
     } catch {
       setThinkingEnabled(!next);
     }
+  };
+
+  const toggleKnowledge = async () => {
+    if (!settings || !canUseKnowledge(knowledgeStatus)) {
+      return;
+    }
+
+    const next = !knowledgeEnabled;
+    setKnowledgeEnabled(next);
+    try {
+      await saveAppSettings({
+        auto_start_backend: settings.auto_start_backend,
+        user_display_name: settings.user_display_name,
+        theme_mode: settings.theme_mode,
+        chat: {
+          reply_language: settings.chat.reply_language,
+          max_tokens: settings.chat.max_tokens,
+          web_assist_enabled: settings.chat.web_assist_enabled,
+          knowledge_enabled: next,
+          generation: settings.chat.generation,
+        },
+      });
+    } catch {
+      setKnowledgeEnabled(!next);
+    }
+  };
+
+  const ingestKnowledgeFile = async (filePath: string) => {
+    await invoke("knowledge_ingest_file", { filePath });
+    await refreshKnowledge();
+  };
+
+  const ingestKnowledgeUrl = async (url: string) => {
+    await invoke("knowledge_ingest_url", { url });
+    await refreshKnowledge();
+  };
+
+  const deleteKnowledgeSource = async (sourceId: string) => {
+    await invoke("knowledge_delete_source", { sourceId });
+    await refreshKnowledge();
   };
 
   const selectModel = async (modelId: string) => {
@@ -1068,6 +1285,7 @@ export function useAppController() {
     backendStatus,
     webSearchStatus,
   );
+  const knowledgeToggleAvailable = canUseKnowledge(knowledgeStatus);
 
   return {
     sessions,
@@ -1076,6 +1294,9 @@ export function useAppController() {
     settings,
     backendStatus,
     webSearchStatus,
+    knowledgeStatus,
+    knowledgeSources,
+    knowledgeStats,
     currentModel,
     activeModelId,
     configurableModels,
@@ -1090,18 +1311,25 @@ export function useAppController() {
     sendMessage,
     cancelGeneration,
     refreshBackendStatus,
+    refreshKnowledge,
     refreshModelInventory,
     saveAppSettings,
     setReplyLanguage,
     selectModel,
     webSearchEnabled,
+    knowledgeEnabled,
     thinkingEnabled,
     generationStatus,
     nativeToolSupportAvailable: backendStatus?.supports_native_tools ?? false,
     webSearchToggleAvailable,
+    knowledgeToggleAvailable,
     audioInputAvailable: backendStatus?.supports_audio_input ?? false,
     thinkingAvailable: backendStatus?.supports_thinking ?? false,
     toggleWebSearch,
+    toggleKnowledge,
     toggleThinking,
+    ingestKnowledgeFile,
+    ingestKnowledgeUrl,
+    deleteKnowledgeSource,
   };
 }

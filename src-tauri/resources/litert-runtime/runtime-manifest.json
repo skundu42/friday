@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "platforms": [
+    {
+      "target_os": "macos",
+      "target_arch": "aarch64",
+      "runtime_version": "0.10.1",
+      "python_worker_binary_name": "friday-worker",
+      "litert_binary": {
+        "relative_resource_path": "litert-runtime/macos-aarch64/lit",
+        "download_url": "https://github.com/google-ai-edge/LiteRT-LM/releases/download/v0.10.1/lit_macos_arm64",
+        "sha256": "311ac22de765402adbba8fb04e4a70d0ed1263ff75d104b063453449651006bb"
+      },
+      "python_runtime_archive": {
+        "relative_resource_path": "litert-python/macos-aarch64/cpython-3.12.10+20250521-aarch64-apple-darwin-install_only.tar.gz",
+        "download_url": "https://github.com/astral-sh/python-build-standalone/releases/download/20250521/cpython-3.12.10%2B20250521-aarch64-apple-darwin-install_only.tar.gz",
+        "sha256": "02d9aa87bd3863a94fd35c215b274e156f946d2d5603127bec77af577ec22a05"
+      },
+      "python_wheel": {
+        "relative_resource_path": "litert-python/macos-aarch64/wheelhouse/litert_lm_api-0.10.1-cp312-cp312-macosx_12_0_arm64.whl",
+        "sha256": "bd32eb0d7c0c17243e970340ebc96a8f86e68cb9a31c891f5a595297da0c184d"
+      },
+      "worker_script": {
+        "relative_resource_path": "litert-python/macos-aarch64/worker/friday_litert_worker.py"
+      }
+    }
+  ],
+  "models": [
+    {
+      "id": "gemma-4-e2b-it",
+      "repo": "litert-community/gemma-4-E2B-it-litert-lm",
+      "filename": "gemma-4-E2B-it.litertlm",
+      "display_name": "Gemma 4 E2B",
+      "size_bytes": 2583085056,
+      "size_gb": 2.41,
+      "min_ram_gb": 4.0,
+      "supports_image_input": true,
+      "supports_audio_input": true,
+      "supports_video_input": false,
+      "supports_thinking": true,
+      "max_context_tokens": 131072,
+      "recommended_max_output_tokens": 4096
+    },
+    {
+      "id": "gemma-4-e4b-it",
+      "repo": "litert-community/gemma-4-E4B-it-litert-lm",
+      "filename": "gemma-4-E4B-it.litertlm",
+      "display_name": "Gemma 4 E4B",
+      "size_bytes": 3654467584,
+      "size_gb": 3.40,
+      "min_ram_gb": 8.0,
+      "supports_image_input": true,
+      "supports_audio_input": true,
+      "supports_video_input": false,
+      "supports_thinking": true,
+      "max_context_tokens": 131072,
+      "recommended_max_output_tokens": 8192
+    }
+  ],
+  "policy": {
+    "default_backend": "gpu",
+    "high_ram_default_model_threshold_gb": 16.0,
+    "daemon_idle_timeout_secs": 600,
+    "daemon_idle_check_interval_secs": 30,
+    "process_output_tail_limit_bytes": 32768
+  }
+}

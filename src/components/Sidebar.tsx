@@ -1,5 +1,6 @@
-import { Avatar, Button, Divider, Dropdown, List, Typography } from "antd";
+import { Button, Dropdown, Typography } from "antd";
 import {
+  DatabaseOutlined,
   DeleteOutlined,
   EllipsisOutlined,
   MessageOutlined,
@@ -14,20 +15,24 @@ const { Text, Title } = Typography;
 interface SidebarProps {
   sessions: Session[];
   activeSessionId: string;
+  activeView?: "chat" | "knowledge" | "settings";
   isBusy?: boolean;
   onCreateSession: () => void;
   onSelectSession: (sessionId: string) => void;
   onDeleteSession: (sessionId: string) => void;
+  onShowKnowledge: () => void;
   onShowSettings: () => void;
 }
 
 export default function Sidebar({
   sessions,
   activeSessionId,
+  activeView = "chat",
   isBusy = false,
   onCreateSession,
   onSelectSession,
   onDeleteSession,
+  onShowKnowledge,
   onShowSettings,
 }: SidebarProps) {
   const confirmDelete = (session: Session) => {
@@ -36,30 +41,15 @@ export default function Sidebar({
   };
 
   return (
-    <div
-      style={{
-        height: "100%",
-        display: "flex",
-        flexDirection: "column",
-        padding: 16,
-        gap: 16,
-      }}
-    >
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 12,
-          padding: "4px 0",
-        }}
-      >
-        <AppLogo size={44} />
-        <div>
-          <Title level={5} style={{ margin: 0 }}>
+    <div className="sidebar-shell">
+      <div className="sidebar-brand">
+        <AppLogo size={46} />
+        <div className="sidebar-brand__copy">
+          <Title level={5} className="sidebar-brand__title">
             Friday
           </Title>
-          <Text type="secondary" style={{ fontSize: 11 }}>
-            Your personal local desktop assistant
+          <Text className="sidebar-brand__subtitle">
+            Local-first desktop assistant
           </Text>
         </div>
       </div>
@@ -67,151 +57,112 @@ export default function Sidebar({
       <Button
         type="primary"
         icon={<PlusOutlined />}
-        block
         onClick={onCreateSession}
         disabled={isBusy}
-        style={{
-          height: 44,
-          border: "2px solid #2C2C2C",
-          boxShadow: "3px 3px 0 #2C2C2C",
-          background: "#52C41A",
-        }}
+        className="primary-action sidebar-primary"
       >
         New Chat
       </Button>
 
-      <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            marginBottom: 8,
-          }}
-        >
-          <Text
-            type="secondary"
-            style={{ fontSize: 11, textTransform: "uppercase", fontWeight: 700 }}
-          >
-            Recent Chats
-          </Text>
-          <Text type="secondary" style={{ fontSize: 11 }}>
-            {sessions.length}
-          </Text>
+      <div className="sidebar-section">
+        <div className="sidebar-section__head">
+          <span className="sidebar-section__label">Recent Chats</span>
+          <span className="sidebar-section__count">{sessions.length}</span>
         </div>
 
-        <div style={{ flex: 1, overflowY: "auto" }}>
-          <List
-            dataSource={sessions}
-            renderItem={(session) => {
+        <div className="sidebar-session-list">
+          {sessions.length === 0 ? (
+            <div className="sidebar-empty">No conversations yet</div>
+          ) : (
+            sessions.map((session) => {
               const isActive = session.id === activeSessionId;
+
               return (
-                <List.Item
+                <div
+                  key={session.id}
+                  className={`session-item${isActive ? " is-active" : ""}${isBusy ? " is-disabled" : ""}`}
                   onClick={() => {
                     if (isBusy) return;
                     onSelectSession(session.id);
                   }}
-                  style={{
-                    cursor: isBusy ? "not-allowed" : "pointer",
-                    borderRadius: 14,
-                    padding: "10px 12px",
-                    marginBottom: 8,
-                    background: isActive ? "#FFF0F6" : "#FFFFFF",
-                    border: isActive
-                      ? "3px solid #2C2C2C"
-                      : "2px solid #E8E8E8",
-                    boxShadow: isActive ? "3px 3px 0 #2C2C2C" : "none",
-                    alignItems: "flex-start",
-                  }}
-                  extra={
-                    <Dropdown
-                      trigger={["click"]}
-                      menu={{
-                        items: [
-                          {
-                            key: "delete",
-                            icon: <DeleteOutlined />,
-                            danger: true,
-                            label: "Delete chat",
-                            onClick: () => confirmDelete(session),
-                          },
-                        ],
-                      }}
-                    >
-                      <Button
-                        type="text"
-                        size="small"
-                        icon={<EllipsisOutlined />}
-                        onClick={(event) => event.stopPropagation()}
-                        disabled={isBusy}
-                        aria-label={`More actions for ${session.title}`}
-                      />
-                    </Dropdown>
-                  }
-                >
-                  <List.Item.Meta
-                    avatar={
-                      <Avatar
-                        size={32}
-                        icon={<MessageOutlined />}
-                        style={{
-                          background: isActive ? "#52C41A" : "#FFF9F0",
-                          color: "#2C2C2C",
-                          border: "2px solid #2C2C2C",
-                          marginTop: 2,
-                        }}
-                      />
+                  role="button"
+                  tabIndex={isBusy ? -1 : 0}
+                  onKeyDown={(event) => {
+                    if (isBusy) return;
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      onSelectSession(session.id);
                     }
-                    title={
-                      <Text
-                        strong
-                        style={{
-                          display: "block",
-                          fontSize: 13,
-                          lineHeight: 1.35,
-                        }}
-                      >
+                  }}
+                  aria-current={isActive ? "page" : undefined}
+                >
+                  <div className="session-item__body">
+                    <span className="session-item__icon">
+                      <MessageOutlined />
+                    </span>
+                    <div className="session-item__copy">
+                      <Text strong className="session-item__title">
                         {session.title}
                       </Text>
-                    }
-                    description={
-                      <Text type="secondary" style={{ fontSize: 11 }}>
+                      <Text className="session-item__timestamp">
                         {formatRelativeSessionTime(session.updated_at)}
                       </Text>
-                    }
-                  />
-                </List.Item>
-              );
-            }}
-          />
+                    </div>
+                  </div>
 
-          {sessions.length === 0 ? (
-            <Text
-              type="secondary"
-              style={{
-                fontSize: 12,
-                display: "block",
-                textAlign: "center",
-                marginTop: 20,
-              }}
-            >
-              No conversations yet
-            </Text>
-          ) : null}
+                  <Dropdown
+                    trigger={["click"]}
+                    menu={{
+                      items: [
+                        {
+                          key: "delete",
+                          icon: <DeleteOutlined />,
+                          danger: true,
+                          label: "Delete chat",
+                          onClick: () => confirmDelete(session),
+                        },
+                      ],
+                    }}
+                  >
+                    <Button
+                      type="text"
+                      size="small"
+                      icon={<EllipsisOutlined />}
+                      onClick={(event) => event.stopPropagation()}
+                      disabled={isBusy}
+                      aria-label={`More actions for ${session.title}`}
+                      className="session-item__menu"
+                    />
+                  </Dropdown>
+                </div>
+              );
+            })
+          )}
         </div>
       </div>
 
-      <Divider style={{ margin: 0 }} />
-      <Button
-        icon={<SettingOutlined />}
-        block
-        onClick={onShowSettings}
-        disabled={isBusy}
-        aria-label="Open settings"
-        style={{ height: 40 }}
-      >
-        Settings
-      </Button>
+      <div className="sidebar-footer">
+        <Button
+          icon={<DatabaseOutlined />}
+          onClick={onShowKnowledge}
+          disabled={isBusy}
+          aria-label="Open knowledge"
+          aria-pressed={activeView === "knowledge"}
+          className={`sidebar-footer-button${activeView === "knowledge" ? " is-active" : ""}`}
+        >
+          Knowledge
+        </Button>
+        <Button
+          icon={<SettingOutlined />}
+          onClick={onShowSettings}
+          disabled={isBusy}
+          aria-label="Open settings"
+          aria-pressed={activeView === "settings"}
+          className={`sidebar-footer-button${activeView === "settings" ? " is-active" : ""}`}
+        >
+          Settings
+        </Button>
+      </div>
     </div>
   );
 }

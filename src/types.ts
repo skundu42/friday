@@ -99,16 +99,20 @@ export type ReplyLanguage =
   | "tamil"
   | "punjabi";
 
+export type ThemeMode = "light" | "dark";
+
 export interface ChatSettings {
   reply_language: ReplyLanguage;
   max_tokens: number;
   web_assist_enabled: boolean;
+  knowledge_enabled: boolean;
   generation: GenerationSettings;
 }
 
 export interface AppSettings {
   auto_start_backend: boolean;
   user_display_name: string;
+  theme_mode: ThemeMode;
   chat: ChatSettings;
 }
 
@@ -121,12 +125,27 @@ export interface GenerationSettings {
 export interface AppSettingsInput {
   auto_start_backend: boolean;
   user_display_name: string;
+  theme_mode: ThemeMode;
   chat: {
     reply_language: ReplyLanguage;
     max_tokens: number;
     web_assist_enabled: boolean;
+    knowledge_enabled: boolean;
     generation: GenerationSettings;
   };
+}
+
+export type KnowledgeStatusState =
+  | "unavailable"
+  | "needs_models"
+  | "downloading_models"
+  | "ready"
+  | "indexing"
+  | "error";
+
+export interface KnowledgeStatus {
+  state: KnowledgeStatusState;
+  message: string;
 }
 
 export interface BootstrapPayload {
@@ -136,6 +155,7 @@ export interface BootstrapPayload {
   settings: AppSettings;
   backendStatus: BackendStatus;
   webSearchStatus: WebSearchStatus;
+  knowledgeStatus: KnowledgeStatus;
 }
 
 export interface SessionSelectionResult {
@@ -159,6 +179,8 @@ export interface ChatDonePayload {
   model: string;
   cancelled?: boolean;
   hasContent?: boolean;
+  content?: string;
+  contentParts?: unknown | null;
 }
 
 // Tool calling types
@@ -174,41 +196,56 @@ export interface ToolResultEvent {
   result: Record<string, unknown>;
 }
 
-// RAG types
-export interface SearchResult {
-  text: string;
-  source_file: string;
-  file_name: string;
-  chunk_index: number;
-  doc_id: string;
+export type KnowledgeSourceKind = "file" | "url";
+export type KnowledgeModality = "text" | "image" | "audio" | "webpage";
+
+export interface KnowledgeSource {
+  id: string;
+  sourceKind: KnowledgeSourceKind;
+  modality: KnowledgeModality;
+  locator: string;
+  displayName: string;
+  mimeType?: string | null;
+  fileSizeBytes?: number | null;
+  assetPath?: string | null;
+  contentHash: string;
+  status: string;
+  error?: string | null;
+  chunkCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface KnowledgeCitation {
+  sourceId: string;
+  modality: KnowledgeModality;
+  displayName: string;
+  locator: string;
   score: number;
+  chunkIndex?: number | null;
+  snippet?: string | null;
 }
 
-export interface SearchResponse {
-  results: SearchResult[];
-  total: number;
+export interface KnowledgeIngestResult {
+  sourceId?: string | null;
+  displayName: string;
+  modality: KnowledgeModality;
+  status: string;
+  chunkCount: number;
+  error?: string | null;
 }
 
-export interface IngestResult {
-  doc_id?: string;
-  file_name?: string;
-  chunks?: number;
-  ingested?: number;
-  errors?: number;
-  status?: string;
-  error?: string;
+export interface KnowledgeDeleteResult {
+  deleted: boolean;
+  sourceId: string;
 }
 
-export interface DocumentInfo {
-  doc_id: string;
-  file_name: string;
-  source_file: string;
-  total_chunks: number;
-}
-
-export interface RagStats {
-  total_chunks: number;
-  storage_dir: string;
+export interface KnowledgeStats {
+  totalSources: number;
+  readySources: number;
+  totalTextChunks: number;
+  totalImageAssets: number;
+  storageDir: string;
 }
 
 // Model types
