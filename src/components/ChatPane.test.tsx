@@ -380,6 +380,62 @@ describe("ChatPane", () => {
     expect(onSendMessage).not.toHaveBeenCalled();
   });
 
+  it("does not cancel on Escape when generation is not active", () => {
+    const onCancelGeneration = vi.fn();
+    renderChatPane({ onCancelGeneration, isGenerating: false });
+
+    const input = screen.getByPlaceholderText("Ask Friday anything...");
+    fireEvent.keyDown(input, { key: "Escape" });
+
+    expect(onCancelGeneration).not.toHaveBeenCalled();
+  });
+
+  it("cancels on Escape when generation is active", () => {
+    const onCancelGeneration = vi.fn();
+    renderChatPane({ onCancelGeneration, isGenerating: true });
+
+    const input = screen.getByPlaceholderText("Ask Friday anything...");
+    fireEvent.keyDown(input, { key: "Escape" });
+
+    expect(onCancelGeneration).toHaveBeenCalledTimes(1);
+  });
+
+  it("hides the generic thinking hint in the composer while streaming", () => {
+    renderChatPane({
+      isGenerating: true,
+      generationStatus: "Friday is thinking…",
+      messages: [
+        {
+          id: "assistant-1",
+          session_id: "session-1",
+          role: "assistant",
+          content: "Partial reply",
+          created_at: "2026-04-16T10:20:00Z",
+        },
+      ],
+    });
+
+    expect(screen.queryByText("Friday is thinking…")).toBeNull();
+  });
+
+  it("keeps specific generation status text in the composer", () => {
+    renderChatPane({
+      isGenerating: true,
+      generationStatus: "Searching the web…",
+      messages: [
+        {
+          id: "assistant-1",
+          session_id: "session-1",
+          role: "assistant",
+          content: "Partial reply",
+          created_at: "2026-04-16T10:20:00Z",
+        },
+      ],
+    });
+
+    expect(screen.getByText("Searching the web…")).not.toBeNull();
+  });
+
   it("uses the latest image capability state for dropped files after rerender", async () => {
     class FileReaderMock {
       result: string | ArrayBuffer | null = null;

@@ -137,6 +137,7 @@ export default function SetupWizard({
   const [isSavingName, setIsSavingName] = useState(false);
   const [isLaunchingAssistant, setIsLaunchingAssistant] = useState(false);
   const warmupPromiseRef = useRef<Promise<void> | null>(null);
+  const setupStatusRef = useRef<SetupStatus | null>(null);
 
   const needsDisplayName = settings.user_display_name.trim().length === 0;
   const requiresModelSetup = !(setupStatus?.readyToChat ?? false);
@@ -172,6 +173,10 @@ export default function SetupWizard({
       });
   }, []);
 
+  useEffect(() => {
+    setupStatusRef.current = setupStatus;
+  }, [setupStatus]);
+
   const startAssistantWarmup = () => {
     if (!setupStatus?.readyToChat || warmupPromiseRef.current) {
       return warmupPromiseRef.current;
@@ -200,9 +205,15 @@ export default function SetupWizard({
 
   useEffect(() => {
     let unlisten: UnlistenFn | undefined;
-    listen<DownloadProgress>("model-download-progress", (event) => {
+    let disposed = false;
+
+    void listen<DownloadProgress>("model-download-progress", (event) => {
       setDownloadProgress((previous) => {
-        const next = mergeDownloadProgress(previous, event.payload, setupStatus);
+        const next = mergeDownloadProgress(
+          previous,
+          event.payload,
+          setupStatusRef.current,
+        );
 
         if (next.state === "complete") {
           setIsDownloading(false);
@@ -219,14 +230,23 @@ export default function SetupWizard({
 
         return next;
       });
-    }).then((fn) => {
-      unlisten = fn;
-    });
+    })
+      .then((fn) => {
+        if (disposed) {
+          fn();
+          return;
+        }
+        unlisten = fn;
+      })
+      .catch((error) => {
+        console.error("[SetupWizard] model-download-progress listen error:", error);
+      });
 
     return () => {
+      disposed = true;
       unlisten?.();
     };
-  }, [setupStatus]);
+  }, []);
 
   const startDownload = async () => {
     const totalBytes = estimateModelBytes(setupStatus);

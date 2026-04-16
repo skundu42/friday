@@ -159,8 +159,10 @@ export default function App() {
         }
         setWizardChecked(true);
       })
-      .catch(() => {
+      .catch((error) => {
         if (!cancelled) {
+          console.error("[App] get_setup_status error:", error);
+          setShowWizard(true);
           setWizardChecked(true);
         }
       });

@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import textwrap
 import wave
 import zipfile
 import zlib
@@ -19,7 +20,7 @@ from typing import Any
 
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
-PYTHON_ARCHIVE = (
+DEFAULT_PYTHON_ARCHIVE = (
     REPO_ROOT
     / "src-tauri"
     / "resources"
@@ -27,7 +28,7 @@ PYTHON_ARCHIVE = (
     / "macos-aarch64"
     / "cpython-3.12.10+20250521-aarch64-apple-darwin-install_only.tar.gz"
 )
-PYTHON_WHEEL = (
+DEFAULT_PYTHON_WHEEL = (
     REPO_ROOT
     / "src-tauri"
     / "resources"
@@ -36,7 +37,7 @@ PYTHON_WHEEL = (
     / "wheelhouse"
     / "litert_lm_api-0.10.1-cp312-cp312-macosx_12_0_arm64.whl"
 )
-WORKER_SCRIPT = (
+DEFAULT_WORKER_SCRIPT = (
     REPO_ROOT
     / "src-tauri"
     / "resources"
@@ -45,7 +46,39 @@ WORKER_SCRIPT = (
     / "worker"
     / "friday_litert_worker.py"
 )
-DEFAULT_MODEL_PATH = pathlib.Path.home() / "Library/Application Support/com.friday.app/lit-home/models/gemma-4-e2b-it/model.litertlm"
+DEFAULT_MODEL_PATH = (
+    pathlib.Path.home()
+    / "Library/Application Support/com.friday.app/lit-home/models/gemma-4-e2b-it/model.litertlm"
+)
+
+MODULE_SMOKE_CODE = textwrap.dedent(
+    """
+    import importlib.util
+    import pathlib
+    import sys
+
+    worker_path = pathlib.Path(sys.argv[1])
+    spec = importlib.util.spec_from_file_location("friday_litert_worker", worker_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Unable to load worker module from {worker_path}")
+
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+
+    calculate = module.calculate_impl("2 + 2")
+    if calculate.get("result") != "4.0":
+        raise RuntimeError(f"Unexpected calculate result: {calculate}")
+
+    current_datetime = module.get_current_datetime_impl()
+    required_keys = {"local_iso", "local_datetime", "timezone", "utc_offset"}
+    missing = sorted(required_keys - set(current_datetime))
+    if missing:
+        raise RuntimeError(f"Missing datetime fields: {missing}")
+
+    print("module-smoke-ok")
+    """
+).strip()
 
 
 def parse_args() -> argparse.Namespace:
@@ -53,22 +86,81 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-path", type=pathlib.Path, default=DEFAULT_MODEL_PATH)
     parser.add_argument("--blockscout-image", type=pathlib.Path)
     parser.add_argument("--audio-path", type=pathlib.Path)
+    parser.add_argument("--python-archive", type=pathlib.Path, default=DEFAULT_PYTHON_ARCHIVE)
+    parser.add_argument("--python-wheel", type=pathlib.Path, default=DEFAULT_PYTHON_WHEEL)
+    parser.add_argument("--worker-script", type=pathlib.Path, default=DEFAULT_WORKER_SCRIPT)
+    parser.add_argument(
+        "--ci",
+        action="store_true",
+        help=(
+            "Run deterministic CI smoke checks only: validate bundled runtime assets, "
+            "import worker module, and verify worker boot/shutdown without a model."
+        ),
+    )
     return parser.parse_args()
 
 
-def ensure_runtime(temp_root: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path]:
+def ensure_file(path: pathlib.Path, label: str) -> None:
+    if not path.exists():
+        raise RuntimeError(f"{label} not found: {path}")
+    if not path.is_file():
+        raise RuntimeError(f"{label} must be a file: {path}")
+
+
+def ensure_runtime(
+    temp_root: pathlib.Path,
+    python_archive: pathlib.Path,
+    python_wheel: pathlib.Path,
+) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path]:
     runtime_dir = temp_root / "runtime"
     python_dir = runtime_dir / "python"
     site_dir = runtime_dir / "python-site"
+    site_dir.mkdir(parents=True, exist_ok=True)
 
-    with tarfile.open(PYTHON_ARCHIVE, "r:gz") as archive:
-        archive.extractall(runtime_dir)
+    with tarfile.open(python_archive, "r:gz") as archive:
+        extractall_kwargs: dict[str, Any] = {}
+        if "filter" in tarfile.TarFile.extractall.__code__.co_varnames:
+            extractall_kwargs["filter"] = "data"
+        archive.extractall(runtime_dir, **extractall_kwargs)
 
-    with zipfile.ZipFile(PYTHON_WHEEL) as archive:
+    with zipfile.ZipFile(python_wheel) as archive:
         archive.extractall(site_dir)
 
     python_binary = python_dir / "bin" / "python3"
+    if not python_binary.exists():
+        raise RuntimeError(f"Extracted Python binary not found: {python_binary}")
     return python_binary, site_dir, python_dir / "lib"
+
+
+def build_worker_env(site_dir: pathlib.Path, python_lib_dir: pathlib.Path) -> dict[str, str]:
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
+    env["PYTHONNOUSERSITE"] = "1"
+    env["PYTHONPATH"] = str(site_dir)
+    env["DYLD_LIBRARY_PATH"] = f"{site_dir / 'litert_lm'}:{python_lib_dir}"
+    return env
+
+
+def run_module_import_smoke(
+    python_binary: pathlib.Path,
+    worker_script: pathlib.Path,
+    env: dict[str, str],
+) -> None:
+    result = subprocess.run(
+        [str(python_binary), "-c", MODULE_SMOKE_CODE, str(worker_script)],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=45,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            "Worker module smoke failed.\n"
+            f"stdout:\n{result.stdout}\n"
+            f"stderr:\n{result.stderr}"
+        )
+    if "module-smoke-ok" not in result.stdout:
+        raise RuntimeError("Worker module smoke did not emit the expected success marker.")
 
 
 def make_png(path: pathlib.Path) -> None:
@@ -120,16 +212,11 @@ class WorkerProcess:
     def __init__(
         self,
         python_binary: pathlib.Path,
-        site_dir: pathlib.Path,
-        python_lib_dir: pathlib.Path,
+        worker_script: pathlib.Path,
+        env: dict[str, str],
     ) -> None:
-        env = os.environ.copy()
-        env["PYTHONUNBUFFERED"] = "1"
-        env["PYTHONNOUSERSITE"] = "1"
-        env["PYTHONPATH"] = str(site_dir)
-        env["DYLD_LIBRARY_PATH"] = f"{site_dir / 'litert_lm'}:{python_lib_dir}"
         self.process = subprocess.Popen(
-            [str(python_binary), str(WORKER_SCRIPT)],
+            [str(python_binary), str(worker_script)],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -141,21 +228,42 @@ class WorkerProcess:
         assert self.process.stderr is not None
 
     def send(self, payload: dict[str, Any]) -> None:
+        if self.process.stdin is None:
+            raise RuntimeError("Worker stdin is unavailable.")
         self.process.stdin.write(json.dumps(payload) + "\n")
         self.process.stdin.flush()
 
     def recv(self) -> dict[str, Any]:
+        if self.process.stdout is None:
+            raise RuntimeError("Worker stdout is unavailable.")
         line = self.process.stdout.readline()
         if not line:
-            stderr = self.process.stderr.read()
+            stderr = self.read_stderr()
             raise RuntimeError(f"worker exited early: {stderr}")
         return json.loads(line)
 
-    def close(self) -> None:
+    def read_stderr(self) -> str:
+        if self.process.stderr is None:
+            return ""
+        return self.process.stderr.read()
+
+    def shutdown(self, timeout_seconds: int = 8) -> None:
+        if self.process.poll() is not None:
+            return
+        self.send({"type": "shutdown"})
         try:
-            self.send({"type": "shutdown"})
-        except Exception:
-            pass
+            exit_code = self.process.wait(timeout=timeout_seconds)
+        except subprocess.TimeoutExpired as exc:
+            self.process.kill()
+            raise RuntimeError("Worker did not shut down within timeout.") from exc
+        if exit_code != 0:
+            raise RuntimeError(
+                f"Worker exited with {exit_code} during shutdown: {self.read_stderr()}"
+            )
+
+    def close(self) -> None:
+        if self.process.poll() is not None:
+            return
         self.process.terminate()
         try:
             self.process.wait(timeout=3)
@@ -217,16 +325,38 @@ def run_chat(
     return "".join(answer_parts), "".join(thought_parts)
 
 
-def main() -> int:
-    args = parse_args()
-    if not args.model_path.exists():
-        print(f"Model file not found: {args.model_path}", file=sys.stderr)
-        return 1
+def run_ci_smoke(args: argparse.Namespace) -> int:
+    with tempfile.TemporaryDirectory(prefix="friday-worker-ci-smoke-") as temp_dir_name:
+        temp_dir = pathlib.Path(temp_dir_name)
+        python_binary, site_dir, python_lib_dir = ensure_runtime(
+            temp_dir,
+            args.python_archive,
+            args.python_wheel,
+        )
+        env = build_worker_env(site_dir, python_lib_dir)
+        run_module_import_smoke(python_binary, args.worker_script, env)
 
+        worker = WorkerProcess(python_binary, args.worker_script, env)
+        try:
+            worker.shutdown()
+        finally:
+            worker.close()
+
+    print("ci-runtime-smoke: ok")
+    return 0
+
+
+def run_model_smoke(args: argparse.Namespace) -> int:
     with tempfile.TemporaryDirectory(prefix="friday-worker-smoke-") as temp_dir_name:
         temp_dir = pathlib.Path(temp_dir_name)
-        python_binary, site_dir, python_lib_dir = ensure_runtime(temp_dir)
-        worker = WorkerProcess(python_binary, site_dir, python_lib_dir)
+        python_binary, site_dir, python_lib_dir = ensure_runtime(
+            temp_dir,
+            args.python_archive,
+            args.python_wheel,
+        )
+        env = build_worker_env(site_dir, python_lib_dir)
+        run_module_import_smoke(python_binary, args.worker_script, env)
+        worker = WorkerProcess(python_binary, args.worker_script, env)
 
         try:
             expect_ready(worker, args.model_path, 4096)
@@ -322,6 +452,25 @@ def main() -> int:
             worker.close()
 
     return 0
+
+
+def main() -> int:
+    args = parse_args()
+    try:
+        ensure_file(args.python_archive, "Python runtime archive")
+        ensure_file(args.python_wheel, "Python runtime wheel")
+        ensure_file(args.worker_script, "Worker script")
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    if args.ci:
+        return run_ci_smoke(args)
+
+    if not args.model_path.exists():
+        print(f"Model file not found: {args.model_path}", file=sys.stderr)
+        return 1
+    return run_model_smoke(args)
 
 
 if __name__ == "__main__":

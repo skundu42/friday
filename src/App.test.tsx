@@ -239,6 +239,25 @@ describe("App", () => {
     expect(controller.refreshBackendStatus).toHaveBeenCalledTimes(1);
   });
 
+  it("shows setup wizard when setup status load fails", async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "get_setup_status") {
+        return Promise.reject(new Error("setup unavailable"));
+      }
+      if (command === "list_models") {
+        return Promise.resolve([]);
+      }
+      if (command === "list_downloaded_model_ids") {
+        return Promise.resolve([]);
+      }
+      return Promise.resolve(undefined);
+    });
+
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByText("Welcome to Friday")).not.toBeNull());
+  });
+
   it("opens the Knowledge page from the sidebar", async () => {
     const controller = makeController();
     controllerState.mockReturnValue(controller);

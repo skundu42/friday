@@ -42,6 +42,7 @@ const MIN_VECTOR_INDEX_ROWS: usize = 256;
 const KNOWLEDGE_WRITE_BATCH_SIZE: usize = 64;
 const KNOWLEDGE_RUNTIME_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 const KNOWLEDGE_RUNTIME_IDLE_CHECK_INTERVAL: Duration = Duration::from_secs(30);
+const KNOWLEDGE_DB_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -354,35 +355,60 @@ impl KnowledgeManager {
         );
 
         let result = async {
-            let mut runtime = self.runtime.lock().await;
-            if load_db && runtime.db.is_none() {
-                runtime.db = Some(
+            if load_db {
+                let connection =
                     lancedb::connect(root_dir.join("lancedb").to_string_lossy().as_ref())
                         .execute()
                         .await
-                        .context("Failed to open LanceDB")?,
-                );
+                        .context("Failed to open LanceDB")?;
+                let mut runtime = self.runtime.lock().await;
+                if runtime.db.is_none() {
+                    runtime.db = Some(connection);
+                }
             }
-            if load_text && runtime.text_embedder.is_none() {
-                runtime.text_embedder = Some(Arc::new(
-                    EmbedderBuilder::new()
-                        .model_id(Some(TEXT_MODEL_ID))
-                        .from_pretrained_hf()
-                        .with_context(|| {
-                            format!("Failed to load text embedder {}", TEXT_MODEL_ID)
-                        })?,
-                ));
+
+            if load_text {
+                let runtime = Arc::clone(&self.runtime);
+                tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+                    let embedder = Arc::new(
+                        EmbedderBuilder::new()
+                            .model_id(Some(TEXT_MODEL_ID))
+                            .from_pretrained_hf()
+                            .with_context(|| {
+                                format!("Failed to load text embedder {}", TEXT_MODEL_ID)
+                            })?,
+                    );
+                    let mut runtime = runtime.blocking_lock();
+                    if runtime.text_embedder.is_none() {
+                        runtime.text_embedder = Some(embedder);
+                    }
+                    Ok(())
+                })
+                .await
+                .context("Knowledge text runtime task failed")??;
             }
-            if load_image && runtime.image_embedder.is_none() {
-                runtime.image_embedder = Some(Arc::new(
-                    EmbedderBuilder::new()
-                        .model_id(Some(IMAGE_MODEL_ID))
-                        .from_pretrained_hf()
-                        .with_context(|| {
-                            format!("Failed to load image embedder {}", IMAGE_MODEL_ID)
-                        })?,
-                ));
+
+            if load_image {
+                let runtime = Arc::clone(&self.runtime);
+                tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+                    let embedder = Arc::new(
+                        EmbedderBuilder::new()
+                            .model_id(Some(IMAGE_MODEL_ID))
+                            .from_pretrained_hf()
+                            .with_context(|| {
+                                format!("Failed to load image embedder {}", IMAGE_MODEL_ID)
+                            })?,
+                    );
+                    let mut runtime = runtime.blocking_lock();
+                    if runtime.image_embedder.is_none() {
+                        runtime.image_embedder = Some(embedder);
+                    }
+                    Ok(())
+                })
+                .await
+                .context("Knowledge image runtime task failed")??;
             }
+
             Ok::<(), anyhow::Error>(())
         }
         .await;
@@ -501,19 +527,42 @@ fn knowledge_runtime_message(load_text: bool, load_image: bool) -> String {
     }
 }
 
+fn should_skip_knowledge_query(query: &str) -> bool {
+    let normalized = query.trim().to_lowercase();
+    if normalized.is_empty() {
+        return true;
+    }
+
+    if normalized.len() <= 3
+        && normalized
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric())
+    {
+        return true;
+    }
+
+    matches!(
+        normalized.as_str(),
+        "hi" | "hello" | "hey" | "yo" | "thanks" | "thank you" | "ok" | "okay" | "cool"
+    )
+}
+
 fn knowledge_runtime_idle(last_activity: Instant, active_uses: usize, now: Instant) -> bool {
     active_uses == 0
         && now.saturating_duration_since(last_activity) >= KNOWLEDGE_RUNTIME_IDLE_TIMEOUT
 }
 
 fn open_db(db_path: &Path) -> Result<rusqlite::Connection, String> {
-    rusqlite::Connection::open(db_path).map_err(|e| {
+    let conn = rusqlite::Connection::open(db_path).map_err(|e| {
         format!(
             "Failed to open Knowledge database {}: {}",
             db_path.display(),
             e
         )
-    })
+    })?;
+    conn.busy_timeout(KNOWLEDGE_DB_BUSY_TIMEOUT)
+        .map_err(|e| format!("Failed to configure Knowledge database busy timeout: {}", e))?;
+    Ok(conn)
 }
 
 #[derive(Debug, Clone)]
@@ -527,6 +576,12 @@ struct SourceRecord {
     file_size_bytes: Option<u64>,
     asset_path: Option<String>,
     content_hash: String,
+    chunk_count: usize,
+}
+
+#[derive(Debug, Clone)]
+struct ExistingSourceMatch {
+    id: String,
     chunk_count: usize,
 }
 
@@ -705,14 +760,14 @@ pub async fn ingest_url(
             let conn = open_db(db_path)?;
             source_unchanged(&conn, &source)?
         };
-        if url_source_unchanged {
+        if let Some(existing_source) = url_source_unchanged {
             manager.set_status(app, KnowledgeStatus::ready());
             return Ok(KnowledgeIngestResult {
-                source_id: Some(source.id),
+                source_id: Some(existing_source.id),
                 display_name: source.display_name,
                 modality: source.modality,
                 status: "skipped".to_string(),
-                chunk_count: source.chunk_count,
+                chunk_count: existing_source.chunk_count,
                 error: None,
             });
         }
@@ -723,7 +778,7 @@ pub async fn ingest_url(
         finalized_source
     };
 
-    persist_replacement_source(manager, db_path, &source).await?;
+    persist_replacement_source_with_cleanup(manager, db_path, &source).await?;
     manager.set_status(app, KnowledgeStatus::ready());
 
     Ok(KnowledgeIngestResult {
@@ -787,13 +842,14 @@ pub async fn delete_source(
     let _use_guard = manager.begin_use();
     delete_existing_source_rows(manager, source_id).await?;
     let conn = open_db(db_path)?;
-    conn.execute(
-        "DELETE FROM knowledge_sources WHERE id = ?1",
-        params![source_id],
-    )
-    .map_err(|e| format!("Failed to delete Knowledge source: {}", e))?;
+    let deleted_rows = conn
+        .execute(
+            "DELETE FROM knowledge_sources WHERE id = ?1",
+            params![source_id],
+        )
+        .map_err(|e| format!("Failed to delete Knowledge source: {}", e))?;
     Ok(KnowledgeDeleteResult {
-        deleted: true,
+        deleted: deleted_rows > 0,
         source_id: source_id.to_string(),
     })
 }
@@ -860,7 +916,7 @@ pub async fn search(
     query: &str,
 ) -> Result<KnowledgeSearchResults, String> {
     let _use_guard = manager.begin_use();
-    if query.trim().is_empty() {
+    if should_skip_knowledge_query(query) {
         return Ok(KnowledgeSearchResults::default());
     }
 
@@ -1152,13 +1208,13 @@ async fn ingest_file_inner(
         let conn = open_db(db_path)?;
         source_unchanged(&conn, &source)?
     };
-    if file_source_unchanged {
+    if let Some(existing_source) = file_source_unchanged {
         return Ok(KnowledgeIngestResult {
-            source_id: Some(source.id),
+            source_id: Some(existing_source.id),
             display_name: source.display_name,
             modality: source.modality,
             status: "skipped".to_string(),
-            chunk_count: 0,
+            chunk_count: existing_source.chunk_count,
             error: None,
         });
     }
@@ -1183,7 +1239,7 @@ async fn ingest_file_inner(
             let chunk_count = write_image_embeddings(manager, &source, image_embeddings).await?;
             let mut finalized_source = source.clone();
             finalized_source.chunk_count = chunk_count;
-            persist_replacement_source(manager, db_path, &finalized_source).await?;
+            persist_replacement_source_with_cleanup(manager, db_path, &finalized_source).await?;
             Ok(KnowledgeIngestResult {
                 source_id: Some(finalized_source.id),
                 display_name: finalized_source.display_name,
@@ -1227,7 +1283,7 @@ async fn ingest_file_inner(
             let chunk_count = write_text_embeddings(manager, &source, audio_embeddings).await?;
             let mut finalized_source = source.clone();
             finalized_source.chunk_count = chunk_count;
-            persist_replacement_source(manager, db_path, &finalized_source).await?;
+            persist_replacement_source_with_cleanup(manager, db_path, &finalized_source).await?;
             Ok(KnowledgeIngestResult {
                 source_id: Some(finalized_source.id),
                 display_name: finalized_source.display_name,
@@ -1262,7 +1318,7 @@ async fn ingest_file_inner(
             }
             let mut finalized_source = source.clone();
             finalized_source.chunk_count = chunk_count;
-            persist_replacement_source(manager, db_path, &finalized_source).await?;
+            persist_replacement_source_with_cleanup(manager, db_path, &finalized_source).await?;
             Ok(KnowledgeIngestResult {
                 source_id: Some(finalized_source.id),
                 display_name: finalized_source.display_name,
@@ -1368,19 +1424,29 @@ fn hash_embed_texts<'a>(embeddings: impl IntoIterator<Item = &'a EmbedData>) -> 
     saw_text.then(|| format!("{:x}", hasher.finalize()))
 }
 
-fn source_unchanged(conn: &rusqlite::Connection, source: &SourceRecord) -> Result<bool, String> {
-    let matching_source_id: Option<String> = conn
+fn source_unchanged(
+    conn: &rusqlite::Connection,
+    source: &SourceRecord,
+) -> Result<Option<ExistingSourceMatch>, String> {
+    let existing_source = conn
         .query_row(
-            "SELECT id
+            "SELECT id, chunk_count
              FROM knowledge_sources
              WHERE locator = ?1 AND content_hash = ?2 AND status = 'ready'
+             ORDER BY updated_at DESC
              LIMIT 1",
             params![source.locator, source.content_hash],
-            |row| row.get(0),
+            |row| {
+                let chunk_count: i64 = row.get(1)?;
+                Ok(ExistingSourceMatch {
+                    id: row.get(0)?,
+                    chunk_count: usize::try_from(chunk_count.max(0)).unwrap_or_default(),
+                })
+            },
         )
         .optional()
         .map_err(|e| format!("Failed to inspect Knowledge source hash: {}", e))?;
-    Ok(matching_source_id.is_some())
+    Ok(existing_source)
 }
 
 fn write_source_record(conn: &rusqlite::Connection, source: &SourceRecord) -> Result<(), String> {
@@ -1449,9 +1515,7 @@ fn stale_source_ids_for_locator(
     active_source_id: &str,
 ) -> Result<Vec<String>, String> {
     let mut stmt = conn
-        .prepare(
-            "SELECT id FROM knowledge_sources WHERE locator = ?1 AND id != ?2",
-        )
+        .prepare("SELECT id FROM knowledge_sources WHERE locator = ?1 AND id != ?2")
         .map_err(|e| format!("Failed to inspect stale Knowledge sources: {}", e))?;
     let rows = stmt
         .query_map(params![locator, active_source_id], |row| row.get(0))
@@ -1481,10 +1545,13 @@ fn commit_source_replacement(
     })();
 
     match result {
-        Ok(stale_source_ids) => conn.execute_batch("COMMIT;").map_err(|e| {
-            let _ = conn.execute_batch("ROLLBACK;");
-            format!("Failed to commit Knowledge source transaction: {}", e)
-        }).map(|_| stale_source_ids),
+        Ok(stale_source_ids) => conn
+            .execute_batch("COMMIT;")
+            .map_err(|e| {
+                let _ = conn.execute_batch("ROLLBACK;");
+                format!("Failed to commit Knowledge source transaction: {}", e)
+            })
+            .map(|_| stale_source_ids),
         Err(error) => {
             let _ = conn.execute_batch("ROLLBACK;");
             Err(error)
@@ -1522,6 +1589,27 @@ async fn persist_replacement_source(
     }
 
     Ok(())
+}
+
+async fn persist_replacement_source_with_cleanup(
+    manager: &KnowledgeManager,
+    db_path: &Path,
+    source: &SourceRecord,
+) -> Result<(), String> {
+    match persist_replacement_source(manager, db_path, source).await {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            if let Err(cleanup_error) = delete_existing_source_rows(manager, &source.id).await {
+                tracing::warn!(
+                    source_id = %source.id,
+                    locator = %source.locator,
+                    cleanup_error = %cleanup_error,
+                    "Failed to cleanup Knowledge rows after replacement persistence failure"
+                );
+            }
+            Err(error)
+        }
+    }
 }
 
 async fn delete_existing_source_rows(
@@ -2386,6 +2474,16 @@ mod tests {
     }
 
     #[test]
+    fn low_signal_queries_skip_knowledge_search() {
+        assert!(should_skip_knowledge_query(""));
+        assert!(should_skip_knowledge_query("hi"));
+        assert!(should_skip_knowledge_query("OK"));
+        assert!(!should_skip_knowledge_query(
+            "Summarize the local product notes"
+        ));
+    }
+
+    #[test]
     fn hash_file_matches_hash_bytes() {
         let dir = temp_test_dir("knowledge-hash");
         let path = dir.join("notes.txt");
@@ -2413,6 +2511,43 @@ mod tests {
             hash_embed_texts(embeddings_a.iter()),
             hash_embed_texts(embeddings_b.iter())
         );
+    }
+
+    #[test]
+    fn source_unchanged_returns_persisted_source_metadata() {
+        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory db");
+        conn.execute_batch(include_str!("../../migrations/001_initial.sql"))
+            .expect("apply migration 001");
+        conn.execute_batch(include_str!("../../migrations/004_knowledge.sql"))
+            .expect("apply migration 004");
+
+        conn.execute(
+            "INSERT INTO knowledge_sources (
+                id, source_kind, modality, locator, display_name, mime_type, file_size_bytes,
+                asset_path, content_hash, status, error, chunk_count, created_at, updated_at
+            ) VALUES (?1, 'file', 'text', ?2, ?3, 'text/plain', NULL, NULL, ?4, 'ready', NULL, ?5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+            params!["persisted-source", "/tmp/notes.txt", "notes.txt", "hash-1", 9_i64],
+        )
+        .expect("insert persisted source");
+
+        let candidate = SourceRecord {
+            id: "new-source".to_string(),
+            source_kind: KnowledgeSourceKind::File,
+            modality: KnowledgeModality::Text,
+            locator: "/tmp/notes.txt".to_string(),
+            display_name: "notes.txt".to_string(),
+            mime_type: Some("text/plain".to_string()),
+            file_size_bytes: None,
+            asset_path: None,
+            content_hash: "hash-1".to_string(),
+            chunk_count: 0,
+        };
+
+        let persisted = source_unchanged(&conn, &candidate)
+            .expect("query unchanged source")
+            .expect("existing source match");
+        assert_eq!(persisted.id, "persisted-source");
+        assert_eq!(persisted.chunk_count, 9);
     }
 
     #[test]

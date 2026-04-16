@@ -21,8 +21,8 @@ import AppLogo from "./AppLogo";
 import type {
   BackendStatus,
   FileAttachment,
+  FridayRenderableMessage,
   KnowledgeStatus,
-  Message,
   ReplyLanguage,
   WebSearchStatus,
 } from "../types";
@@ -143,7 +143,7 @@ function userFacingKnowledgeStatusMessage(
 }
 
 interface ChatPaneProps {
-  messages: Message[];
+  messages: FridayRenderableMessage[];
   isGenerating: boolean;
   generationStatus?: string | null;
   activeSessionTitle: string;
@@ -243,6 +243,11 @@ function backendStatusTone(backendStatus: BackendStatus | null) {
   return "danger";
 }
 
+function isGenericThinkingStatus(status?: string | null) {
+  if (!status) return false;
+  return status === "Friday is thinking…" || status === "Friday is thinking...";
+}
+
 export default function ChatPane({
   messages,
   isGenerating,
@@ -287,6 +292,7 @@ export default function ChatPane({
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const recordingStreamRef = useRef<MediaStream | null>(null);
   const recordingChunksRef = useRef<Blob[]>([]);
+  const isUnmountingRef = useRef(false);
   const audioRecordingSupported =
     audioInputAvailable &&
     typeof navigator !== "undefined" &&
@@ -327,6 +333,7 @@ export default function ChatPane({
 
   useEffect(() => {
     return () => {
+      isUnmountingRef.current = true;
       mediaRecorderRef.current?.stop();
       recordingStreamRef.current?.getTracks().forEach((track) => track.stop());
       void cleanupTempAttachments(attachmentsRef.current);
@@ -416,7 +423,8 @@ export default function ChatPane({
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
       void handleSend();
-    } else if (event.key === "Escape") {
+    } else if (event.key === "Escape" && isGenerating) {
+      event.preventDefault();
       void handleCancel();
     }
   };
@@ -782,8 +790,10 @@ export default function ChatPane({
       recordingStreamRef.current = null;
       recordingChunksRef.current = [];
       activeStream?.getTracks().forEach((track) => track.stop());
-      setAudioError("Audio recording failed.");
-      setIsRecordingAudio(false);
+      if (!isUnmountingRef.current) {
+        setAudioError("Audio recording failed.");
+        setIsRecordingAudio(false);
+      }
     };
     recorder.onstop = () => {
       const blob = new Blob(recordingChunksRef.current, {
@@ -794,9 +804,11 @@ export default function ChatPane({
       recordingStreamRef.current = null;
       recordingChunksRef.current = [];
       streamToStop?.getTracks().forEach((track) => track.stop());
-      setIsRecordingAudio(false);
+      if (!isUnmountingRef.current) {
+        setIsRecordingAudio(false);
+      }
 
-      if (blob.size === 0) {
+      if (isUnmountingRef.current || blob.size === 0) {
         return;
       }
 
@@ -873,6 +885,9 @@ export default function ChatPane({
       ? messages[messages.length - 1]?.id
       : undefined
     : undefined;
+  const composerGenerationStatus = isGenericThinkingStatus(generationStatus)
+    ? null
+    : generationStatus;
   const isWebSearchActive = webSearchAvailable && webSearchEnabled;
   const isKnowledgeActive = knowledgeAvailable && knowledgeEnabled;
   const isThinkingActive = thinkingAvailable && thinkingEnabled;
@@ -1112,10 +1127,12 @@ export default function ChatPane({
 
             <div className="chat-composer__hint">
               {isGenerating ? (
-                <>
-                  <span className="chat-loading__dot" />
-                  <span>{generationStatus ?? "Friday is thinking..."}</span>
-                </>
+                composerGenerationStatus ? (
+                  <>
+                    <span className="chat-loading__dot" />
+                    <span>{composerGenerationStatus}</span>
+                  </>
+                ) : null
               ) : (
                 <span>
                   {readyAttachments.length > 0
@@ -1179,7 +1196,9 @@ export default function ChatPane({
               <span className="is-danger">{capabilityStatus}</span>
             ) : null}
             {audioError ? <span className="is-danger">{audioError}</span> : null}
-            <span>{isRecordingAudio ? "Recording…" : "Enter to send"}</span>
+            <span className="chat-composer__footnote-hint">
+              {isRecordingAudio ? "Recording…" : "Enter to send"}
+            </span>
           </div>
         </div>
       </div>

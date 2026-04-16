@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import datetime
 import importlib.util
+import ipaddress
 import json
 import os
 import pathlib
 import select
 import subprocess
 import sys
+import tempfile
+import threading
 import time
 import unittest
 from email.message import Message
@@ -34,9 +37,19 @@ class WorkerProtocolTests(unittest.TestCase):
     class _FakeResponse:
         def __init__(self, body: bytes) -> None:
             self._body = body
+            self._cursor = 0
 
-        def read(self) -> bytes:
-            return self._body
+        def read(self, amt: int | None = None) -> bytes:
+            if self._cursor >= len(self._body):
+                return b""
+            if amt is None:
+                chunk = self._body[self._cursor :]
+                self._cursor = len(self._body)
+                return chunk
+            next_cursor = min(len(self._body), self._cursor + max(0, amt))
+            chunk = self._body[self._cursor : next_cursor]
+            self._cursor = next_cursor
+            return chunk
 
         def __enter__(self) -> "WorkerProtocolTests._FakeResponse":
             return self
@@ -57,9 +70,21 @@ class WorkerProtocolTests(unittest.TestCase):
             for key, value in (headers or {}).items():
                 self.headers[key] = value
             self._body = body
+            self._cursor = 0
+            self.read_amounts: list[int | None] = []
 
         def read(self, _amt: int | None = None) -> bytes:
-            return self._body
+            self.read_amounts.append(_amt)
+            if self._cursor >= len(self._body):
+                return b""
+            if _amt is None:
+                chunk = self._body[self._cursor :]
+                self._cursor = len(self._body)
+                return chunk
+            next_cursor = min(len(self._body), self._cursor + max(0, _amt))
+            chunk = self._body[self._cursor : next_cursor]
+            self._cursor = next_cursor
+            return chunk
 
         def getheader(self, key: str, default: str | None = None) -> str | None:
             return self.headers.get(key, default)
@@ -173,6 +198,55 @@ class WorkerProtocolTests(unittest.TestCase):
             ],
         )
 
+    def test_join_text_fragments_preserves_missing_boundary_spaces(self) -> None:
+        self.assertEqual(
+            _MODULE.join_text_fragments(["steady sweep", "One evening storm rolled in"]),
+            "steady sweep One evening storm rolled in",
+        )
+        self.assertEqual(
+            _MODULE.join_text_fragments(["St", "oring"]),
+            "Storing",
+        )
+        self.assertEqual(
+            _MODULE.join_text_fragments(["3", "0"]),
+            "30",
+        )
+        self.assertEqual(
+            _MODULE.join_text_fragments(["Okay", ",", " let", "'s", " check"]),
+            "Okay, let's check",
+        )
+        self.assertEqual(
+            _MODULE.join_text_fragments(["```python\n", "print('hi')\n```"]),
+            "```python\nprint('hi')\n```",
+        )
+
+    def test_chunk_to_incremental_events_joins_multiple_text_items_safely(self) -> None:
+        events, previous_answer, previous_thought = _MODULE.chunk_to_incremental_events(
+            "req-join",
+            {
+                "content": [
+                    {"type": "text", "text": "steady sweep"},
+                    {"type": "text", "text": "One evening storm rolled in"},
+                ],
+                "channels": {"thought": ""},
+            },
+            "",
+            "",
+        )
+
+        self.assertEqual(
+            events,
+            [
+                {
+                    "type": "token",
+                    "request_id": "req-join",
+                    "text": "steady sweep One evening storm rolled in",
+                }
+            ],
+        )
+        self.assertEqual(previous_answer, "steady sweep One evening storm rolled in")
+        self.assertEqual(previous_thought, "")
+
     def test_chunk_to_incremental_events_strips_cumulative_answer_and_thought_prefixes(self) -> None:
         previous_answer = ""
         previous_thought = ""
@@ -237,6 +311,70 @@ class WorkerProtocolTests(unittest.TestCase):
             [{"type": "token", "request_id": "req-1", "text": " today."}],
         )
 
+    def test_chunk_to_incremental_events_preserves_boundary_spaces_across_chunks(self) -> None:
+        events, previous_answer, previous_thought = _MODULE.chunk_to_incremental_events(
+            "req-boundary",
+            {
+                "content": [{"type": "text", "text": "steady sweep"}],
+                "channels": {"thought": ""},
+            },
+            "",
+            "",
+        )
+
+        self.assertEqual(
+            events,
+            [{"type": "token", "request_id": "req-boundary", "text": "steady sweep"}],
+        )
+        self.assertEqual(previous_answer, "steady sweep")
+        self.assertEqual(previous_thought, "")
+
+        events, previous_answer, previous_thought = _MODULE.chunk_to_incremental_events(
+            "req-boundary",
+            {
+                "content": [{"type": "text", "text": "One evening storm rolled in"}],
+                "channels": {"thought": ""},
+            },
+            previous_answer,
+            previous_thought,
+        )
+
+        self.assertEqual(
+            events,
+            [
+                {
+                    "type": "token",
+                    "request_id": "req-boundary",
+                    "text": " One evening storm rolled in",
+                }
+            ],
+        )
+        self.assertEqual(previous_answer, "steady sweep One evening storm rolled in")
+
+    def test_stream_text_delta_does_not_insert_spaces_before_incremental_punctuation(self) -> None:
+        delta, merged = _MODULE.stream_text_delta("Okay", ", let's check")
+        self.assertEqual(delta, ", let's check")
+        self.assertEqual(merged, "Okay, let's check")
+
+    def test_stream_text_delta_does_not_drop_repeated_token_sized_deltas(self) -> None:
+        delta, merged = _MODULE.stream_text_delta("This is a story", " is")
+        self.assertEqual(delta, " is")
+        self.assertEqual(merged, "This is a story is")
+
+    def test_stream_text_delta_does_not_insert_spaces_inside_words_or_numbers(self) -> None:
+        delta, merged = _MODULE.stream_text_delta("St", "oring")
+        self.assertEqual(delta, "oring")
+        self.assertEqual(merged, "Storing")
+
+        delta, merged = _MODULE.stream_text_delta("3", "0")
+        self.assertEqual(delta, "0")
+        self.assertEqual(merged, "30")
+
+    def test_stream_text_delta_trims_suffix_prefix_overlap_without_dropping_new_text(self) -> None:
+        delta, merged = _MODULE.stream_text_delta("rustup", "up toolchain support")
+        self.assertEqual(delta, " toolchain support")
+        self.assertEqual(merged, "rustup toolchain support")
+
     def test_resolve_final_stream_text_prefers_latest_snapshot_for_cumulative_streams(self) -> None:
         self.assertEqual(
             _MODULE.resolve_final_stream_text(
@@ -274,6 +412,106 @@ class WorkerProtocolTests(unittest.TestCase):
 
         self.assertTrue(conversation.cancelled)
         self.assertEqual(worker._cancelled_request_id, "req-2")
+
+    def test_parse_bool_flag_rejects_ambiguous_truthy_strings(self) -> None:
+        with self.assertRaisesRegex(ValueError, "must be a boolean"):
+            _MODULE.parse_bool_flag("yes", field_name="tool_permissions.web")
+
+    def test_tool_permissions_accept_strict_boolean_strings(self) -> None:
+        permissions = _MODULE.ToolPermissions.from_command(
+            {
+                "tool_permissions": {
+                    "web": "true",
+                    "local_files": "0",
+                    "calculate": 1,
+                    "current_datetime": "false",
+                }
+            }
+        )
+
+        self.assertTrue(permissions.web)
+        self.assertFalse(permissions.local_files)
+        self.assertTrue(permissions.calculate)
+        self.assertFalse(permissions.current_datetime)
+
+    def test_is_disallowed_ip_blocks_non_global_addresses(self) -> None:
+        self.assertTrue(_MODULE.is_disallowed_ip(ipaddress.ip_address("127.0.0.1")))
+        self.assertTrue(_MODULE.is_disallowed_ip(ipaddress.ip_address("10.0.0.1")))
+        self.assertTrue(_MODULE.is_disallowed_ip(ipaddress.ip_address("169.254.10.3")))
+        self.assertFalse(_MODULE.is_disallowed_ip(ipaddress.ip_address("93.184.216.34")))
+
+    def test_open_remote_web_response_redirect_drain_uses_bounded_reads(self) -> None:
+        fake_connection = self._FakeHttpConnection
+        fake_connection.created = []
+        redirect_response = self._FakeHttpResponse(
+            status=302,
+            headers={"Location": "https://example.com/final"},
+            body=(b"x" * (_MODULE.WEB_FETCH_REDIRECT_DRAIN_MAX_BYTES + 256)),
+        )
+        final_response = self._FakeHttpResponse(
+            status=200,
+            headers={"Content-Type": "text/plain; charset=utf-8"},
+            body=b"done",
+        )
+        fake_connection.responses = [redirect_response, final_response]
+
+        with (
+            mock.patch.object(
+                _MODULE,
+                "resolve_remote_web_target",
+                side_effect=[
+                    (
+                        _MODULE.urllib.parse.urlparse("https://example.com/start"),
+                        "93.184.216.34",
+                        443,
+                    ),
+                    (
+                        _MODULE.urllib.parse.urlparse("https://example.com/final"),
+                        "93.184.216.34",
+                        443,
+                    ),
+                ],
+            ),
+            mock.patch.object(_MODULE, "VerifiedHTTPSConnection", fake_connection),
+        ):
+            connection, response, final_url = _MODULE.open_remote_web_response(
+                "https://example.com/start",
+                {"User-Agent": "Friday/0.1"},
+            )
+
+        connection.close()
+        self.assertEqual(final_url, "https://example.com/final")
+        self.assertEqual(response.status, 200)
+        self.assertTrue(redirect_response.read_amounts)
+        self.assertNotIn(None, redirect_response.read_amounts)
+        self.assertLessEqual(
+            max(amount for amount in redirect_response.read_amounts if amount is not None),
+            8192,
+        )
+
+    def test_local_file_tools_restrict_paths_to_sandbox(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_root:
+            sandbox_root = pathlib.Path(temp_root) / "sandbox"
+            outside_root = pathlib.Path(temp_root) / "outside"
+            sandbox_root.mkdir()
+            outside_root.mkdir()
+            allowed_file = sandbox_root / "allowed.txt"
+            outside_file = outside_root / "outside.txt"
+            allowed_file.write_text("allowed", encoding="utf-8")
+            outside_file.write_text("outside", encoding="utf-8")
+
+            with mock.patch.dict(
+                _MODULE.os.environ,
+                {_MODULE.LOCAL_FILE_SANDBOX_ROOTS_ENV: str(sandbox_root)},
+                clear=False,
+            ):
+                allowed = _MODULE.file_read_impl(str(allowed_file))
+                blocked = _MODULE.file_read_impl(str(outside_file))
+                blocked_listing = _MODULE.list_directory_impl(str(outside_root))
+
+            self.assertEqual(allowed["content"], "allowed")
+            self.assertIn("outside the worker sandbox roots", blocked["error"])
+            self.assertIn("outside the worker sandbox roots", blocked_listing["error"])
 
     def test_web_search_time_range_is_reserved_for_recent_public_queries(self) -> None:
         self.assertEqual(
@@ -1075,6 +1313,76 @@ class WorkerProtocolTests(unittest.TestCase):
             write_event_mock.call_args_list,
         )
 
+    def test_handle_chat_preserves_token_sized_repeated_words_in_incremental_streams(self) -> None:
+        class FakeConversation:
+            def __enter__(self) -> "FakeConversation":
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> None:
+                return None
+
+            def send_message_async(self, prompt: dict[str, object]) -> list[dict[str, object]]:
+                del prompt
+                return [
+                    {"content": [{"type": "text", "text": "It"}]},
+                    {"content": [{"type": "text", "text": " is"}]},
+                    {"content": [{"type": "text", "text": " a"}]},
+                    {"content": [{"type": "text", "text": " simple"}]},
+                    {"content": [{"type": "text", "text": " story"}]},
+                    {"content": [{"type": "text", "text": " about"}]},
+                    {"content": [{"type": "text", "text": " a"}]},
+                    {"content": [{"type": "text", "text": " lighthouse."}]},
+                ]
+
+        class FakeEngine:
+            def create_conversation(self, **kwargs: object) -> FakeConversation:
+                del kwargs
+                return FakeConversation()
+
+        worker = _MODULE.LiteRtWorker()
+        worker._engine = FakeEngine()
+
+        with mock.patch.object(_MODULE, "write_event") as write_event_mock:
+            worker.handle_chat(
+                {
+                    "request_id": "req-repeated-deltas",
+                    "messages": [
+                        {"role": "user", "content": "Tell me a short story."},
+                    ],
+                    "tool_permissions": {
+                        "web": False,
+                        "calculate": False,
+                        "current_datetime": True,
+                    },
+                    "generation_config": {},
+                }
+            )
+
+        token_events = [
+            call for call in write_event_mock.call_args_list if call.args[0] == "token"
+        ]
+        self.assertEqual(
+            token_events,
+            [
+                mock.call("token", request_id="req-repeated-deltas", text="It"),
+                mock.call("token", request_id="req-repeated-deltas", text=" is"),
+                mock.call("token", request_id="req-repeated-deltas", text=" a"),
+                mock.call("token", request_id="req-repeated-deltas", text=" simple"),
+                mock.call("token", request_id="req-repeated-deltas", text=" story"),
+                mock.call("token", request_id="req-repeated-deltas", text=" about"),
+                mock.call("token", request_id="req-repeated-deltas", text=" a"),
+                mock.call("token", request_id="req-repeated-deltas", text=" lighthouse."),
+            ],
+        )
+        self.assertIn(
+            mock.call(
+                "done",
+                request_id="req-repeated-deltas",
+                final_text="It is a simple story about a lighthouse.",
+            ),
+            write_event_mock.call_args_list,
+        )
+
     def test_handle_chat_web_search_tool_is_available_for_model_initiated_use(self) -> None:
         class FakeConversation:
             sent_prompt: dict[str, object] | None = None
@@ -1374,6 +1682,98 @@ class WorkerProtocolTests(unittest.TestCase):
     def test_calculate_impl_supports_safe_math(self) -> None:
         self.assertEqual(_MODULE.calculate_impl("2 + 2")["result"], "4.0")
         self.assertIn("error", _MODULE.calculate_impl("__import__('os').system('whoami')"))
+
+    def test_handle_chat_rejects_ambiguous_thinking_enabled_strings(self) -> None:
+        class FakeEngine:
+            def create_conversation(self, **kwargs: object) -> None:
+                raise AssertionError("create_conversation should not be called")
+
+        worker = _MODULE.LiteRtWorker()
+        worker._engine = FakeEngine()
+
+        with self.assertRaisesRegex(ValueError, "generation_config.thinking_enabled"):
+            worker.handle_chat(
+                {
+                    "request_id": "req-ambiguous-thinking",
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "tool_permissions": {"current_datetime": True},
+                    "generation_config": {"thinking_enabled": "yes"},
+                }
+            )
+
+    def test_run_can_process_cancel_while_chat_stream_is_running(self) -> None:
+        chat_started = threading.Event()
+        cancel_seen = threading.Event()
+
+        class ControlledStdin:
+            def __init__(self) -> None:
+                self._lines = [
+                    json.dumps(
+                        {
+                            "type": "chat",
+                            "request_id": "req-run-cancel",
+                            "messages": [{"role": "user", "content": "Tell me a story"}],
+                            "tool_permissions": {"current_datetime": True},
+                            "generation_config": {},
+                        }
+                    )
+                    + "\n",
+                    json.dumps({"type": "cancel", "request_id": "req-run-cancel"}) + "\n",
+                    json.dumps({"type": "shutdown"}) + "\n",
+                ]
+
+            def __iter__(self) -> "ControlledStdin":
+                return self
+
+            def __next__(self) -> str:
+                if not self._lines:
+                    raise StopIteration
+                if len(self._lines) == 2:
+                    if not chat_started.wait(timeout=1.0):
+                        raise StopIteration
+                return self._lines.pop(0)
+
+        class FakeConversation:
+            def __init__(self) -> None:
+                self._cancelled = False
+
+            def __enter__(self) -> "FakeConversation":
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> None:
+                return None
+
+            def cancel_process(self) -> None:
+                self._cancelled = True
+                cancel_seen.set()
+
+            def send_message_async(self, prompt: dict[str, object]) -> list[dict[str, object]]:
+                del prompt
+                chat_started.set()
+                while not self._cancelled:
+                    time.sleep(0.01)
+                raise RuntimeError("cancelled")
+
+        class FakeEngine:
+            def create_conversation(self, **kwargs: object) -> FakeConversation:
+                del kwargs
+                return FakeConversation()
+
+        worker = _MODULE.LiteRtWorker()
+        worker._engine = FakeEngine()
+
+        with (
+            mock.patch.object(_MODULE.sys, "stdin", ControlledStdin()),
+            mock.patch.object(_MODULE, "write_event") as write_event_mock,
+        ):
+            exit_code = worker.run()
+
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(cancel_seen.is_set())
+        self.assertIn(
+            mock.call("done", request_id="req-run-cancel"),
+            write_event_mock.call_args_list,
+        )
 
 
 @unittest.skipUnless(

@@ -24,6 +24,8 @@ const SETTINGS_PORT_PLACEHOLDER: &str = "__FRIDAY_SEARXNG_PORT__";
 const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(3);
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
 const READY_RETRY_INTERVAL: Duration = Duration::from_millis(750);
+const SOURCE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(180);
+const PYTHON_BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(900);
 const PROCESS_OUTPUT_TAIL_LIMIT: usize = 32 * 1024;
 const SOURCE_STAMP_FILENAME: &str = ".friday-source-stamp.json";
 const DEPENDENCIES_STAMP_FILENAME: &str = ".friday-dependencies-stamp.json";
@@ -817,9 +819,24 @@ impl SearXNGManager {
             let _ = std::fs::remove_file(&archive_path);
         }
 
-        let response = reqwest::get(&manifest.archive_url)
-            .await
-            .map_err(map_source_download_error)?;
+        let client = reqwest::Client::builder()
+            .timeout(SOURCE_DOWNLOAD_TIMEOUT)
+            .build()
+            .map_err(|error| {
+                format!(
+                    "Failed to create local web search source download client: {}",
+                    error
+                )
+            })?;
+        let response = tokio::time::timeout(
+            SOURCE_DOWNLOAD_TIMEOUT,
+            client.get(&manifest.archive_url).send(),
+        )
+        .await
+        .map_err(|_| {
+            "Friday timed out while connecting to local web search source download.".to_string()
+        })?
+        .map_err(map_source_download_error)?;
         if !response.status().is_success() {
             return Err(format!(
                 "Friday could not download local web search sources (HTTP {}).",
@@ -827,7 +844,12 @@ impl SearXNGManager {
             ));
         }
 
-        let bytes = response.bytes().await.map_err(map_source_download_error)?;
+        let bytes = tokio::time::timeout(SOURCE_DOWNLOAD_TIMEOUT, response.bytes())
+            .await
+            .map_err(|_| {
+                "Friday timed out while downloading local web search sources.".to_string()
+            })?
+            .map_err(map_source_download_error)?;
         let actual_sha = sha256_bytes_hex(bytes.as_ref());
         if actual_sha != manifest.archive_sha256 {
             return Err(
@@ -1288,12 +1310,25 @@ impl SearXNGManager {
         python_binary: &Path,
         args: &[String],
     ) -> Result<Output, String> {
-        Command::new(python_binary)
+        let command_preview = args.join(" ");
+        let mut command = Command::new(python_binary);
+        command
             .args(args)
             .env("PYTHONUNBUFFERED", "1")
             .env("PYTHONNOUSERSITE", "1")
-            .output()
+            .kill_on_drop(true);
+
+        let output_future = command.output();
+        tokio::time::timeout(PYTHON_BOOTSTRAP_TIMEOUT, output_future)
             .await
+            .map_err(|_| {
+                format!(
+                    "Friday-managed Python bootstrap command timed out after {:?}: {} {}",
+                    PYTHON_BOOTSTRAP_TIMEOUT,
+                    python_binary.display(),
+                    command_preview
+                )
+            })?
             .map_err(|error| {
                 format!(
                     "Failed to run Friday-managed Python runtime {}: {}",

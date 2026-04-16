@@ -1,6 +1,5 @@
 import React, {
   memo,
-  useDeferredValue,
   useEffect,
   useMemo,
   useRef,
@@ -14,11 +13,18 @@ import {
   DownOutlined,
   UpOutlined,
 } from "@ant-design/icons";
+import { invoke } from "@tauri-apps/api/core";
 import ReactMarkdown from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
-import type { KnowledgeCitation, Message } from "../types";
+import type { FridayRenderableMessage, KnowledgeCitation } from "../types";
+import {
+  getMessageAttachmentsSummary,
+  getMessageReasoning,
+  getMessageSources,
+  getMessageText,
+} from "../lib/friday-chat";
 import AppLogo from "./AppLogo";
 
 const { Text } = Typography;
@@ -29,27 +35,26 @@ const LEGACY_REFERENCE_ATTACHMENT_RE =
   /\[Reference attachment: ([^\]\n]+)\][\s\S]*?--- End extracted text from \1 ---/g;
 const LEGACY_INLINE_ATTACHMENT_RE =
   /\[Attached (?:image|audio|file): ([^\]\n]+?)(?: \([^)]+\))?\]/g;
-const MISPLACED_BOLD_RE = /(^|[\s([{"'`])([^\s*]+)\*\*([—:-][^\n]*?)\*\*/g;
-const OPENING_BOLD_SPAN_NO_SPACE_RE =
-  /([A-Za-z0-9])(\*\*[^\s*](?:[^*\n]*?[^\s*])?\*\*)/g;
-const CLOSED_BOLD_NO_SPACE_RE =
-  /(^|[\s([{"'`])(\*\*[^\s*](?:[^*\n]*?[^\s*])?\*\*)(?=[A-Za-z0-9])/g;
-const BOLD_MARKER_RE = /\*\*/g;
-const BOLD_INNER_WHITESPACE_RE = /\*\*([ \t]+)([^*\n][^*\n]*?)([ \t]+)?\*\*/g;
-const EMPTY_LIST_ITEM_RE = /^\s*[*-]\s*$/;
-const BROKEN_BOLD_LABEL_LIST_ITEM_RE = /^(\s*[*-]\s+)\*\*([^*\n]+?:)\s*(.+)$/;
-const INLINE_LIST_MARKER_NO_BREAK_RE =
-  /([^\s])([*-])\s+(?=[A-Z0-9][^:\n]{0,80}:)/g;
-const ATX_HEADING_NO_SPACE_RE = /^(#{1,6})(?=\S)/;
-const ORDERED_LIST_MARKER_NO_SPACE_RE = /^(\s*\d+\.)(?=\S)/;
-const PLAIN_SECTION_HEADING_RE =
-  /^([A-Z][A-Za-z0-9/&()'" -]{1,80}:)$/;
 const MARKDOWN_REMARK_PLUGINS = [remarkGfm, remarkMath];
 const MARKDOWN_REHYPE_PLUGINS = [rehypeKatex];
 const WINDOWS_ABSOLUTE_PATH_RE = /^[A-Za-z]:[\\/]/;
+const FENCED_CODE_BLOCK_RE = /((?:```|~~~)[\s\S]*?(?:```|~~~))/g;
+const MALFORMED_INLINE_CODE_FENCE_RE =
+  /(^|\n|[^\n`~])(```|~~~)([A-Za-z0-9_-]+)[ \t]+([^\n]+)/g;
+const CODE_FENCE_TRAILING_SECTION_RE =
+  /(?=\b(?:[2-9]\.?\s+[A-Z][A-Za-z]|\bThen\b|\bNext\b|\bAfter\b|\bFinally\b|\bHow\b|\bWhat\b|\bWhy\b|\bWhen\b|\bWhere\b|\bCan\b|\bCould\b|\bWould\b|\bShould\b|\bLet me know if\b|\bIf you'd like\b|\bWould you like\b))/;
+const LIST_ITEM_VERB_PATTERN =
+  "Answering|Providing|Generating|Helping|Explaining|Summarizing|Planning|Organizing|Writing|Creating|Debugging|Reviewing|Analyzing|Researching|Translating|Drafting|Brainstorming|Comparing|Solving|Building|Refactoring|Teaching|Implementing|Testing|Defining|Computing|Deriving|Define|Compute|Derive|Implement|Test|Validate|Check|Validating|Checking";
+const LIST_ITEM_VERB_RE = new RegExp(`\\b(${LIST_ITEM_VERB_PATTERN})\\b`, "g");
+const COLLAPSED_TEXT_BOUNDARY_PATTERN =
+  "A|An|The|This|That|These|Those|One|He|She|They|We|I|It|As|When|While|After|Before|Then|Later|Meanwhile|Suddenly|Eventually|Soon";
+const COLLAPSED_TEXT_BOUNDARY_RE = new RegExp(
+  `([a-z0-9,;:)"'’\\]])(?=(?:${COLLAPSED_TEXT_BOUNDARY_PATTERN})\\b)`,
+  "g",
+);
 
 interface Props {
-  message: Pick<Message, "id" | "role" | "content" | "content_parts">;
+  message: FridayRenderableMessage;
   showCopyActions?: boolean;
   isStreaming?: boolean;
 }
@@ -63,24 +68,6 @@ export function areMessageBubblePropsEqual(previous: Props, next: Props) {
     previous.message.content === next.message.content &&
     previous.message.content_parts === next.message.content_parts
   );
-}
-
-function getAssistantThinking(contentParts: unknown): string {
-  if (!contentParts || typeof contentParts !== "object") {
-    return "";
-  }
-
-  const thinking = (contentParts as { thinking?: unknown }).thinking;
-  return typeof thinking === "string" ? thinking : "";
-}
-
-function getAssistantSources(contentParts: unknown): KnowledgeCitation[] {
-  if (!contentParts || typeof contentParts !== "object") {
-    return [];
-  }
-
-  const sources = (contentParts as { sources?: unknown }).sources;
-  return Array.isArray(sources) ? (sources as KnowledgeCitation[]) : [];
 }
 
 export function summarizeUserMessageForDisplay(content: string): string {
@@ -111,138 +98,225 @@ export function summarizeUserMessageForDisplay(content: string): string {
   return remaining ? `${attachmentTag}\n${remaining}` : attachmentTag;
 }
 
-function isSingleCharacterFragment(text: string): boolean {
-  return /^[A-Za-z0-9≤≥=+\-−×÷/().,%]$/.test(text);
+function repairMalformedInlineCodeFences(content: string): string {
+  return content.replace(
+    MALFORMED_INLINE_CODE_FENCE_RE,
+    (_match, prefix: string, fence: string, language: string, inlineBody: string) => {
+      const closingFenceIndex = inlineBody.indexOf(fence);
+      const trailingSectionIndex =
+        closingFenceIndex >= 0
+          ? -1
+          : inlineBody.search(CODE_FENCE_TRAILING_SECTION_RE);
+      const codeBody =
+        closingFenceIndex >= 0
+          ? inlineBody.slice(0, closingFenceIndex).trim()
+          : trailingSectionIndex >= 0
+            ? inlineBody.slice(0, trailingSectionIndex).trim()
+            : inlineBody.trim();
+      const trailingBody =
+        closingFenceIndex >= 0
+          ? inlineBody.slice(closingFenceIndex + fence.length).trim()
+          : trailingSectionIndex >= 0
+            ? inlineBody.slice(trailingSectionIndex).trim()
+            : "";
+
+      if (!codeBody) {
+        return `${prefix}${fence}${language}`;
+      }
+
+      return trailingBody
+        ? `${prefix}${fence}${language}\n${codeBody}\n${fence}\n\n${trailingBody}`
+        : `${prefix}${fence}${language}\n${codeBody}\n${fence}`;
+    },
+  );
 }
 
-function collapseFragmentedMarkdownLines(lines: string[]): string[] {
-  const collapsed: string[] = [];
-  let insideCodeFence = false;
+function normalizeDisplayMathBlocks(content: string): string {
+  return content.replace(
+    /\$\$([\s\S]+?)\$\$([ \t]*[.!?])?/g,
+    (_match, mathBody: string, trailingPunctuation = "", offset: number, source: string) => {
+      let trailingNewlines = 0;
 
-  for (let index = 0; index < lines.length; ) {
-    const line = lines[index];
-    if (line.trimStart().startsWith("```")) {
-      insideCodeFence = !insideCodeFence;
-      collapsed.push(line);
-      index += 1;
-      continue;
-    }
-
-    if (insideCodeFence) {
-      collapsed.push(line);
-      index += 1;
-      continue;
-    }
-
-    const currentTrimmed = line.trim();
-    const nextTrimmed = lines[index + 1]?.trim() ?? "";
-    const nextNextTrimmed = lines[index + 2]?.trim() ?? "";
-
-    if (
-      /^[≤≥=+\-−]$/.test(currentTrimmed) &&
-      /^[A-Za-z0-9.,]{1,8}$/.test(nextTrimmed) &&
-      nextNextTrimmed.startsWith(`${currentTrimmed}${nextTrimmed}`)
-    ) {
-      index += 2;
-      continue;
-    }
-
-    if (isSingleCharacterFragment(currentTrimmed)) {
-      let runEnd = index;
-      let merged = "";
-      while (
-        runEnd < lines.length &&
-        isSingleCharacterFragment(lines[runEnd]?.trim() ?? "")
-      ) {
-        merged += lines[runEnd]!.trim();
-        runEnd += 1;
+      for (let index = offset - 1; index >= 0 && source[index] === "\n"; index -= 1) {
+        trailingNewlines += 1;
       }
 
-      if (runEnd - index >= 4) {
-        const followingTrimmed = lines[runEnd]?.trim() ?? "";
-        if (!followingTrimmed.startsWith(merged)) {
-          collapsed.push(merged);
-        }
-        index = runEnd;
-        continue;
-      }
-    }
+      const leadingBreak =
+        offset === 0 || trailingNewlines >= 2 ? "" : trailingNewlines === 1 ? "\n" : "\n\n";
+      const remainingText = source.slice(offset + _match.length).trim();
+      const keepTrailingPunctuation =
+        trailingPunctuation.trim().length > 0 && remainingText.length > 0;
 
-    collapsed.push(line);
-    index += 1;
+      return `${leadingBreak}$$\n${mathBody.trim()}\n$$${
+        keepTrailingPunctuation ? `\n\n${trailingPunctuation.trim()}` : ""
+      }`;
+    },
+  );
+}
+
+function normalizeMarkdownTextSegment(content: string): string {
+  let normalized = content.replace(/\r\n?/g, "\n");
+
+  normalized = normalized.replace(
+    /([^\n#])(?=#{1,6}\S)/g,
+    "$1\n\n",
+  );
+  normalized = normalized.replace(
+    /([^\n`~])(?=(?:```|~~~))/g,
+    "$1\n\n",
+  );
+  normalized = normalized.replace(
+    /(^|\n)(#{1,6})(\S)/g,
+    "$1$2 $3",
+  );
+  normalized = normalized.replace(
+    /(^|\n)([-*+])(\S)/g,
+    "$1$2 $3",
+  );
+  normalized = normalized.replace(
+    /(^|\n)(\d+\.)(\S)/g,
+    "$1$2 $3",
+  );
+  normalized = normalized.replace(
+    /(#{1,6}\s+[^\n#]*?[a-z0-9\)])(?=[A-Z][a-z])/g,
+    "$1\n",
+  );
+  normalized = normalized.replace(
+    /([.?!])([A-Z])/g,
+    "$1 $2",
+  );
+  normalized = normalized
+    .split("\n")
+    .flatMap((line) => {
+      if (line.trimStart().startsWith("|")) {
+        return [line];
+      }
+
+      const tableMatch = line.match(/^(.*?)(\|(?:[^|\n]+\|){2,})$/);
+      if (!tableMatch) {
+        return [line];
+      }
+
+      const prefix = tableMatch[1].trimEnd();
+      const row = tableMatch[2].trim();
+      return prefix ? [prefix, "", row] : [row];
+    })
+    .join("\n");
+
+  LIST_ITEM_VERB_RE.lastIndex = 0;
+  if (normalized.includes(":") && LIST_ITEM_VERB_RE.test(normalized)) {
+    normalized = normalized.replace(
+      new RegExp(`:\\s*(?=(?:${LIST_ITEM_VERB_PATTERN})\\b)`, "g"),
+      ":\n\n- ",
+    );
+    normalized = normalized.replace(
+      new RegExp(`([a-z0-9)])(?=(?:${LIST_ITEM_VERB_PATTERN})\\b)`, "g"),
+      "$1\n- ",
+    );
+    normalized = normalized.replace(
+      /([a-z0-9)])(?=(?:How|What|Why|When|Where|Can|Could|Would|Should|Do|Does|Did|Is|Are)\b)/g,
+      "$1\n\n",
+    );
   }
 
-  return collapsed;
+  // Compatibility repair for persisted messages created before text-part
+  // boundaries were preserved during streaming. Keep this narrow: only restore
+  // missing spaces on likely sentence-starter joins such as "sweepOne".
+  normalized = normalized.replace(COLLAPSED_TEXT_BOUNDARY_RE, "$1 ");
+
+  return normalized.replace(/\n{3,}/g, "\n\n");
 }
 
-export function normalizeAssistantMarkdown(content: string): string {
-  let insideCodeFence = false;
-  const normalizedLines = collapseFragmentedMarkdownLines(content.split("\n"))
-    .map((line) => {
-      if (line.trimStart().startsWith("```")) {
-        insideCodeFence = !insideCodeFence;
-        return line;
-      }
-      if (insideCodeFence) {
-        return line;
-      }
+export function normalizeAssistantMarkdownForDisplay(content: string): string {
+  return repairMalformedInlineCodeFences(content)
+    .replace(/([^\n`~])(?=(?:```|~~~))/g, "$1\n\n")
+    .split(FENCED_CODE_BLOCK_RE)
+    .map((segment) =>
+      segment.startsWith("```") || segment.startsWith("~~~")
+        ? segment
+        : normalizeMarkdownTextSegment(normalizeDisplayMathBlocks(segment)),
+    )
+    .join("")
+    .trim();
+}
 
-      let normalized = line.replace(MISPLACED_BOLD_RE, "$1**$2$3**");
-      normalized = normalized.replace(
-        INLINE_LIST_MARKER_NO_BREAK_RE,
-        "$1\n\n$2 ",
-      );
-      normalized = normalized.replace(ATX_HEADING_NO_SPACE_RE, "$1 ");
-      normalized = normalized.replace(
-        ORDERED_LIST_MARKER_NO_SPACE_RE,
-        "$1 ",
-      );
-      normalized = normalized.replace(
-        BOLD_INNER_WHITESPACE_RE,
-        (_match, _leadingWhitespace, text) => {
-          const cleaned = String(text).trim();
-          if (!cleaned) {
-            return "";
-          }
-          return `**${cleaned}**`;
-        },
-      );
+function extractCodeBlockMeta(
+  props: React.ComponentProps<"code"> & {
+    node?: {
+      data?: { meta?: unknown };
+      properties?: { metastring?: unknown };
+      meta?: unknown;
+    };
+  },
+): string {
+  const candidates = [
+    props.node?.data?.meta,
+    props.node?.properties?.metastring,
+    props.node?.meta,
+  ];
 
-      normalized = normalized.replace(CLOSED_BOLD_NO_SPACE_RE, "$1$2 ");
-      normalized = normalized.replace(OPENING_BOLD_SPAN_NO_SPACE_RE, "$1 $2");
-      normalized = normalized.replace(CLOSED_BOLD_NO_SPACE_RE, "$1$2 ");
-      normalized = normalized.replace(
-        BROKEN_BOLD_LABEL_LIST_ITEM_RE,
-        "$1**$2** $3",
-      );
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate.trim()) {
+      return candidate.trim();
+    }
+  }
 
-      const markerCount = normalized.match(BOLD_MARKER_RE)?.length ?? 0;
-      if (markerCount % 2 === 1) {
-        normalized = normalized.replace(/\*\*(?!.*\*\*)/, "");
-      }
+  return "";
+}
 
-      if (EMPTY_LIST_ITEM_RE.test(normalized)) {
-        return "";
-      }
+function normalizeExternalHref(href?: string): string | null {
+  if (!href) {
+    return null;
+  }
 
-      const trimmed = normalized.trim();
-      if (
-        trimmed &&
-        !trimmed.startsWith("**") &&
-        !trimmed.startsWith("#") &&
-        !trimmed.startsWith("* ") &&
-        !trimmed.startsWith("- ") &&
-        PLAIN_SECTION_HEADING_RE.test(trimmed)
-      ) {
-        return `**${trimmed}**`;
-      }
+  try {
+    const url = new URL(href);
+    if (
+      url.protocol === "http:" ||
+      url.protocol === "https:" ||
+      url.protocol === "mailto:"
+    ) {
+      return url.toString();
+    }
+  } catch {
+    return null;
+  }
 
-      return normalized;
-    })
-    .join("\n")
-    .replace(/\n{3,}/g, "\n\n");
+  return null;
+}
 
-  return normalizedLines;
+function normalizePermittedImageSrc(src?: string): string | null {
+  if (!src) {
+    return null;
+  }
+
+  const trimmed = src.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  if (
+    trimmed.startsWith("data:") ||
+    trimmed.startsWith("blob:") ||
+    trimmed.startsWith("file:") ||
+    trimmed.startsWith("/")
+  ) {
+    return trimmed;
+  }
+
+  if (WINDOWS_ABSOLUTE_PATH_RE.test(trimmed)) {
+    return trimmed;
+  }
+
+  return null;
+}
+
+async function openExternalLink(href: string) {
+  try {
+    await invoke("open_external_link", { url: href });
+  } catch (error) {
+    console.error("Failed to open link via system browser command:", error);
+  }
 }
 
 function normalizeExternalHref(href?: string): string | null {
@@ -347,15 +421,20 @@ function CopyButton({
 function CodeBlock({
   className,
   children,
+  meta = "",
   showCopyButton = true,
 }: {
   className?: string;
   children?: React.ReactNode;
+  meta?: string;
   showCopyButton?: boolean;
 }) {
   const code = useMemo(
-    () => String(children ?? "").replace(/\n$/, ""),
-    [children],
+    () => {
+      const childText = String(children ?? "").replace(/\n$/, "");
+      return childText.trim() ? childText : meta;
+    },
+    [children, meta],
   );
 
   return (
@@ -382,38 +461,45 @@ function MessageBubble({
   const [isThinkingExpanded, setIsThinkingExpanded] = useState(isStreaming);
   const [isSourcesExpanded, setIsSourcesExpanded] = useState(false);
   const streamingStateRef = useRef(isStreaming);
-  const rawThinkingContent = getAssistantThinking(message.content_parts);
-  const sources = getAssistantSources(message.content_parts);
-  const deferredAssistantSource = useDeferredValue(
-    isStreaming ? message.content : "",
-  );
-  const deferredThinkingSource = useDeferredValue(
-    isStreaming ? rawThinkingContent : "",
-  );
-  const assistantSource = isStreaming ? deferredAssistantSource : message.content;
-  const thinkingSource = isStreaming ? deferredThinkingSource : rawThinkingContent;
+  const rawAssistantContent = getMessageText(message);
+  const rawThinkingContent = getMessageReasoning(message);
+  const sources = getMessageSources(message);
+  const attachmentsSummary = getMessageAttachmentsSummary(message);
   const assistantContent = useMemo(
-    () => normalizeAssistantMarkdown(assistantSource),
-    [assistantSource],
+    () => normalizeAssistantMarkdownForDisplay(rawAssistantContent),
+    [rawAssistantContent],
   );
   const thinkingContent = useMemo(
-    () => normalizeAssistantMarkdown(thinkingSource),
-    [thinkingSource],
+    () => normalizeAssistantMarkdownForDisplay(rawThinkingContent),
+    [rawThinkingContent],
   );
   const markdownComponents = useMemo(
     () => ({
-      code({ className, children, ...props }: React.ComponentProps<"code">) {
+      code(
+        props: React.ComponentProps<"code"> & {
+          node?: {
+            data?: { meta?: unknown };
+            properties?: { metastring?: unknown };
+            meta?: unknown;
+          };
+        },
+      ) {
+        const { className, children, ...rest } = props;
         const isInline = !className;
         if (isInline) {
           return (
-            <code className={className} {...props}>
+            <code className={className} {...rest}>
               {children}
             </code>
           );
         }
 
         return (
-          <CodeBlock className={className} showCopyButton={showCopyActions}>
+          <CodeBlock
+            className={className}
+            meta={extractCodeBlockMeta(props)}
+            showCopyButton={showCopyActions}
+          >
             {children}
           </CodeBlock>
         );
@@ -432,7 +518,7 @@ function MessageBubble({
             rel="noreferrer noopener"
             onClick={(event) => {
               event.preventDefault();
-              openExternalLink(safeHref);
+              void openExternalLink(safeHref);
             }}
           >
             {children}
@@ -471,11 +557,19 @@ function MessageBubble({
   }, [isStreaming, thinkingContent]);
 
   // Detect attached file indicators in user messages
+  const rawUserContent = getMessageText(message);
+  const userContentWithAttachments =
+    attachmentsSummary.length > 0 && !rawUserContent.includes("📎")
+      ? `📎 ${attachmentsSummary.join(", ")}${
+          rawUserContent ? `\n${rawUserContent}` : ""
+        }`
+      : rawUserContent;
   const renderedUserContent = isUser
-    ? summarizeUserMessageForDisplay(message.content)
-    : message.content;
-  const hasFileMarkers = FILE_MARKER_RE.test(message.content);
-  const hasAttachmentTag = renderedUserContent.includes("📎");
+    ? summarizeUserMessageForDisplay(userContentWithAttachments)
+    : rawAssistantContent;
+  const hasFileMarkers = FILE_MARKER_RE.test(rawUserContent);
+  const hasAttachmentTag =
+    attachmentsSummary.length > 0 || renderedUserContent.includes("📎");
 
   if (isUser) {
     return (
