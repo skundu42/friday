@@ -111,6 +111,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ steps.release_meta.outputs.tag_name }}
+          releaseName: Friday ${{ steps.release_meta.outputs.tag_name }}
           releaseDraft: false
           prerelease: ${{ steps.release_meta.outputs.prerelease }}
           generateReleaseNotes: true
