@@ -38,6 +38,9 @@ jobs:
           toolchain: 1.94.0
           targets: aarch64-apple-darwin
 
+      - name: Install protobuf compiler
+        run: brew install protobuf
+
       - name: Install frontend dependencies
         run: npm ci
 
