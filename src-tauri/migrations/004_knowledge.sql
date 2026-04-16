@@ -24,5 +24,8 @@ CREATE INDEX IF NOT EXISTS idx_knowledge_sources_status
 CREATE INDEX IF NOT EXISTS idx_knowledge_sources_modality
     ON knowledge_sources(modality);
 
-DROP TABLE IF EXISTS rag_chunks;
-DROP TABLE IF EXISTS rag_documents;
+CREATE TABLE IF NOT EXISTS legacy_rag_archive_log (
+    source_table TEXT PRIMARY KEY,
+    archive_table TEXT NOT NULL,
+    archived_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);

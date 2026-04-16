@@ -222,8 +222,30 @@ impl ChatSettings {
 }
 
 pub fn load_settings(conn: &Connection) -> Result<AppSettings, String> {
-    let stored: StoredAppSettings = storage::load_json_setting(conn, APP_SETTINGS_KEY)?
-        .unwrap_or_else(default_stored_app_settings_for_current_system);
+    let defaults = default_stored_app_settings_for_current_system();
+    let (stored, should_rewrite) = match storage::load_string_setting(conn, APP_SETTINGS_KEY)? {
+        Some(raw) => match serde_json::from_str::<StoredAppSettings>(&raw) {
+            Ok(parsed) => {
+                let normalized = normalize_stored_settings(parsed.clone(), &defaults);
+                let needs_rewrite = normalized != parsed;
+                (normalized, needs_rewrite)
+            }
+            Err(error) => {
+                tracing::warn!(
+                    key = APP_SETTINGS_KEY,
+                    error = %error,
+                    "Failed to parse persisted settings; restoring defaults"
+                );
+                (defaults.clone(), true)
+            }
+        },
+        None => (defaults, false),
+    };
+
+    if should_rewrite {
+        storage::save_json_setting(conn, APP_SETTINGS_KEY, &stored)?;
+    }
+
     Ok(AppSettings::from(stored))
 }
 
@@ -272,6 +294,44 @@ fn validate_settings_input(input: &AppSettingsInput) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn normalize_stored_settings(
+    mut stored: StoredAppSettings,
+    defaults: &StoredAppSettings,
+) -> StoredAppSettings {
+    stored.auto_start_backend = true;
+
+    if !matches!(stored.theme_mode.as_str(), "light" | "dark") {
+        stored.theme_mode = defaults.theme_mode.clone();
+    }
+
+    if !matches!(
+        stored.chat.reply_language.as_str(),
+        "english" | "hindi" | "bengali" | "marathi" | "tamil" | "punjabi"
+    ) {
+        stored.chat.reply_language = defaults.chat.reply_language.clone();
+    }
+
+    stored.chat.max_tokens = stored.chat.max_tokens.clamp(MIN_MAX_TOKENS, MAX_MAX_TOKENS);
+
+    stored.chat.generation.temperature = stored
+        .chat
+        .generation
+        .temperature
+        .map(|temperature| temperature.clamp(0.0, 2.0));
+
+    stored.chat.generation.top_p = stored
+        .chat
+        .generation
+        .top_p
+        .map(|top_p| top_p.clamp(0.0, 1.0));
+
+    if stored.user_display_name.len() > 60 {
+        stored.user_display_name = stored.user_display_name.chars().take(60).collect();
+    }
+
+    stored
 }
 
 fn default_stored_app_settings_for_current_system() -> StoredAppSettings {
@@ -502,5 +562,69 @@ mod tests {
         .unwrap_err();
 
         assert!(error.contains("Unsupported theme mode"));
+    }
+
+    #[test]
+    fn load_settings_recovers_from_malformed_json_and_rewrites_payload() {
+        let conn = test_conn();
+
+        storage::save_string_setting(&conn, APP_SETTINGS_KEY, "{invalid-json")
+            .expect("save malformed payload");
+
+        let loaded = load_settings(&conn).expect("load settings");
+        assert!(loaded.auto_start_backend);
+
+        let rewritten = storage::load_string_setting(&conn, APP_SETTINGS_KEY)
+            .expect("load rewritten payload")
+            .expect("payload exists");
+        let persisted: StoredAppSettings =
+            serde_json::from_str(&rewritten).expect("valid rewritten settings JSON");
+
+        assert_eq!(AppSettings::from(persisted), loaded);
+    }
+
+    #[test]
+    fn load_settings_normalizes_invalid_values_and_rewrites_payload() {
+        let conn = test_conn();
+
+        let oversized_name = "x".repeat(80);
+        let raw = serde_json::json!({
+            "auto_start_backend": false,
+            "user_display_name": oversized_name,
+            "theme_mode": "system",
+            "chat": {
+                "reply_language": "spanish",
+                "max_tokens": 0,
+                "web_assist_enabled": true,
+                "knowledge_enabled": true,
+                "generation": {
+                    "temperature": -0.5,
+                    "top_p": 3.2,
+                    "thinking_enabled": true
+                }
+            }
+        })
+        .to_string();
+
+        storage::save_string_setting(&conn, APP_SETTINGS_KEY, &raw).expect("save malformed values");
+
+        let loaded = load_settings(&conn).expect("load normalized settings");
+        assert!(loaded.auto_start_backend);
+        assert_eq!(loaded.theme_mode, DEFAULT_THEME_MODE);
+        assert_eq!(loaded.chat.reply_language, "english");
+        assert_eq!(loaded.chat.max_tokens, MIN_MAX_TOKENS);
+        assert_eq!(loaded.chat.generation.temperature, Some(0.0));
+        assert_eq!(loaded.chat.generation.top_p, Some(1.0));
+        assert_eq!(loaded.user_display_name.chars().count(), 60);
+
+        let rewritten = storage::load_string_setting(&conn, APP_SETTINGS_KEY)
+            .expect("load rewritten payload")
+            .expect("payload exists");
+        let persisted: StoredAppSettings =
+            serde_json::from_str(&rewritten).expect("valid rewritten settings JSON");
+        assert_eq!(persisted.auto_start_backend, true);
+        assert_eq!(persisted.chat.max_tokens, MIN_MAX_TOKENS);
+        assert_eq!(persisted.chat.generation.temperature, Some(0.0));
+        assert_eq!(persisted.chat.generation.top_p, Some(1.0));
     }
 }

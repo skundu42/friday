@@ -1,15 +1,18 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useChat } from "@ai-sdk/react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { makeFridayAssistantMessage, normalizeFridayMessage, normalizeFridayMessages, toFridayChatMessages } from "../lib/friday-chat";
+import { TauriChatTransport } from "../lib/tauri-chat-transport";
 import type {
   AppSettings,
   AppSettingsInput,
   BackendStatus,
   BootstrapPayload,
-  ChatDonePayload,
-  ChatErrorPayload,
-  ChatTokenPayload,
+  CancelGenerationResponse,
   FileAttachment,
+  FridayChatMessage,
+  FridayUIMessage,
   KnowledgeSource,
   KnowledgeStats,
   KnowledgeStatus,
@@ -23,8 +26,6 @@ import type {
   WebSearchState,
   WebSearchStatus,
 } from "../types";
-
-const TOKEN_FLUSH_INTERVAL_MS = 16;
 
 function makeId() {
   return (
@@ -129,93 +130,6 @@ function generationStatusForToolResult(name: string): string | null {
     default:
       return null;
   }
-}
-
-function normalizeChatErrorPayload(
-  payload: string | ChatErrorPayload,
-): ChatErrorPayload {
-  if (typeof payload === "string") {
-    return { message: payload };
-  }
-  return payload;
-}
-
-function hasOwnPayloadField<K extends string>(
-  payload: object,
-  key: K,
-): payload is Record<K, unknown> {
-  return Object.prototype.hasOwnProperty.call(payload, key);
-}
-
-function makeAssistantMessage(sessionId: string, content: string): Message {
-  return {
-    id: makeId(),
-    session_id: sessionId,
-    role: "assistant",
-    content,
-    created_at: new Date().toISOString(),
-  };
-}
-
-function getAssistantThinking(contentParts: unknown): string {
-  if (!contentParts || typeof contentParts !== "object") {
-    return "";
-  }
-
-  const thinking = (contentParts as { thinking?: unknown }).thinking;
-  return typeof thinking === "string" ? thinking : "";
-}
-
-function welcomeMessageForLanguage(
-  replyLanguage: ReplyLanguage = "english",
-  userDisplayName = "",
-) {
-  const name = userDisplayName.trim();
-  switch (replyLanguage) {
-    case "hindi":
-      if (name) {
-        return `नमस्ते, ${name}! मैं **Friday** हूं, आपकी निजी AI सहायक.\n\nमैं आपके डिवाइस पर ही चलती हूं। मैं हिंदी में जवाब दूंगी।`;
-      }
-      return "नमस्ते! मैं **Friday** हूं, आपकी निजी AI सहायक.\n\nमैं आपके डिवाइस पर ही चलती हूं। मैं हिंदी में जवाब दूंगी।";
-    case "bengali":
-      if (name) {
-        return `নমস্কার, ${name}! আমি **Friday**, আপনার ব্যক্তিগত AI সহায়ক.\n\nআমি আপনার ডিভাইসেই চলি। আমি বাংলায় উত্তর দেব।`;
-      }
-      return "নমস্কার! আমি **Friday**, আপনার ব্যক্তিগত AI সহায়ক.\n\nআমি আপনার ডিভাইসেই চলি। আমি বাংলায় উত্তর দেব।";
-    case "marathi":
-      if (name) {
-        return `नमस्कार, ${name}! मी **Friday**, तुमची वैयक्तिक AI सहाय्यक आहे.\n\nमी तुमच्या डिव्हाइसवरच चालते. मी मराठीत उत्तर देईन।`;
-      }
-      return "नमस्कार! मी **Friday**, तुमची वैयक्तिक AI सहाय्यक आहे.\n\nमी तुमच्या डिव्हाइसवरच चालते. मी मराठीत उत्तर देईन।";
-    case "tamil":
-      if (name) {
-        return `வணக்கம், ${name}! நான் **Friday**, உங்கள் தனிப்பட்ட AI உதவியாளர்.\n\nநான் உங்கள் சாதனத்திலேயே இயங்குகிறேன். நான் தமிழில் பதிலளிப்பேன்.`;
-      }
-      return "வணக்கம்! நான் **Friday**, உங்கள் தனிப்பட்ட AI உதவியாளர்.\n\nநான் உங்கள் சாதனத்திலேயே இயங்குகிறேன். நான் தமிழில் பதிலளிப்பேன்.";
-    case "punjabi":
-      if (name) {
-        return `ਸਤ ਸ੍ਰੀ ਅਕਾਲ, ${name}! ਮੈਂ **Friday**, ਤੁਹਾਡੀ ਨਿੱਜੀ AI ਸਹਾਇਕ ਹਾਂ.\n\nਮੈਂ ਤੁਹਾਡੇ ਡਿਵਾਈਸ 'ਤੇ ਹੀ ਚੱਲਦੀ ਹਾਂ। ਮੈਂ ਪੰਜਾਬੀ ਵਿੱਚ ਜਵਾਬ ਦਿਆਂਗੀ।`;
-      }
-      return "ਸਤ ਸ੍ਰੀ ਅਕਾਲ! ਮੈਂ **Friday**, ਤੁਹਾਡੀ ਨਿੱਜੀ AI ਸਹਾਇਕ ਹਾਂ.\n\nਮੈਂ ਤੁਹਾਡੇ ਡਿਵਾਈਸ 'ਤੇ ਹੀ ਚੱਲਦੀ ਹਾਂ। ਮੈਂ ਪੰਜਾਬੀ ਵਿੱਚ ਜਵਾਬ ਦਿਆਂਗੀ।";
-    default:
-      return name
-        ? `Hello, ${name}! I'm **Friday**, your local AI assistant.`
-        : `Hello! I'm **Friday**, your local AI assistant.`;
-  }
-}
-
-function makeWelcomeMessage(
-  sessionId: string,
-  replyLanguage: ReplyLanguage = "english",
-  userDisplayName = "",
-): Message {
-  return {
-    id: `welcome-${sessionId}`,
-    session_id: sessionId,
-    role: "assistant",
-    content: welcomeMessageForLanguage(replyLanguage, userDisplayName),
-    created_at: new Date(0).toISOString(),
-  };
 }
 
 function settingsToInput(settings: AppSettings): AppSettingsInput {
@@ -339,10 +253,29 @@ function canUseKnowledge(status: KnowledgeStatus | null) {
   );
 }
 
+function serializeAttachments(attachments: FileAttachment[]) {
+  return attachments.map((attachment) => ({
+    path: attachment.path,
+    name: attachment.name,
+    mimeType: attachment.mimeType,
+    sizeBytes: attachment.sizeBytes,
+    content: attachment.content
+      ? attachment.content.text
+        ? { text: attachment.content.text }
+        : attachment.content.dataUrl
+          ? { dataUrl: attachment.content.dataUrl }
+          : attachment.content.path
+            ? { path: attachment.content.path }
+            : null
+      : null,
+  }));
+}
+
 export function useAppController() {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [activeSession, setActiveSession] = useState<Session | null>(null);
-  const [messages, setMessages] = useState<Message[]>([]);
+  const [persistedMessages, setPersistedMessages] = useState<Message[]>([]);
+  const [fallbackMessages, setFallbackMessages] = useState<FridayUIMessage[]>([]);
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [backendStatus, setBackendStatus] = useState<BackendStatus | null>(
     null,
@@ -366,28 +299,93 @@ export function useAppController() {
   const [isSwitchingModel, setIsSwitchingModel] = useState(false);
   const [isBootstrapping, setIsBootstrapping] = useState(true);
   const [bootstrapError, setBootstrapError] = useState<string | null>(null);
-  const [isGenerating, setIsGenerating] = useState(false);
   const [isSavingSettings, setIsSavingSettings] = useState(false);
   const [webSearchEnabled, setWebSearchEnabled] = useState(false);
   const [knowledgeEnabled, setKnowledgeEnabled] = useState(false);
   const [thinkingEnabled, setThinkingEnabled] = useState(false);
   const [generationStatus, setGenerationStatus] = useState<string | null>(null);
 
-  const pendingAssistantIdRef = useRef<string | null>(null);
-  const pendingSessionIdRef = useRef<string | null>(null);
-  const handledSendErrorRef = useRef(false);
   const activeSessionRef = useRef<Session | null>(null);
-  const bufferedAnswerTokenRef = useRef("");
-  const bufferedThoughtTokenRef = useRef("");
-  const tokenFlushTimeoutRef = useRef<number | null>(null);
+  const activeRequestSessionIdRef = useRef<string | null>(null);
+  const lastChatErrorRef = useRef<string | null>(null);
+  const requestFailedRef = useRef(false);
   const settingsSaveChainRef = useRef<Promise<void>>(Promise.resolve());
   const pendingSettingsSaveCountRef = useRef(0);
   const committedSettingsRef = useRef<AppSettingsInput | null>(null);
   const desiredSettingsRef = useRef<AppSettingsInput | null>(null);
 
+  const transport = useMemo(() => new TauriChatTransport(), []);
+  const initialChatMessages = useMemo(
+    () => toFridayChatMessages(persistedMessages),
+    [persistedMessages],
+  );
+
+  const {
+    messages: chatMessages,
+    setMessages: setChatMessages,
+    sendMessage: sendChatMessage,
+    stop: stopChat,
+    status: chatStatus,
+    error: chatError,
+    clearError: clearChatError,
+  } = useChat<FridayChatMessage>({
+    id: activeSession?.id ?? "bootstrap-chat",
+    messages: initialChatMessages,
+    transport,
+    experimental_throttle: 16,
+    onError: (error) => {
+      lastChatErrorRef.current = toErrorMessage(error);
+      requestFailedRef.current = true;
+      setGenerationStatus(null);
+    },
+    onFinish: ({ message }) => {
+      activeRequestSessionIdRef.current = null;
+      setGenerationStatus(null);
+      if (message.metadata?.modelUsed) {
+        setCurrentModel(formatModelLabel(message.metadata.modelUsed));
+      }
+    },
+  });
+
+  const messages = useMemo(
+    () => normalizeFridayMessages(chatMessages),
+    [chatMessages],
+  );
+  const isGenerating =
+    chatStatus === "submitted" || chatStatus === "streaming";
+
   useEffect(() => {
     activeSessionRef.current = activeSession;
   }, [activeSession]);
+
+  useEffect(() => {
+    if (!activeSession) {
+      if (chatMessages.length > 0) {
+        setChatMessages([]);
+      }
+      if (chatError) {
+        clearChatError();
+      }
+      return;
+    }
+
+    if (chatStatus === "submitted" || chatStatus === "streaming") {
+      return;
+    }
+
+    setChatMessages(initialChatMessages);
+    if (chatError) {
+      clearChatError();
+    }
+  }, [
+    activeSession,
+    chatError,
+    chatMessages.length,
+    chatStatus,
+    clearChatError,
+    initialChatMessages,
+    setChatMessages,
+  ]);
 
   const applySavedSettingsState = (nextSettings: AppSettings) => {
     setSettings(nextSettings);
@@ -396,168 +394,40 @@ export function useAppController() {
     setThinkingEnabled(Boolean(nextSettings.chat.generation.thinking_enabled));
   };
 
-  const flushBufferedTokens = () => {
-    if (tokenFlushTimeoutRef.current !== null) {
-      window.clearTimeout(tokenFlushTimeoutRef.current);
-      tokenFlushTimeoutRef.current = null;
-    }
+  const appendAssistantError = useCallback((sessionId: string, message: string) => {
+    setChatMessages((previous) => [
+      ...previous,
+      makeFridayAssistantMessage({
+        id: makeId(),
+        sessionId,
+        content: `⚠️ ${message}`,
+      }),
+    ]);
+    clearChatError();
+  }, [clearChatError, setChatMessages]);
 
-    const answerChunk = bufferedAnswerTokenRef.current;
-    const thoughtChunk = bufferedThoughtTokenRef.current;
-    const pendingId = pendingAssistantIdRef.current;
-    if ((!answerChunk && !thoughtChunk) || !pendingId) return;
-
-    bufferedAnswerTokenRef.current = "";
-    bufferedThoughtTokenRef.current = "";
-    setMessages((previous) => {
-      const mergePendingMessage = (message: Message): Message => {
-        const nextThinking =
-          getAssistantThinking(message.content_parts) + thoughtChunk;
-        return {
-          ...message,
-          content: message.content + answerChunk,
-          content_parts: nextThinking ? { thinking: nextThinking } : message.content_parts,
-        };
-      };
-
-      const lastIndex = previous.length - 1;
-      const lastMessage = lastIndex >= 0 ? previous[lastIndex] : undefined;
-      if (lastMessage?.id === pendingId) {
-        const nextMessages = previous.slice();
-        nextMessages[lastIndex] = mergePendingMessage(lastMessage);
-        return nextMessages;
-      }
-
-      const existingIndex = previous.findIndex((message) => message.id === pendingId);
-      if (existingIndex === -1) {
-        const sessionId =
-          pendingSessionIdRef.current ??
-          activeSessionRef.current?.id ??
-          previous[previous.length - 1]?.session_id ??
-          "local-session";
-
-        return [
-          ...previous,
-          {
-            id: pendingId,
-            session_id: sessionId,
-            role: "assistant",
-            content: answerChunk,
-            content_parts: thoughtChunk ? { thinking: thoughtChunk } : undefined,
-            created_at: new Date().toISOString(),
-          },
-        ];
-      }
-
-      const nextMessages = previous.slice();
-      nextMessages[existingIndex] = mergePendingMessage(previous[existingIndex]);
-      return nextMessages;
-    });
-  };
-
-  const clearBufferedTokens = () => {
-    if (tokenFlushTimeoutRef.current !== null) {
-      window.clearTimeout(tokenFlushTimeoutRef.current);
-      tokenFlushTimeoutRef.current = null;
-    }
-    bufferedAnswerTokenRef.current = "";
-    bufferedThoughtTokenRef.current = "";
-  };
-
-  const applyCompletedAssistantPayload = (payload: ChatDonePayload) => {
-    const pendingId = pendingAssistantIdRef.current;
-    if (!pendingId) return;
-
-    const hasFinalContent =
-      typeof payload.content === "string" ||
-      hasOwnPayloadField(payload, "content");
-    const hasFinalContentParts = hasOwnPayloadField(payload, "contentParts");
-    if (!hasFinalContent && !hasFinalContentParts) {
+  useEffect(() => {
+    if (!chatError || !requestFailedRef.current) {
       return;
     }
 
-    setMessages((previous) => {
-      const existingIndex = previous.findIndex((message) => message.id === pendingId);
-      if (existingIndex === -1) {
-        const sessionId =
-          pendingSessionIdRef.current ??
-          activeSessionRef.current?.id ??
-          previous[previous.length - 1]?.session_id ??
-          "local-session";
-        return [
-          ...previous,
-          {
-            id: pendingId,
-            session_id: sessionId,
-            role: "assistant",
-            content: typeof payload.content === "string" ? payload.content : "",
-            content_parts: hasFinalContentParts ? payload.contentParts : undefined,
-            created_at: new Date().toISOString(),
-          },
-        ];
-      }
+    const sessionId =
+      activeSessionRef.current?.id ?? activeRequestSessionIdRef.current;
+    const errorMessage = lastChatErrorRef.current ?? toErrorMessage(chatError);
 
-      const nextMessages = previous.slice();
-      const existing = nextMessages[existingIndex];
-      nextMessages[existingIndex] = {
-        ...existing,
-        content: hasFinalContent
-          ? typeof payload.content === "string"
-            ? payload.content
-            : ""
-          : existing.content,
-        content_parts: hasFinalContentParts
-          ? payload.contentParts
-          : existing.content_parts,
-      };
-      return nextMessages;
-    });
-  };
+    if (sessionId) {
+      appendAssistantError(sessionId, errorMessage);
+    }
 
-  const clearPendingGenerationState = () => {
-    clearBufferedTokens();
-    pendingAssistantIdRef.current = null;
-    pendingSessionIdRef.current = null;
-  };
+    activeRequestSessionIdRef.current = null;
+    lastChatErrorRef.current = null;
+  }, [appendAssistantError, chatError]);
 
   const resetGenerationUiState = () => {
-    clearPendingGenerationState();
-    setIsGenerating(false);
+    activeRequestSessionIdRef.current = null;
+    lastChatErrorRef.current = null;
     setGenerationStatus(null);
-  };
-
-  const scheduleBufferedTokenFlush = () => {
-    if (tokenFlushTimeoutRef.current !== null) return;
-    tokenFlushTimeoutRef.current = window.setTimeout(() => {
-      tokenFlushTimeoutRef.current = null;
-      flushBufferedTokens();
-    }, TOKEN_FLUSH_INTERVAL_MS);
-  };
-
-  const removePendingAssistantIfEmpty = () => {
-    const pendingId = pendingAssistantIdRef.current;
-    if (!pendingId) return;
-
-    setMessages((previous) =>
-      previous.filter(
-        (message) =>
-          !(
-            message.id === pendingId &&
-            message.content.trim() === "" &&
-            getAssistantThinking(message.content_parts).trim() === ""
-          ),
-      ),
-    );
-  };
-
-  const appendAssistantError = (message: string) => {
-    setMessages((previous) => {
-      const sessionId =
-        activeSessionRef.current?.id ??
-        previous[0]?.session_id ??
-        "local-session";
-      return [...previous, makeAssistantMessage(sessionId, `⚠️ ${message}`)];
-    });
+    clearChatError();
   };
 
   const refreshModelInventory = async () => {
@@ -660,6 +530,25 @@ export function useAppController() {
     }
   };
 
+  const warmBackendIfNeeded = async (
+    statusValue: BackendStatus | null | undefined,
+  ) => {
+    if (!statusValue || statusValue.connected || statusValue.state !== "ready") {
+      return statusValue;
+    }
+
+    try {
+      const warmed = await invoke<BackendStatus>("warm_backend");
+      setBackendStatus(warmed);
+      if (warmed.models[0]) {
+        setCurrentModel(formatModelLabel(warmed.models[0]));
+      }
+      return warmed;
+    } catch {
+      return statusValue;
+    }
+  };
+
   const refreshBackendStatus = async ({
     includeModelInventory = true,
   }: {
@@ -681,24 +570,6 @@ export function useAppController() {
     return (await warmBackendIfNeeded(status)) ?? status;
   };
 
-  const warmBackendIfNeeded = async (statusValue: BackendStatus | null | undefined) => {
-    if (!statusValue || statusValue.connected || statusValue.state !== "ready") {
-      return statusValue;
-    }
-
-    try {
-      const warmed = await invoke<BackendStatus>("warm_backend");
-      setBackendStatus(warmed);
-      if (warmed.models[0]) {
-        setCurrentModel(formatModelLabel(warmed.models[0]));
-      }
-      return warmed;
-    } catch {
-      // Warmup is opportunistic; the regular send path will still start the daemon.
-      return statusValue;
-    }
-  };
-
   const bootstrap = async () => {
     setIsBootstrapping(true);
     setBootstrapError(null);
@@ -709,7 +580,8 @@ export function useAppController() {
       desiredSettingsRef.current = normalizedSettings;
       setSessions(payload.sessions);
       setActiveSession(payload.currentSession);
-      setMessages(payload.messages);
+      setPersistedMessages(payload.messages);
+      setFallbackMessages([]);
       applySavedSettingsState(payload.settings);
       setBackendStatus(payload.backendStatus);
       setWebSearchStatus(
@@ -718,16 +590,26 @@ export function useAppController() {
       setKnowledgeStatus(
         payload.knowledgeStatus ?? unavailableKnowledgeStatus(),
       );
+
       const [inventoryResult, knowledgeResult] = await Promise.allSettled([
         refreshModelInventory(),
         refreshKnowledge({ includeStatus: false }),
       ]);
+
       if (inventoryResult.status === "rejected") {
-        console.warn("refreshModelInventory during bootstrap failed:", inventoryResult.reason);
+        console.warn(
+          "refreshModelInventory during bootstrap failed:",
+          inventoryResult.reason,
+        );
       }
+
       if (knowledgeResult.status === "rejected") {
-        console.warn("refreshKnowledge during bootstrap failed:", knowledgeResult.reason);
+        console.warn(
+          "refreshKnowledge during bootstrap failed:",
+          knowledgeResult.reason,
+        );
       }
+
       void warmBackendIfNeeded(payload.backendStatus);
       if (
         payload.backendStatus.connected &&
@@ -749,55 +631,14 @@ export function useAppController() {
 
     if (activeSessionRef.current?.id === sessionId) {
       setActiveSession(selection.session);
-      setMessages(selection.messages);
+      setPersistedMessages(selection.messages);
     }
     setSessions(nextSessions);
-    clearPendingGenerationState();
+    resetGenerationUiState();
   };
 
   useEffect(() => {
     const registerListeners = async () => {
-      const unlistenToken = await listen<ChatTokenPayload>(
-        "chat-token",
-        (event) => {
-          if (
-            !pendingAssistantIdRef.current ||
-            event.payload.sessionId !== pendingSessionIdRef.current
-          ) {
-            return;
-          }
-
-          if (event.payload.kind === "thought") {
-            bufferedThoughtTokenRef.current += event.payload.token;
-          } else {
-            bufferedAnswerTokenRef.current += event.payload.token;
-          }
-          setGenerationStatus(null);
-          scheduleBufferedTokenFlush();
-        },
-      );
-
-      const unlistenDone = await listen<ChatDonePayload>("chat-done", (event) => {
-        if (event.payload.sessionId !== pendingSessionIdRef.current) {
-          return;
-        }
-
-        flushBufferedTokens();
-        applyCompletedAssistantPayload(event.payload);
-        setIsGenerating(false);
-        setGenerationStatus(null);
-        setCurrentModel(formatModelLabel(event.payload.model));
-
-        if (!event.payload.hasContent) {
-          removePendingAssistantIfEmpty();
-        }
-
-        clearPendingGenerationState();
-        void refreshBackendStatus({ includeModelInventory: false }).catch(
-          () => undefined,
-        );
-      });
-
       const unlistenActivity = await listen<{ model?: string }>(
         "activity",
         (event) => {
@@ -811,7 +652,7 @@ export function useAppController() {
         "web-search-status",
         (event) => {
           setWebSearchStatus(event.payload);
-          if (!pendingSessionIdRef.current) {
+          if (!activeRequestSessionIdRef.current) {
             return;
           }
 
@@ -834,7 +675,7 @@ export function useAppController() {
       const unlistenToolCall = await listen<ToolCallEvent>(
         "tool-call-start",
         (event) => {
-          if (event.payload.sessionId !== pendingSessionIdRef.current) {
+          if (event.payload.sessionId !== activeRequestSessionIdRef.current) {
             return;
           }
 
@@ -845,10 +686,7 @@ export function useAppController() {
       const unlistenToolResult = await listen<ToolResultEvent>(
         "tool-call-result",
         (event) => {
-          if (
-            event.payload.sessionId !== pendingSessionIdRef.current ||
-            !pendingSessionIdRef.current
-          ) {
+          if (event.payload.sessionId !== activeRequestSessionIdRef.current) {
             return;
           }
 
@@ -859,41 +697,12 @@ export function useAppController() {
         },
       );
 
-      const unlistenError = await listen<string | ChatErrorPayload>(
-        "chat-error",
-        (event) => {
-          const payload = normalizeChatErrorPayload(event.payload);
-          const matchesPendingSession =
-            !!payload.sessionId &&
-            payload.sessionId === pendingSessionIdRef.current;
-          const isActiveSessionError =
-            matchesPendingSession &&
-            payload.sessionId === activeSessionRef.current?.id;
-
-          handledSendErrorRef.current = matchesPendingSession;
-          if (isActiveSessionError) {
-            flushBufferedTokens();
-            setIsGenerating(false);
-            setGenerationStatus(null);
-            removePendingAssistantIfEmpty();
-            clearPendingGenerationState();
-            appendAssistantError(payload.message);
-          }
-          void refreshBackendStatus({ includeModelInventory: false }).catch(
-            () => undefined,
-          );
-        },
-      );
-
       return () => {
-        unlistenToken();
-        unlistenDone();
         unlistenActivity();
         unlistenWebSearchStatus();
         unlistenKnowledgeStatus();
         unlistenToolCall();
         unlistenToolResult();
-        unlistenError();
       };
     };
 
@@ -912,13 +721,21 @@ export function useAppController() {
     void bootstrap().catch((error) => {
       const message = toErrorMessage(error);
       setBootstrapError(message);
-      setMessages([makeAssistantMessage("bootstrap", `⚠️ ${message}`)]);
+      setFallbackMessages([
+        normalizeFridayMessage(
+          makeFridayAssistantMessage({
+            id: `bootstrap-${makeId()}`,
+            sessionId: "bootstrap",
+            content: `⚠️ ${message}`,
+          }),
+        ),
+      ]);
       setIsBootstrapping(false);
     });
 
     return () => {
       cancelled = true;
-      clearPendingGenerationState();
+      activeRequestSessionIdRef.current = null;
       dispose?.();
     };
   }, []);
@@ -934,7 +751,8 @@ export function useAppController() {
       ...previous.filter((item) => item.id !== session.id),
     ]);
     setActiveSession(session);
-    setMessages([]);
+    setPersistedMessages([]);
+    setFallbackMessages([]);
     resetGenerationUiState();
   };
 
@@ -945,7 +763,7 @@ export function useAppController() {
       sessionId,
     });
     setActiveSession(result.session);
-    setMessages(result.messages);
+    setPersistedMessages(result.messages);
     resetGenerationUiState();
   };
 
@@ -969,18 +787,16 @@ export function useAppController() {
     const fallbackSession = nextSessions[0] ?? null;
     if (!fallbackSession) {
       setActiveSession(null);
-      setMessages([]);
+      setPersistedMessages([]);
+      setChatMessages([]);
       return;
     }
-
-    setActiveSession(fallbackSession);
-    setMessages([]);
 
     const selection = await invoke<SessionSelectionResult>("select_session", {
       sessionId: fallbackSession.id,
     });
     setActiveSession(selection.session);
-    setMessages(selection.messages);
+    setPersistedMessages(selection.messages);
   };
 
   const sendMessage = async (
@@ -992,6 +808,7 @@ export function useAppController() {
       attachments?.filter((attachment) => attachment.status === "ready") ?? [];
     const hasAttachments = readyAttachments.length > 0;
     if ((!trimmed && !hasAttachments) || isGenerating || !activeSession) return;
+
     const sessionId = activeSession.id;
     const effectiveThinkingEnabled =
       thinkingEnabled && (backendStatus?.supports_thinking ?? false);
@@ -999,42 +816,14 @@ export function useAppController() {
       webSearchEnabled && canUseWebSearch(backendStatus, webSearchStatus);
     const effectiveKnowledgeEnabled =
       knowledgeEnabled && canUseKnowledge(knowledgeStatus);
-
-    // Build display content for the user bubble
-    let displayContent = trimmed;
-    if (hasAttachments) {
-      const fileNames = readyAttachments.map((attachment) => attachment.name);
-      if (fileNames.length > 0) {
-        const fileTag = `📎 ${fileNames.join(", ")}`;
-        displayContent = trimmed ? `${fileTag}\n${trimmed}` : fileTag;
-      }
-    }
-
-    // Build serializable attachments for the backend
     const serializedAttachments = hasAttachments
-      ? readyAttachments
-          .map((a) => ({
-            path: a.path,
-            name: a.name,
-            mimeType: a.mimeType,
-            sizeBytes: a.sizeBytes,
-            content: a.content
-              ? a.content.text
-                ? { text: a.content.text }
-                : a.content.dataUrl
-                  ? { dataUrl: a.content.dataUrl }
-                  : a.content.path
-                    ? { path: a.content.path }
-                  : null
-              : null,
-          }))
+      ? serializeAttachments(readyAttachments)
       : null;
+    const attachmentsSummary = readyAttachments.map((attachment) => attachment.name);
 
-    handledSendErrorRef.current = false;
-    const pendingId = makeId();
-    pendingAssistantIdRef.current = pendingId;
-    pendingSessionIdRef.current = sessionId;
-    setIsGenerating(true);
+    lastChatErrorRef.current = null;
+    activeRequestSessionIdRef.current = sessionId;
+
     const needsWebSearchStartup =
       effectiveWebAssistEnabled && webSearchStatus?.state !== "ready";
     setGenerationStatus(
@@ -1044,59 +833,69 @@ export function useAppController() {
           ? "Friday is thinking…"
           : "Starting local model…",
     );
-    setMessages((previous) => [
-      ...previous,
-      {
-        id: makeId(),
-        session_id: sessionId,
-        role: "user",
-        content: displayContent,
-        created_at: new Date().toISOString(),
-      },
-    ]);
 
     try {
-      await invoke("send_message", {
-        request: {
-          sessionId,
-          message:
-            trimmed ||
-            (hasAttachments
-              ? "What can you tell me about these files?"
-              : trimmed),
-          attachments: serializedAttachments,
-          thinkingEnabled: effectiveThinkingEnabled,
-          webAssistEnabled: effectiveWebAssistEnabled,
-          knowledgeEnabled: effectiveKnowledgeEnabled,
+      await sendChatMessage(
+        {
+          text: trimmed,
+          metadata: {
+            sessionId,
+            createdAt: new Date().toISOString(),
+            ...(attachmentsSummary.length > 0 ? { attachmentsSummary } : {}),
+          },
         },
-      });
-      if (pendingSessionIdRef.current === sessionId) {
-        flushBufferedTokens();
-        setIsGenerating(false);
-        setGenerationStatus(null);
-      }
-      await refreshSessionState(sessionId);
-    } catch (error) {
-      flushBufferedTokens();
-      setIsGenerating(false);
-      setGenerationStatus(null);
-      removePendingAssistantIfEmpty();
-      clearPendingGenerationState();
+        {
+          body: {
+            attachments: serializedAttachments,
+            thinkingEnabled: effectiveThinkingEnabled,
+            webAssistEnabled: effectiveWebAssistEnabled,
+            knowledgeEnabled: effectiveKnowledgeEnabled,
+          },
+        },
+      );
+      await Promise.resolve();
 
-      if (
-        handledSendErrorRef.current &&
-        activeSessionRef.current?.id === sessionId
-      ) {
-        await refreshSessionState(sessionId).catch(() => undefined);
-      } else if (activeSessionRef.current?.id === sessionId) {
-        appendAssistantError(toErrorMessage(error));
+      if (requestFailedRef.current) {
+        requestFailedRef.current = false;
+        lastChatErrorRef.current = null;
+        return;
+      }
+
+      if (activeSessionRef.current?.id === sessionId) {
+        await refreshSessionState(sessionId);
+      }
+    } catch (error) {
+      activeRequestSessionIdRef.current = null;
+      setGenerationStatus(null);
+
+      if (activeSessionRef.current?.id === sessionId) {
+        appendAssistantError(sessionId, toErrorMessage(error));
       }
     }
   };
 
   const cancelGeneration = async () => {
     setGenerationStatus("Stopping…");
-    await invoke("cancel_generation");
+    stopChat();
+    try {
+      const response = await invoke<CancelGenerationResponse>("cancel_generation");
+      if (response.status === "failed") {
+        const message =
+          response.message ??
+          "Could not stop the current response. Please try again.";
+        console.error("cancel_generation failed:", response.error_code, message);
+        setGenerationStatus(message);
+        return;
+      }
+
+      if (response.status === "not_running") {
+        activeRequestSessionIdRef.current = null;
+        setGenerationStatus(null);
+      }
+    } catch (error) {
+      console.error("cancel_generation invoke failed:", error);
+      setGenerationStatus(null);
+    }
   };
 
   const saveAppSettings = (input: AppSettingsInput) => {
@@ -1286,11 +1085,12 @@ export function useAppController() {
     webSearchStatus,
   );
   const knowledgeToggleAvailable = canUseKnowledge(knowledgeStatus);
+  const renderedMessages = activeSession ? messages : fallbackMessages;
 
   return {
     sessions,
     activeSession,
-    messages,
+    messages: renderedMessages,
     settings,
     backendStatus,
     webSearchStatus,

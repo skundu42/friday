@@ -20,6 +20,7 @@ use std::io::{Cursor, Read, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 use tauri::Emitter;
 use tauri::Manager;
 use tauri::State;
@@ -32,6 +33,7 @@ const MAX_PROMPT_HISTORY_QUERY_LIMIT: usize = 24;
 const MAX_ATTACHMENT_TEXT_CHARS_PER_FILE: usize = 40_000;
 const MAX_ATTACHMENT_TEXT_CHARS_TOTAL: usize = 80_000;
 const MAX_KNOWLEDGE_PROMPT_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
+const KNOWLEDGE_SEARCH_TIMEOUT: Duration = Duration::from_secs(8);
 const DEFAULT_SESSION_TITLE: &str = "New chat";
 const SESSION_TITLE_PREVIEW_CHARS: usize = 48;
 const MAIN_WINDOW_LABEL: &str = "main";
@@ -93,6 +95,49 @@ struct BootstrapPayload {
 struct SessionSelectionResult {
     session: Session,
     messages: Vec<Message>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CancelGenerationStatus {
+    Canceled,
+    NotRunning,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CancelGenerationResponse {
+    status: CancelGenerationStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+}
+
+impl CancelGenerationResponse {
+    fn canceled() -> Self {
+        Self {
+            status: CancelGenerationStatus::Canceled,
+            error_code: None,
+            message: None,
+        }
+    }
+
+    fn not_running() -> Self {
+        Self {
+            status: CancelGenerationStatus::NotRunning,
+            error_code: None,
+            message: Some("No response is currently running.".to_string()),
+        }
+    }
+
+    fn failed(error_code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            status: CancelGenerationStatus::Failed,
+            error_code: Some(error_code.into()),
+            message: Some(message.into()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -468,8 +513,75 @@ fn persist_and_emit_assistant_error(
     emit_chat_error(app, Some(session_id), message);
 }
 
+fn emit_cancelled_chat_done(app: &tauri::AppHandle, session_id: &str, model_name: &str) {
+    let _ = app.emit(
+        "chat-done",
+        serde_json::json!({
+            "sessionId": session_id,
+            "model": model_name,
+            "cancelled": true,
+            "hasContent": false,
+            "content": "",
+            "contentParts": serde_json::Value::Null,
+        }),
+    );
+}
+
+fn is_expected_cancellation_error(error: &str) -> bool {
+    let lowered = error.to_ascii_lowercase();
+    lowered.contains("cancel")
+        || lowered.contains("aborted")
+        || lowered.contains("interrupted")
+        || lowered.contains("stopped")
+}
+
 fn io_error(message: impl Into<String>) -> std::io::Error {
     std::io::Error::other(message.into())
+}
+
+fn parse_openable_external_url(raw_url: &str) -> Result<reqwest::Url, String> {
+    let parsed =
+        reqwest::Url::parse(raw_url).map_err(|error| format!("Invalid URL: {}", error))?;
+
+    match parsed.scheme() {
+        "http" | "https" | "mailto" => Ok(parsed),
+        _ => Err("Only http, https, and mailto links can be opened.".to_string()),
+    }
+}
+
+fn open_external_url_with_system_browser(url: &str) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = std::process::Command::new("open");
+        command.arg(url);
+        command
+    };
+
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = std::process::Command::new("rundll32");
+        command.args(["url.dll,FileProtocolHandler", url]);
+        command
+    };
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut command = {
+        let mut command = std::process::Command::new("xdg-open");
+        command.arg(url);
+        command
+    };
+
+    let status = command
+        .status()
+        .map_err(|error| format!("Failed to launch system browser: {}", error))?;
+    if !status.success() {
+        return Err(format!(
+            "System browser command exited with status {}",
+            status
+        ));
+    }
+
+    Ok(())
 }
 
 fn shutdown_managed_services(app_handle: &tauri::AppHandle) {
@@ -714,6 +826,7 @@ pub fn run() {
             sidecar::select_model,
             sidecar::warm_backend,
             searxng::get_web_search_status,
+            open_external_link,
         ])
         .setup(|app| {
             let data_dir = app
@@ -1344,6 +1457,15 @@ async fn send_message(
         model_name
     );
 
+    if state.cancel_flag.load(Ordering::SeqCst) {
+        tracing::info!(
+            session_id = %session_id,
+            "Generation cancelled before prompt assembly completed"
+        );
+        emit_cancelled_chat_done(&app, &session_id, &model_name);
+        return Ok(());
+    }
+
     // Build message history
     let history =
         load_recent_messages_for_prompt_inner(&state, &session_id, MAX_PROMPT_HISTORY_QUERY_LIMIT)?;
@@ -1377,11 +1499,42 @@ async fn send_message(
     for msg in &trimmed_history {
         chat_messages.push(message_to_history_chat_message(msg)?);
     }
+
+    if state.cancel_flag.load(Ordering::SeqCst) {
+        tracing::info!(
+            session_id = %session_id,
+            "Generation cancelled before knowledge search"
+        );
+        if let Some(trace) = web_assist_trace.as_ref() {
+            log_web_assist_turn(
+                &session_id,
+                "cancelled",
+                trace,
+                Some("knowledge_search"),
+                None,
+            );
+        }
+        emit_cancelled_chat_done(&app, &session_id, &model_name);
+        return Ok(());
+    }
+
     let knowledge_results = if effective_knowledge_enabled {
-        match knowledge::search(&knowledge, &db_path, &message).await {
-            Ok(results) => results,
-            Err(error) => {
+        match tokio::time::timeout(
+            KNOWLEDGE_SEARCH_TIMEOUT,
+            knowledge::search(&knowledge, &db_path, &message),
+        )
+        .await
+        {
+            Ok(Ok(results)) => results,
+            Ok(Err(error)) => {
                 tracing::warn!("Knowledge search failed: {}", error);
+                knowledge::KnowledgeSearchResults::default()
+            }
+            Err(_) => {
+                tracing::warn!(
+                    timeout_seconds = KNOWLEDGE_SEARCH_TIMEOUT.as_secs(),
+                    "Knowledge search timed out; continuing without Knowledge context"
+                );
                 knowledge::KnowledgeSearchResults::default()
             }
         }
@@ -1391,8 +1544,17 @@ async fn send_message(
     let prompt_message = augment_prompt_with_knowledge(prompt_message, &knowledge_results)?;
     chat_messages.push(prompt_message);
 
-    // Reset cancel flag
-    state.cancel_flag.store(false, Ordering::SeqCst);
+    if state.cancel_flag.load(Ordering::SeqCst) {
+        tracing::info!(
+            session_id = %session_id,
+            "Generation cancelled before inference setup"
+        );
+        if let Some(trace) = web_assist_trace.as_ref() {
+            log_web_assist_turn(&session_id, "cancelled", trace, Some("pre_inference"), None);
+        }
+        emit_cancelled_chat_done(&app, &session_id, &model_name);
+        return Ok(());
+    }
 
     if tools_enabled {
         if let Err(error) = searxng.ensure_ready().await {
@@ -1414,6 +1576,24 @@ async fn send_message(
             );
             return Err(error);
         }
+    }
+
+    if state.cancel_flag.load(Ordering::SeqCst) {
+        tracing::info!(
+            session_id = %session_id,
+            "Generation cancelled before inference start"
+        );
+        if let Some(trace) = web_assist_trace.as_ref() {
+            log_web_assist_turn(
+                &session_id,
+                "cancelled",
+                trace,
+                Some("start_inference"),
+                None,
+            );
+        }
+        emit_cancelled_chat_done(&app, &session_id, &model_name);
+        return Ok(());
     }
 
     let mut generation_config = app_settings.chat.generation_request_config();
@@ -1502,8 +1682,15 @@ async fn send_message(
                     }
                     Some(StreamEvent::Error(error)) => {
                         if state.cancel_flag.load(Ordering::SeqCst) {
-                            tracing::info!("Generation stopped after cancellation request");
-                            cancelled = true;
+                            if is_expected_cancellation_error(&error) {
+                                tracing::info!("Generation stopped after cancellation request");
+                                cancelled = true;
+                            } else {
+                                stream_error = Some(format!(
+                                    "[cancel_stream_failed] Cancellation did not complete cleanly: {}",
+                                    error
+                                ));
+                            }
                         } else {
                             stream_error = Some(error);
                         }
@@ -1528,7 +1715,13 @@ async fn send_message(
                 if state.cancel_flag.load(Ordering::SeqCst) {
                     tracing::info!("Generation cancelled by user");
                     cancelled = true;
-                    let _ = sidecar.cancel_inference().await;
+                    if let Err(error) = sidecar.cancel_inference().await {
+                        cancelled = false;
+                        stream_error = Some(format!(
+                            "[cancel_rpc_failed] Failed to stop active generation: {}",
+                            error
+                        ));
+                    }
                     break;
                 }
             }
@@ -1565,7 +1758,8 @@ async fn send_message(
         log_web_assist_turn(&session_id, status, trace, None, None);
     }
 
-    let assistant_parts = build_assistant_content_parts(&full_thinking, &knowledge_results.citations);
+    let assistant_parts =
+        build_assistant_content_parts(&full_thinking, &knowledge_results.citations);
 
     if !full_response.trim().is_empty() || !full_thinking.trim().is_empty() {
         if let Err(error) = save_message_json_inner(
@@ -1777,11 +1971,34 @@ async fn save_settings(
 async fn cancel_generation(
     state: State<'_, AppState>,
     sidecar: State<'_, SidecarManager>,
-) -> Result<(), String> {
+) -> Result<CancelGenerationResponse, String> {
+    let active_generation_session = state.active_generation_session.lock().unwrap().clone();
+    if active_generation_session.is_none() {
+        state.cancel_flag.store(false, Ordering::SeqCst);
+        return Ok(CancelGenerationResponse::not_running());
+    }
+
     state.cancel_flag.store(true, Ordering::SeqCst);
-    let _ = sidecar.cancel_inference().await;
-    tracing::info!("Cancel generation requested");
-    Ok(())
+    match sidecar.cancel_inference().await {
+        Ok(()) => {
+            tracing::info!("Cancel generation requested");
+            Ok(CancelGenerationResponse::canceled())
+        }
+        Err(error) => {
+            let message = format!("Failed to cancel active generation: {}", error);
+            tracing::warn!("{}", message);
+            Ok(CancelGenerationResponse::failed(
+                "cancel_rpc_failed",
+                message,
+            ))
+        }
+    }
+}
+
+#[tauri::command]
+fn open_external_link(url: String) -> Result<(), String> {
+    let parsed = parse_openable_external_url(&url)?;
+    open_external_url_with_system_browser(parsed.as_str())
 }
 
 #[tauri::command]
@@ -2370,7 +2587,7 @@ fn system_prompt_for_preferences(
     } else {
         web_tools_unavailable_instruction()
     };
-    let markdown_instruction = "When formatting with Markdown, emit valid CommonMark. Put a space after heading markers (#), bullet markers (-, *), and ordered list markers (1.). If a structured format would be malformed, prefer plain text over broken Markdown.";
+    let markdown_instruction = "When formatting with Markdown, emit valid CommonMark. Default to Markdown for multi-part answers. Use short paragraphs, one bullet per line, and blank lines between paragraphs, lists, tables, and code blocks. Put a space after heading markers (#), bullet markers (-, *), and ordered list markers (1.). Never collapse headings or list items into running text. If a structured format would be malformed, prefer plain text over broken Markdown.";
 
     format!(
         "You are Friday, a helpful local AI assistant. Be concise, clear, practical and useful. {} {} {} {} {}",
@@ -2509,6 +2726,26 @@ mod tests {
         let selected = choose_session(&sessions, Some("missing")).unwrap();
 
         assert_eq!(selected.id, "a");
+    }
+
+    #[test]
+    fn parse_openable_external_url_allows_expected_schemes() {
+        for url in ["https://openai.com", "http://example.com/path"] {
+            let parsed = parse_openable_external_url(url).expect("url should be allowed");
+            assert!(matches!(parsed.scheme(), "http" | "https"));
+        }
+
+        let parsed_mailto = parse_openable_external_url("mailto:test@example.com")
+            .expect("mailto url should be allowed");
+        assert_eq!(parsed_mailto.scheme(), "mailto");
+        assert_eq!(parsed_mailto.path(), "test@example.com");
+    }
+
+    #[test]
+    fn parse_openable_external_url_rejects_unsupported_schemes() {
+        let error = parse_openable_external_url("javascript:alert(1)")
+            .expect_err("unsupported scheme should be rejected");
+        assert_eq!(error, "Only http, https, and mailto links can be opened.");
     }
 
     fn message(id: &str, role: &str, content: &str) -> Message {
@@ -2729,7 +2966,10 @@ mod tests {
         let prompt = system_prompt_for_preferences("english", false, false);
 
         assert!(prompt.contains("emit valid CommonMark"));
+        assert!(prompt.contains("Default to Markdown for multi-part answers"));
+        assert!(prompt.contains("one bullet per line"));
         assert!(prompt.contains("Put a space after heading markers"));
+        assert!(prompt.contains("Never collapse headings or list items"));
         assert!(prompt.contains("prefer plain text over broken Markdown"));
     }
 
@@ -3187,8 +3427,10 @@ mod tests {
             state.current_session.lock().unwrap().as_deref(),
             Some("session-a")
         );
-        let persisted = with_db(&state, |conn| storage::load_string_setting(conn, CURRENT_SESSION_KEY)) 
-            .unwrap();
+        let persisted = with_db(&state, |conn| {
+            storage::load_string_setting(conn, CURRENT_SESSION_KEY)
+        })
+        .unwrap();
         assert_eq!(persisted.as_deref(), Some("session-a"));
     }
 

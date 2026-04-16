@@ -2,7 +2,7 @@ use crate::models::python_worker::{PythonWorkerClient, PythonWorkerSpawnConfig, 
 use crate::models::ChatMessage;
 use crate::python_runtime::{
     bundled_resource_source_path, ensure_embedded_python_runtime, install_python_wheel,
-    sync_file_if_changed,
+    sha256_file_hex, sync_file_if_changed,
 };
 use crate::runtime_manifest::{
     embedded_runtime_manifest, PlatformRuntimeSpec, RuntimeManifest, RuntimeModelSpec,
@@ -11,6 +11,7 @@ use crate::runtime_manifest::{
 use crate::settings::GenerationRequestConfig;
 use crate::{persist_active_model_id, AppState};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
@@ -233,6 +234,8 @@ pub struct SidecarManager {
     resource_dir: Mutex<Option<PathBuf>>,
     daemon: Arc<AsyncMutex<Option<PythonWorkerClient>>>,
     daemon_startup: Arc<AsyncMutex<()>>,
+    runtime_install_lock: AsyncMutex<()>,
+    model_download_locks: AsyncMutex<HashMap<String, Arc<AsyncMutex<()>>>>,
     active_model_id: Mutex<String>,
     max_tokens: AtomicU32,
     runtime_installed: Mutex<Option<bool>>,
@@ -289,6 +292,8 @@ impl SidecarManager {
             resource_dir: Mutex::new(None),
             daemon: Arc::new(AsyncMutex::new(None)),
             daemon_startup: Arc::new(AsyncMutex::new(())),
+            runtime_install_lock: AsyncMutex::new(()),
+            model_download_locks: AsyncMutex::new(HashMap::new()),
             active_model_id: Mutex::new(default_model().id.to_string()),
             max_tokens: AtomicU32::new(4096),
             runtime_installed: Mutex::new(None),
@@ -303,6 +308,7 @@ impl SidecarManager {
         tracing::info!("Models directory set: {:?}", path);
         std::fs::create_dir_all(&path).ok();
         *self.models_dir.lock().unwrap() = Some(path);
+        *self.runtime_installed.lock().unwrap() = None;
         self.invalidate_downloaded_model_ids_cache();
         self.cleanup_stale_runtime_processes();
         self.ensure_idle_monitor();
@@ -311,6 +317,7 @@ impl SidecarManager {
     pub fn set_resource_dir(&self, path: PathBuf) {
         tracing::info!("Resource directory set: {:?}", path);
         *self.resource_dir.lock().unwrap() = Some(path);
+        *self.runtime_installed.lock().unwrap() = None;
     }
 
     pub fn set_max_tokens(&self, max_tokens: u32) {
@@ -570,14 +577,26 @@ impl SidecarManager {
 
     pub async fn cancel_inference(&self) -> Result<(), String> {
         let mut guard = self.daemon.lock().await;
-        if let Some(daemon) = guard.as_ref() {
+        let Some(_) = guard.as_ref() else {
+            return Ok(());
+        };
+
+        let (cancel_result, daemon_alive) = {
+            let daemon = guard
+                .as_ref()
+                .ok_or_else(|| "Friday LiteRT Python worker is not available".to_string())?;
             tracing::info!("Cancelling Friday LiteRT Python worker request");
-            let _ = daemon.cancel_active_request().await;
-            if !daemon.is_alive().await {
-                let _ = guard.take();
-            }
+            let cancel_result = daemon.cancel_active_request().await;
+            let daemon_alive = daemon.is_alive().await;
+            (cancel_result, daemon_alive)
+        };
+
+        if !daemon_alive {
+            let _ = guard.take();
         }
-        Ok(())
+
+        cancel_result
+            .map_err(|error| format!("Failed to cancel Friday LiteRT Python worker: {}", error))
     }
 
     pub async fn shutdown_daemon(&self) -> Result<(), String> {
@@ -726,6 +745,9 @@ impl SidecarManager {
         app: &tauri::AppHandle,
         model: &RuntimeModelSpec,
     ) -> Result<(), String> {
+        let model_download_lock = self.model_download_lock(model.id.as_str()).await;
+        let _model_download_guard = model_download_lock.lock().await;
+
         self.ensure_runtime(Some(app)).await?;
         if self.has_model_for(model) {
             Self::emit_progress(Some(app), "complete", &model.display_name);
@@ -981,33 +1003,149 @@ impl SidecarManager {
         }
     }
 
+    async fn model_download_lock(&self, model_id: &str) -> Arc<AsyncMutex<()>> {
+        let mut guard = self.model_download_locks.lock().await;
+        guard
+            .entry(model_id.to_string())
+            .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+            .clone()
+    }
+
+    fn command_output_summary(output: &std::process::Output) -> String {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if !stderr.is_empty() {
+            return stderr;
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !stdout.is_empty() {
+            return stdout;
+        }
+        "no output".to_string()
+    }
+
+    fn ensure_file_checksum_matches(
+        label: &str,
+        expected_path: &Path,
+        actual_path: &Path,
+    ) -> Result<(), String> {
+        let expected_hash = sha256_file_hex(expected_path)?;
+        let actual_hash = sha256_file_hex(actual_path)?;
+        if expected_hash != actual_hash {
+            return Err(format!(
+                "{} checksum mismatch at {}. Installed runtime does not match bundled assets.",
+                label,
+                actual_path.display()
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_runtime_installation(&self) -> Result<(), String> {
+        let lit_binary = self.lit_binary_path()?;
+        let python_binary = self.python_binary_path()?;
+        let worker_script = self.python_worker_script_path()?;
+        let python_site_packages = self.python_site_packages_path()?;
+        let python_runtime_lib_dir = self.python_runtime_lib_dir_path()?;
+
+        if !lit_binary.exists() {
+            return Err(format!(
+                "LiteRT runtime binary is missing at {}.",
+                lit_binary.display()
+            ));
+        }
+        if !python_binary.exists() {
+            return Err(format!(
+                "Bundled Python interpreter is missing at {}.",
+                python_binary.display()
+            ));
+        }
+        if !worker_script.exists() {
+            return Err(format!(
+                "Friday Python worker script is missing at {}.",
+                worker_script.display()
+            ));
+        }
+        if !python_site_packages
+            .join("litert_lm")
+            .join("__init__.py")
+            .exists()
+        {
+            return Err(format!(
+                "Bundled LiteRT Python package is missing at {}.",
+                python_site_packages.display()
+            ));
+        }
+
+        let bundled_lit_binary = self.bundled_runtime_source_path()?;
+        let bundled_worker_script = self.bundled_python_worker_source_path()?;
+        Self::ensure_file_checksum_matches(
+            "LiteRT runtime binary",
+            &bundled_lit_binary,
+            &lit_binary,
+        )?;
+        Self::ensure_file_checksum_matches(
+            "Friday Python worker script",
+            &bundled_worker_script,
+            &worker_script,
+        )?;
+
+        let lit_probe = std::process::Command::new(&lit_binary)
+            .arg("list")
+            .env("LIT_DIR", self.lit_home_dir_path()?)
+            .output()
+            .map_err(|error| format!("Failed to run LiteRT runtime probe: {}", error))?;
+        if !lit_probe.status.success() {
+            return Err(format!(
+                "LiteRT runtime warm probe failed: {}",
+                Self::command_output_summary(&lit_probe)
+            ));
+        }
+
+        let import_probe = std::process::Command::new(&python_binary)
+            .arg("-c")
+            .arg("import litert_lm")
+            .env("PYTHONUNBUFFERED", "1")
+            .env("PYTHONNOUSERSITE", "1")
+            .env("PYTHONPATH", python_site_packages.display().to_string())
+            .env("DYLD_LIBRARY_PATH", python_runtime_lib_dir)
+            .output()
+            .map_err(|error| format!("Failed to run embedded Python import probe: {}", error))?;
+        if !import_probe.status.success() {
+            return Err(format!(
+                "Embedded Python import probe failed: {}",
+                Self::command_output_summary(&import_probe)
+            ));
+        }
+
+        Ok(())
+    }
+
     fn is_runtime_installed(&self) -> bool {
         if let Some(cached) = *self.runtime_installed.lock().unwrap() {
             return cached;
         }
 
-        let installed = self
-            .lit_binary_path()
-            .map(|path| path.exists())
-            .unwrap_or(false)
-            && self
-                .python_binary_path()
-                .map(|path| path.exists())
-                .unwrap_or(false)
-            && self
-                .python_worker_script_path()
-                .map(|path| path.exists())
-                .unwrap_or(false)
-            && self
-                .python_site_packages_path()
-                .map(|path| path.join("litert_lm").join("__init__.py").exists())
-                .unwrap_or(false);
+        let installed = match self.validate_runtime_installation() {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!("Friday runtime validation failed: {}", error);
+                false
+            }
+        };
         *self.runtime_installed.lock().unwrap() = Some(installed);
         installed
     }
 
     pub async fn ensure_runtime(&self, app: Option<&tauri::AppHandle>) -> Result<(), String> {
+        let _runtime_install_guard = self.runtime_install_lock.lock().await;
+
         Self::emit_progress(app, "verifying", "");
+        if let Ok(()) = self.validate_runtime_installation() {
+            *self.runtime_installed.lock().unwrap() = Some(true);
+            return Ok(());
+        }
+
+        *self.runtime_installed.lock().unwrap() = Some(false);
         let runtime_dir = self.runtime_dir_path()?;
         let platform = runtime_platform();
         std::fs::create_dir_all(&runtime_dir)
@@ -1093,6 +1231,9 @@ impl SidecarManager {
         let worker_target_path = self.python_worker_script_path()?;
         let _ = sync_file_if_changed(&python_worker_source_path, &worker_target_path, true)?;
 
+        self.validate_runtime_installation().map_err(|error| {
+            format!("Friday runtime validation failed after install: {}", error)
+        })?;
         *self.runtime_installed.lock().unwrap() = Some(true);
         self.invalidate_downloaded_model_ids_cache();
         tracing::info!("Friday LiteRT runtime installed successfully from bundle");
@@ -1689,7 +1830,7 @@ pub async fn select_model(
         persist_active_model_id(conn, &model_id)?;
     }
 
-    let _ = manager.cancel_inference().await;
+    manager.cancel_inference().await?;
     Ok(model_info(model))
 }
 

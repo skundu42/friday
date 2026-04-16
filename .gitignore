@@ -30,6 +30,11 @@ Thumbs.db
 *.log
 default.profraw
 
+### Python ###
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
 src-tauri/resources/litert-runtime/**
 !src-tauri/resources/litert-runtime/
 !src-tauri/resources/litert-runtime/README.md

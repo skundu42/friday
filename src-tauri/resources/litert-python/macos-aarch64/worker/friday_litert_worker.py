@@ -15,6 +15,7 @@ import re
 import socket
 import ssl
 import sys
+import threading
 import time
 import traceback
 import urllib.error
@@ -27,8 +28,14 @@ WEB_FETCH_TIMEOUT_SECONDS = 15
 WEB_FETCH_MAX_BYTES = 1_000_000
 WEB_FETCH_MAX_CHARS = 20_000
 WEB_FETCH_MAX_REDIRECTS = 3
+WEB_FETCH_REDIRECT_DRAIN_MAX_BYTES = 32_768
 WEB_SEARCH_INLINE_FETCH_MAX_URLS = 1
 WEB_SEARCH_INLINE_FETCH_MAX_CHARS = 3000
+SEARXNG_MAX_BYTES = 1_000_000
+LOCAL_FILE_MAX_CHARS = 50_000
+LOCAL_FILE_SANDBOX_ROOTS_ENV = "FRIDAY_LOCAL_FILE_TOOL_ROOTS"
+_STRICT_TRUE_STRINGS = {"1", "true"}
+_STRICT_FALSE_STRINGS = {"0", "false"}
 SEARXNG_BASE_URL = os.environ.get("FRIDAY_SEARXNG_BASE_URL", "http://127.0.0.1:8091").rstrip(
     "/"
 )
@@ -507,6 +514,49 @@ def chunk_to_events(
     return events
 
 
+COLLAPSED_TEXT_BOUNDARY_PATTERN = (
+    "A|An|The|This|That|These|Those|One|He|She|They|We|I|It|As|When|While|"
+    "After|Before|Then|Later|Meanwhile|Suddenly|Eventually|Soon|How|What|Why|"
+    "Where|Can|Could|Would|Should|Let me know if|If you'd like|Would you like"
+)
+COLLAPSED_TEXT_BOUNDARY_RE = re.compile(
+    rf"^(?:{COLLAPSED_TEXT_BOUNDARY_PATTERN})\b"
+)
+
+
+def should_insert_text_separator(previous_text: str, next_text: str) -> bool:
+    if not previous_text or not next_text:
+        return False
+
+    previous_last = previous_text[-1]
+    next_first = next_text[0]
+
+    if previous_last.isspace() or next_first.isspace():
+        return False
+    if next_first in ",.;:!?)]}>\"'`":
+        return False
+    if previous_last in "([{<\"'`":
+        return False
+    if next_first in "#-*`~>":
+        return False
+
+    if not COLLAPSED_TEXT_BOUNDARY_RE.match(next_text):
+        return False
+
+    return previous_last.isalnum() or previous_last in ",.;:!?)\"'’]"
+
+
+def join_text_fragments(fragments: list[str]) -> str:
+    merged: list[str] = []
+    for fragment in fragments:
+        if not fragment:
+            continue
+        if merged and should_insert_text_separator(merged[-1], fragment):
+            merged.append(" ")
+        merged.append(fragment)
+    return "".join(merged)
+
+
 def extract_chunk_channel_texts(chunk: dict[str, Any]) -> tuple[str, str]:
     answer_parts: list[str] = []
     for item in chunk.get("content", []):
@@ -523,7 +573,15 @@ def extract_chunk_channel_texts(chunk: dict[str, Any]) -> tuple[str, str]:
         if isinstance(raw_thought, str):
             thought_text = raw_thought
 
-    return "".join(answer_parts), thought_text
+    return join_text_fragments(answer_parts), thought_text
+
+
+def suffix_prefix_overlap(previous_text: str, current_text: str) -> int:
+    max_overlap = min(len(previous_text), len(current_text))
+    for overlap in range(max_overlap, 0, -1):
+        if previous_text.endswith(current_text[:overlap]):
+            return overlap
+    return 0
 
 
 def stream_text_delta(previous_text: str, current_text: str) -> tuple[str, str]:
@@ -531,7 +589,7 @@ def stream_text_delta(previous_text: str, current_text: str) -> tuple[str, str]:
         return "", previous_text
     if not previous_text:
         return current_text, current_text
-    if current_text == previous_text or current_text in previous_text:
+    if current_text == previous_text:
         return "", previous_text
     if current_text.startswith(previous_text):
         return current_text[len(previous_text) :], current_text
@@ -551,7 +609,13 @@ def stream_text_delta(previous_text: str, current_text: str) -> tuple[str, str]:
     ):
         return current_text[common_prefix_len:], current_text
 
-    return current_text, previous_text + current_text
+    overlap = suffix_prefix_overlap(previous_text, current_text)
+    if overlap > 0:
+        delta = current_text[overlap:]
+        return delta, previous_text + delta
+
+    separator = " " if should_insert_text_separator(previous_text, current_text) else ""
+    return f"{separator}{current_text}", f"{previous_text}{separator}{current_text}"
 
 
 def snapshot_shows_cumulative_growth(previous_snapshot: str, current_snapshot: str) -> bool:
@@ -608,6 +672,34 @@ class WebSearchIntent:
     requires_verification: bool
 
 
+def parse_bool_flag(
+    value: Any,
+    *,
+    field_name: str,
+    default: bool = False,
+) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        if value in (0, 1):
+            return bool(value)
+        raise ValueError(
+            f"{field_name} must be a boolean (true/false or 1/0)."
+        )
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in _STRICT_TRUE_STRINGS:
+            return True
+        if normalized in _STRICT_FALSE_STRINGS:
+            return False
+        raise ValueError(
+            f"{field_name} must be a boolean (true/false or 1/0)."
+        )
+    raise ValueError(f"{field_name} must be a boolean.")
+
+
 @dataclass(frozen=True)
 class ToolPermissions:
     web: bool = False
@@ -618,11 +710,22 @@ class ToolPermissions:
     @classmethod
     def from_command(cls, command: dict[str, Any]) -> ToolPermissions:
         raw = command.get("tool_permissions") or {}
+        if not isinstance(raw, dict):
+            raise ValueError("tool_permissions must be an object.")
         return cls(
-            web=bool(raw.get("web")),
-            local_files=bool(raw.get("local_files")),
-            calculate=bool(raw.get("calculate")),
-            current_datetime=bool(raw.get("current_datetime")),
+            web=parse_bool_flag(raw.get("web"), field_name="tool_permissions.web"),
+            local_files=parse_bool_flag(
+                raw.get("local_files"),
+                field_name="tool_permissions.local_files",
+            ),
+            calculate=parse_bool_flag(
+                raw.get("calculate"),
+                field_name="tool_permissions.calculate",
+            ),
+            current_datetime=parse_bool_flag(
+                raw.get("current_datetime"),
+                field_name="tool_permissions.current_datetime",
+            ),
         )
 
 
@@ -987,6 +1090,80 @@ def truncate_to_char_limit(value: str, max_chars: int) -> tuple[str, bool]:
     return value[:max_chars], True
 
 
+def wall_clock_deadline(seconds: float) -> float:
+    return time.monotonic() + max(0.1, float(seconds))
+
+
+def wall_clock_remaining(deadline: float, *, operation: str) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError(f"{operation} timed out.")
+    return max(0.1, remaining)
+
+
+def drain_response_body(
+    response: http.client.HTTPResponse,
+    max_bytes: int,
+    *,
+    deadline: float | None = None,
+    operation: str = "Web fetch",
+) -> None:
+    remaining = max(0, int(max_bytes))
+    while remaining > 0:
+        if deadline is not None:
+            wall_clock_remaining(deadline, operation=operation)
+        chunk = response.read(min(8192, remaining))
+        if not chunk:
+            break
+        remaining -= len(chunk)
+
+
+def read_response_limited(
+    response: http.client.HTTPResponse,
+    *,
+    max_bytes: int,
+    deadline: float,
+    operation: str,
+) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    while total < max_bytes:
+        wall_clock_remaining(deadline, operation=operation)
+        chunk = response.read(min(8192, max_bytes - total))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+    return b"".join(chunks)
+
+
+def resolve_host_with_timeout(
+    host: str,
+    port: int,
+    *,
+    timeout_seconds: float,
+) -> list[Any]:
+    payload: dict[str, Any] = {}
+
+    def _resolve() -> None:
+        try:
+            payload["result"] = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        except Exception as exc:  # pragma: no cover - exercised through integration
+            payload["error"] = exc
+
+    resolver = threading.Thread(target=_resolve, daemon=True)
+    resolver.start()
+    resolver.join(timeout_seconds)
+    if resolver.is_alive():
+        raise TimeoutError(f"DNS resolution timed out for host: {host}")
+    if "error" in payload:
+        raise payload["error"]
+    result = payload.get("result")
+    if isinstance(result, list):
+        return result
+    return []
+
+
 def is_disallowed_web_host(host: str) -> bool:
     lowered = host.strip().lower()
     return (
@@ -999,14 +1176,11 @@ def is_disallowed_web_host(host: str) -> bool:
 
 
 def is_disallowed_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-    if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_unspecified:
-        return True
-    if isinstance(ip, ipaddress.IPv4Address):
-        return ip.is_reserved
-    return ip in ipaddress.ip_network("2001:db8::/32")
+    return not ip.is_global
 
 
 def resolve_remote_web_target(url: str) -> tuple[urllib.parse.ParseResult, str, int]:
+    deadline = wall_clock_deadline(WEB_FETCH_TIMEOUT_SECONDS)
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme not in {"http", "https"}:
         raise ValueError("Only http and https URLs are allowed.")
@@ -1030,7 +1204,11 @@ def resolve_remote_web_target(url: str) -> tuple[urllib.parse.ParseResult, str, 
             raise ValueError("Local and private network hosts are blocked.")
         return parsed, host, port
 
-    resolved = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    resolved = resolve_host_with_timeout(
+        host,
+        port,
+        timeout_seconds=wall_clock_remaining(deadline, operation="DNS resolution"),
+    )
     if not resolved:
         raise ValueError(f"Host {host} did not resolve to a public address.")
     public_address: str | None = None
@@ -1084,17 +1262,24 @@ class VerifiedHTTPSConnection(http.client.HTTPSConnection):
 def open_remote_web_response(
     url: str,
     headers: dict[str, str],
+    *,
+    deadline: float | None = None,
 ) -> tuple[http.client.HTTPConnection, http.client.HTTPResponse, str]:
+    active_deadline = deadline or wall_clock_deadline(WEB_FETCH_TIMEOUT_SECONDS)
     current_url = url
     for _ in range(WEB_FETCH_MAX_REDIRECTS + 1):
         parsed, resolved_host, port = resolve_remote_web_target(current_url)
         request_headers = dict(headers)
+        per_request_timeout = min(
+            WEB_FETCH_TIMEOUT_SECONDS,
+            wall_clock_remaining(active_deadline, operation="Web fetch"),
+        )
         if parsed.scheme == "https":
             connection: http.client.HTTPConnection = VerifiedHTTPSConnection(
                 resolved_host,
                 parsed.hostname or "",
                 port=port,
-                timeout=WEB_FETCH_TIMEOUT_SECONDS,
+                timeout=per_request_timeout,
                 context=ssl.create_default_context(),
             )
         else:
@@ -1102,14 +1287,19 @@ def open_remote_web_response(
                 resolved_host,
                 parsed.hostname or "",
                 port=port,
-                timeout=WEB_FETCH_TIMEOUT_SECONDS,
+                timeout=per_request_timeout,
             )
 
         connection.request("GET", request_target_for_url(parsed), headers=request_headers)
         response = connection.getresponse()
         if response.status in {301, 302, 303, 307, 308}:
             location = response.getheader("Location")
-            response.read()
+            drain_response_body(
+                response,
+                WEB_FETCH_REDIRECT_DRAIN_MAX_BYTES,
+                deadline=active_deadline,
+                operation="Web fetch redirect",
+            )
             connection.close()
             if not location:
                 raise ValueError("Fetch failed with an invalid redirect response.")
@@ -1141,6 +1331,7 @@ def perform_searxng_search(
     time_range: str | None,
     categories: list[str] | None = None,
 ) -> dict[str, Any]:
+    deadline = wall_clock_deadline(WEB_FETCH_TIMEOUT_SECONDS)
     params = {"q": query, "format": "json"}
     if time_range:
         params["time_range"] = time_range
@@ -1159,14 +1350,31 @@ def perform_searxng_search(
     retry_delays = (0.25, 0.75)
     for attempt in range(len(retry_delays) + 1):
         try:
-            with urllib.request.urlopen(request, timeout=WEB_FETCH_TIMEOUT_SECONDS) as response:
-                payload = json.loads(response.read().decode("utf-8", errors="replace"))
+            per_request_timeout = min(
+                WEB_FETCH_TIMEOUT_SECONDS,
+                wall_clock_remaining(deadline, operation="SearXNG search"),
+            )
+            with urllib.request.urlopen(request, timeout=per_request_timeout) as response:
+                body = read_response_limited(
+                    response,
+                    max_bytes=SEARXNG_MAX_BYTES + 1,
+                    deadline=deadline,
+                    operation="SearXNG search",
+                )
+            if len(body) > SEARXNG_MAX_BYTES:
+                return {"error": f"SearXNG response exceeds {SEARXNG_MAX_BYTES} bytes."}
+            payload = json.loads(body.decode("utf-8", errors="replace"))
             break
+        except TimeoutError as exc:
+            return {"error": str(exc)}
         except urllib.error.HTTPError as exc:
             if exc.code == 403:
                 return {"error": "Local SearXNG config is invalid; JSON output is disabled."}
             if exc.code in TRANSIENT_SEARCH_HTTP_STATUS_CODES and attempt < len(retry_delays):
-                time.sleep(retry_delays[attempt])
+                remaining = max(0.0, deadline - time.monotonic())
+                if remaining <= 0:
+                    return {"error": "SearXNG search timed out."}
+                time.sleep(min(retry_delays[attempt], remaining))
                 continue
             return {"error": f"SearXNG search failed with HTTP {exc.code}"}
         except json.JSONDecodeError as exc:
@@ -1177,7 +1385,10 @@ def perform_searxng_search(
                 attempt < len(retry_delays)
                 and any(marker in error_text for marker in TRANSIENT_SEARCH_ERROR_MARKERS)
             ):
-                time.sleep(retry_delays[attempt])
+                remaining = max(0.0, deadline - time.monotonic())
+                if remaining <= 0:
+                    return {"error": "SearXNG search timed out."}
+                time.sleep(min(retry_delays[attempt], remaining))
                 continue
             return {"error": str(exc)}
 
@@ -1333,9 +1544,11 @@ def web_fetch_impl(url: str, max_chars: int = 5000) -> dict[str, Any]:
 
     connection: http.client.HTTPConnection | None = None
     try:
+        deadline = wall_clock_deadline(WEB_FETCH_TIMEOUT_SECONDS)
         connection, response, final_url = open_remote_web_response(
             cleaned_url,
             {"User-Agent": "Friday/0.1", "Accept-Encoding": "identity"},
+            deadline=deadline,
         )
         if response.status >= 400:
             return annotate_fetch_error(
@@ -1343,18 +1556,29 @@ def web_fetch_impl(url: str, max_chars: int = 5000) -> dict[str, Any]:
                 cleaned_url,
             )
         content_length = response.headers.get("Content-Length")
-        if content_length and int(content_length) > WEB_FETCH_MAX_BYTES:
-            return annotate_fetch_error(
-                f"Response exceeds {WEB_FETCH_MAX_BYTES} bytes.",
-                cleaned_url,
-            )
+        if content_length:
+            declared_size = int(content_length)
+            if declared_size > WEB_FETCH_MAX_BYTES:
+                return annotate_fetch_error(
+                    f"Response exceeds {WEB_FETCH_MAX_BYTES} bytes.",
+                    cleaned_url,
+                )
         content_type = response.headers.get_content_type().lower()
         if not is_supported_web_fetch_content_type(content_type):
             return annotate_fetch_error(
                 f"Unsupported content type: {content_type or 'unknown'}",
                 cleaned_url,
             )
-        body = response.read(WEB_FETCH_MAX_BYTES + 1)
+        body = read_response_limited(
+            response,
+            max_bytes=WEB_FETCH_MAX_BYTES + 1,
+            deadline=deadline,
+            operation="Web fetch",
+        )
+    except ValueError as exc:
+        return annotate_fetch_error(str(exc), cleaned_url)
+    except TimeoutError as exc:
+        return annotate_fetch_error(str(exc), cleaned_url)
     except Exception as exc:  # pragma: no cover - exercised through integration, not unit
         return annotate_fetch_error(str(exc), cleaned_url)
     finally:
@@ -1378,6 +1602,52 @@ def web_fetch_impl(url: str, max_chars: int = 5000) -> dict[str, Any]:
         "length": len(content),
         "contentType": content_type,
     }
+
+
+def local_file_sandbox_roots() -> list[pathlib.Path]:
+    raw = os.environ.get(LOCAL_FILE_SANDBOX_ROOTS_ENV, "")
+    candidates: list[pathlib.Path] = []
+
+    if raw.strip():
+        for root in raw.split(os.pathsep):
+            cleaned_root = root.strip()
+            if not cleaned_root:
+                continue
+            candidates.append(pathlib.Path(cleaned_root).expanduser())
+    else:
+        candidates.append(pathlib.Path.cwd())
+
+    resolved_roots: list[pathlib.Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        resolved = candidate.resolve(strict=False)
+        key = str(resolved)
+        if key in seen:
+            continue
+        seen.add(key)
+        resolved_roots.append(resolved)
+
+    return resolved_roots
+
+
+def ensure_within_local_file_sandbox(path: pathlib.Path) -> pathlib.Path:
+    resolved = path.resolve(strict=False)
+    allowed_roots = local_file_sandbox_roots()
+    for root in allowed_roots:
+        if resolved == root or root in resolved.parents:
+            return resolved
+    allowed = ", ".join(str(root) for root in allowed_roots)
+    raise ValueError(f"Path is outside the worker sandbox roots: {allowed}")
+
+
+def resolve_local_tool_path(raw_path: str) -> pathlib.Path:
+    cleaned = sanitize_tool_string(raw_path)
+    if not cleaned:
+        raise ValueError("Path is required.")
+    candidate = pathlib.Path(cleaned).expanduser()
+    if not candidate.is_absolute():
+        candidate = pathlib.Path.cwd() / candidate
+    return ensure_within_local_file_sandbox(candidate)
 
 
 _ALLOWED_BINOPS = {
@@ -1463,18 +1733,30 @@ def get_current_datetime_impl() -> dict[str, Any]:
 
 
 def file_read_impl(path: str) -> dict[str, Any]:
-    file_path = pathlib.Path(sanitize_tool_string(path))
+    try:
+        file_path = resolve_local_tool_path(path)
+    except ValueError as exc:
+        return {"error": str(exc)}
     if not file_path.exists():
         return {"error": f"File not found: {file_path}"}
+    if not file_path.is_file():
+        return {"error": f"Not a file: {file_path}"}
     try:
-        content = file_path.read_text()
+        content = file_path.read_text(encoding="utf-8", errors="replace")
     except Exception as exc:
         return {"error": str(exc)}
-    return {"content": content[:50000], "size": len(content)}
+    return {"content": content[:LOCAL_FILE_MAX_CHARS], "size": len(content)}
 
 
 def list_directory_impl(path: str) -> dict[str, Any]:
-    dir_path = pathlib.Path(sanitize_tool_string(path))
+    try:
+        dir_path = resolve_local_tool_path(path)
+    except ValueError as exc:
+        return {"error": str(exc)}
+    if not dir_path.exists():
+        return {"error": f"Directory not found: {dir_path}"}
+    if not dir_path.is_dir():
+        return {"error": f"Not a directory: {dir_path}"}
     try:
         entries = list(dir_path.iterdir())
     except Exception as exc:
@@ -1609,6 +1891,8 @@ class LiteRtWorker:
         self._active_conversation = None
         self._active_request_id: str | None = None
         self._cancelled_request_id: str | None = None
+        self._chat_thread: threading.Thread | None = None
+        self._state_lock = threading.RLock()
 
     def _load_litert_module(self):
         if self._litert_lm is None:
@@ -1619,26 +1903,71 @@ class LiteRtWorker:
         return self._litert_lm
 
     def close_engine(self) -> None:
-        if self._active_conversation is not None:
-            try:
-                self._active_conversation.cancel_process()
-            except Exception:
-                pass
-            try:
-                self._active_conversation.__exit__(None, None, None)
-            except Exception:
-                pass
+        with self._state_lock:
+            active_conversation = self._active_conversation
             self._active_conversation = None
+            self._active_request_id = None
+            self._cancelled_request_id = None
+            engine = self._engine
+            self._engine = None
+            self._engine_config = None
 
-        if self._engine is not None:
+        if active_conversation is not None:
             try:
-                self._engine.__exit__(None, None, None)
-            finally:
-                self._engine = None
+                active_conversation.cancel_process()
+            except Exception:
+                pass
+            try:
+                active_conversation.__exit__(None, None, None)
+            except Exception:
+                pass
 
-        self._engine_config = None
-        self._active_request_id = None
-        self._cancelled_request_id = None
+        if engine is not None:
+            try:
+                engine.__exit__(None, None, None)
+            except Exception:
+                pass
+
+    def _clear_chat_thread_if_current(self) -> None:
+        current = threading.current_thread()
+        with self._state_lock:
+            if self._chat_thread is current:
+                self._chat_thread = None
+
+    def _run_chat_command(self, command: dict[str, Any]) -> None:
+        request_id = str(command.get("request_id") or "")
+        try:
+            self.handle_chat(command)
+        except Exception as exc:
+            write_event("error", request_id=request_id or None, message=str(exc))
+            traceback.print_exc(file=sys.stderr)
+        finally:
+            self._clear_chat_thread_if_current()
+
+    def _start_chat_thread(self, command: dict[str, Any]) -> None:
+        request_id = str(command.get("request_id") or "")
+        with self._state_lock:
+            if self._chat_thread is not None and self._chat_thread.is_alive():
+                write_event(
+                    "error",
+                    request_id=request_id or None,
+                    message="Another chat request is already running.",
+                )
+                return
+            chat_thread = threading.Thread(
+                target=self._run_chat_command,
+                args=(command,),
+                name=f"friday-chat-{request_id or 'request'}",
+                daemon=True,
+            )
+            self._chat_thread = chat_thread
+            chat_thread.start()
+
+    def _join_chat_thread(self, timeout: float | None = None) -> None:
+        with self._state_lock:
+            chat_thread = self._chat_thread
+        if chat_thread is not None and chat_thread.is_alive():
+            chat_thread.join(timeout=timeout)
 
     def _resolve_backend(self, backend: str, litert_lm: Any) -> Any:
         normalized = backend.strip().lower()
@@ -1697,7 +2026,9 @@ class LiteRtWorker:
         )
 
     def handle_chat(self, command: dict[str, Any]) -> None:
-        if self._engine is None:
+        with self._state_lock:
+            engine = self._engine
+        if engine is None:
             raise RuntimeError("Worker received chat before warm.")
 
         request_id = str(command["request_id"])
@@ -1707,8 +2038,13 @@ class LiteRtWorker:
 
         preface, prompt = split_messages_for_conversation(messages)
         generation_config = command.get("generation_config") or {}
+        if not isinstance(generation_config, dict):
+            raise ValueError("generation_config must be an object.")
         tool_permissions = ToolPermissions.from_command(command)
-        thinking_enabled = bool(generation_config.get("thinking_enabled"))
+        thinking_enabled = parse_bool_flag(
+            generation_config.get("thinking_enabled"),
+            field_name="generation_config.thinking_enabled",
+        )
         user_text = extract_text_from_message(prompt)
         user_search_context = build_web_search_context(preface, prompt) if tool_permissions.web else ""
         if tool_permissions.web and user_text.strip():
@@ -1719,16 +2055,17 @@ class LiteRtWorker:
         tools = build_tools(tool_permissions, user_search_context=user_search_context)
         tool_handler = FridayToolEventHandler(request_id) if tools else None
 
-        conversation = self._engine.create_conversation(
+        conversation = engine.create_conversation(
             messages=preface or None,
             tools=tools or None,
             tool_event_handler=tool_handler,
             extra_context={"enable_thinking": thinking_enabled},
         )
         conversation.__enter__()
-        self._active_conversation = conversation
-        self._active_request_id = request_id
-        self._cancelled_request_id = None
+        with self._state_lock:
+            self._active_conversation = conversation
+            self._active_request_id = request_id
+            self._cancelled_request_id = None
         streamed_answer_text = ""
         streamed_thought_text = ""
         latest_answer_snapshot = ""
@@ -1789,7 +2126,9 @@ class LiteRtWorker:
                 for event in incremental_events:
                     write_event(event["type"], **{k: v for k, v in event.items() if k != "type"})
         except Exception as exc:
-            if self._cancelled_request_id == request_id:
+            with self._state_lock:
+                was_cancelled = self._cancelled_request_id == request_id
+            if was_cancelled:
                 emit_done()
             else:
                 write_event("error", request_id=request_id, message=str(exc))
@@ -1800,17 +2139,22 @@ class LiteRtWorker:
             try:
                 conversation.__exit__(None, None, None)
             finally:
-                self._active_conversation = None
-                self._active_request_id = None
-                self._cancelled_request_id = None
+                with self._state_lock:
+                    self._active_conversation = None
+                    self._active_request_id = None
+                    self._cancelled_request_id = None
 
     def handle_cancel(self, command: dict[str, Any]) -> None:
         request_id = str(command["request_id"])
-        if request_id != self._active_request_id or self._active_conversation is None:
+        with self._state_lock:
+            if request_id != self._active_request_id or self._active_conversation is None:
+                return
+            self._cancelled_request_id = request_id
+            active_conversation = self._active_conversation
+        try:
+            active_conversation.cancel_process()
+        except Exception:
             return
-
-        self._cancelled_request_id = request_id
-        self._active_conversation.cancel_process()
 
     def run(self) -> int:
         try:
@@ -1825,10 +2169,15 @@ class LiteRtWorker:
                 if command_type == "warm":
                     self.handle_warm(command)
                 elif command_type == "chat":
-                    self.handle_chat(command)
+                    self._start_chat_thread(command)
                 elif command_type == "cancel":
                     self.handle_cancel(command)
                 elif command_type == "shutdown":
+                    with self._state_lock:
+                        active_request_id = self._active_request_id
+                    if active_request_id:
+                        self.handle_cancel({"request_id": active_request_id})
+                    self._join_chat_thread(timeout=5.0)
                     self.close_engine()
                     return 0
                 else:
@@ -1838,6 +2187,7 @@ class LiteRtWorker:
             traceback.print_exc(file=sys.stderr)
             return 1
         finally:
+            self._join_chat_thread(timeout=5.0)
             self.close_engine()
 
         return 0

@@ -129,6 +129,11 @@ export default function Sidebar({
                       size="small"
                       icon={<EllipsisOutlined />}
                       onClick={(event) => event.stopPropagation()}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.stopPropagation();
+                        }
+                      }}
                       disabled={isBusy}
                       aria-label={`More actions for ${session.title}`}
                       className="session-item__menu"

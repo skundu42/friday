@@ -1,3 +1,5 @@
+import type { UIMessage } from "ai";
+
 export interface SetupStatus {
   modelId: string;
   modelDisplayName: string;
@@ -183,6 +185,14 @@ export interface ChatDonePayload {
   contentParts?: unknown | null;
 }
 
+export type CancelGenerationStatus = "canceled" | "not_running" | "failed";
+
+export interface CancelGenerationResponse {
+  status: CancelGenerationStatus;
+  error_code?: string;
+  message?: string;
+}
+
 // Tool calling types
 export interface ToolCallEvent {
   sessionId?: string | null;
@@ -225,6 +235,36 @@ export interface KnowledgeCitation {
   chunkIndex?: number | null;
   snippet?: string | null;
 }
+
+export interface FridayAssistantContentParts {
+  thinking?: string;
+  sources?: KnowledgeCitation[];
+}
+
+export interface FridayMessageMetadata {
+  sessionId: string;
+  createdAt: string;
+  modelUsed?: string | null;
+  sources?: KnowledgeCitation[];
+  attachmentsSummary?: string[];
+}
+
+export type FridayChatMessage = UIMessage<FridayMessageMetadata>;
+
+export interface FridayUIMessage extends FridayChatMessage {
+  session_id: string;
+  created_at: string;
+  model_used?: string | null;
+  content: string;
+  content_parts?: FridayAssistantContentParts | null;
+}
+
+export type FridayRenderableMessage = Pick<
+  Message,
+  "id" | "role" | "content" | "content_parts"
+> &
+  Partial<Pick<FridayChatMessage, "metadata" | "parts">> &
+  Partial<Pick<FridayUIMessage, "session_id" | "created_at" | "model_used">>;
 
 export interface KnowledgeIngestResult {
   sourceId?: string | null;

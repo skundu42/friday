@@ -56,15 +56,15 @@ pub fn bundled_resource_source_path(resource_dir: &Path, relative_path: &str) ->
 }
 
 pub fn install_python_runtime_archive(source_path: &Path, target_dir: &Path) -> Result<(), String> {
-    if target_dir.join("bin").join("python3").exists() {
+    if target_dir.join("bin").join("python3").exists() && target_dir.join("lib").exists() {
         return Ok(());
     }
 
-    let staging_dir = target_dir.with_extension("staging");
-    if staging_dir.exists() {
-        let _ = std::fs::remove_dir_all(&staging_dir);
+    let staging_root = target_dir.with_extension("staging");
+    if staging_root.exists() {
+        let _ = std::fs::remove_dir_all(&staging_root);
     }
-    std::fs::create_dir_all(&staging_dir)
+    std::fs::create_dir_all(&staging_root)
         .map_err(|e| format!("Failed to create Python staging directory: {}", e))?;
 
     let archive_file = std::fs::File::open(source_path).map_err(|e| {
@@ -77,10 +77,10 @@ pub fn install_python_runtime_archive(source_path: &Path, target_dir: &Path) -> 
     let decoder = flate2::read::GzDecoder::new(archive_file);
     let mut archive = tar::Archive::new(decoder);
     archive
-        .unpack(&staging_dir)
+        .unpack(&staging_root)
         .map_err(|e| format!("Failed to unpack bundled Python runtime: {}", e))?;
 
-    let extracted_dir = staging_dir.join("python");
+    let extracted_dir = staging_root.join("python");
     if !extracted_dir.exists() {
         return Err(format!(
             "Bundled Python runtime archive {} did not contain a top-level python directory.",
@@ -88,12 +88,8 @@ pub fn install_python_runtime_archive(source_path: &Path, target_dir: &Path) -> 
         ));
     }
 
-    if target_dir.exists() {
-        let _ = std::fs::remove_dir_all(target_dir);
-    }
-    std::fs::rename(&extracted_dir, target_dir)
-        .map_err(|e| format!("Failed to finalize bundled Python runtime install: {}", e))?;
-    let _ = std::fs::remove_dir_all(&staging_dir);
+    replace_directory_atomically(&extracted_dir, target_dir, "bundled Python runtime")?;
+    let _ = std::fs::remove_dir_all(&staging_root);
     Ok(())
 }
 
@@ -247,11 +243,52 @@ pub fn install_python_wheel(source_path: &Path, target_dir: &Path) -> Result<(),
             .map_err(|e| format!("Failed to extract Python wheel file: {}", e))?;
     }
 
-    if target_dir.exists() {
-        let _ = std::fs::remove_dir_all(target_dir);
+    replace_directory_atomically(&staging_dir, target_dir, "Python wheel install")?;
+    Ok(())
+}
+
+fn replace_directory_atomically(
+    staging_dir: &Path,
+    target_dir: &Path,
+    label: &str,
+) -> Result<(), String> {
+    let backup_dir = target_dir.with_extension("backup");
+    if backup_dir.exists() {
+        let _ = std::fs::remove_dir_all(&backup_dir);
     }
-    std::fs::rename(&staging_dir, target_dir)
-        .map_err(|e| format!("Failed to finalize Python wheel install: {}", e))?;
+
+    let replaced_existing = if target_dir.exists() {
+        std::fs::rename(target_dir, &backup_dir).map_err(|error| {
+            format!(
+                "Failed to stage existing {} {} for replacement: {}",
+                label,
+                target_dir.display(),
+                error
+            )
+        })?;
+        true
+    } else {
+        false
+    };
+
+    if let Err(error) = std::fs::rename(staging_dir, target_dir) {
+        if replaced_existing {
+            if target_dir.exists() {
+                let _ = std::fs::remove_dir_all(target_dir);
+            }
+            let _ = std::fs::rename(&backup_dir, target_dir);
+        }
+        return Err(format!(
+            "Failed to finalize {} {}: {}",
+            label,
+            target_dir.display(),
+            error
+        ));
+    }
+
+    if replaced_existing {
+        let _ = std::fs::remove_dir_all(&backup_dir);
+    }
     Ok(())
 }
 

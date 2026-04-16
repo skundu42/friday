@@ -84,6 +84,11 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -98,6 +103,9 @@ jobs:
 
       - name: Run frontend tests
         run: npm run test:run
+
+      - name: Run Python worker tests
+        run: npm run python:test
 
       - name: Run frontend build
         run: npm run build
@@ -137,6 +145,11 @@ jobs:
         with:
           node-version-file: .nvmrc
           cache: npm
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -247,6 +260,26 @@ jobs:
           fi
 
           codesign --verify --deep --strict "$APP_PATH"
+
+      - name: Run bundled Python worker runtime smoke
+        shell: bash
+        run: |
+          BUNDLE_DIR="src-tauri/target/${{ matrix.target }}/release/bundle"
+          APP_PATH="$(find "$BUNDLE_DIR" -name '*.app' | head -n 1)"
+          WORKER_PATH="$(find "$APP_PATH" -name 'friday_litert_worker.py' | head -n 1)"
+          PYTHON_ARCHIVE_PATH="$(find "$APP_PATH" -name 'cpython-*.tar.gz' | head -n 1)"
+          PYTHON_WHEEL_PATH="$(find "$APP_PATH" -name 'litert_lm_api-*.whl' | head -n 1)"
+
+          if [ -z "$WORKER_PATH" ] || [ -z "$PYTHON_ARCHIVE_PATH" ] || [ -z "$PYTHON_WHEEL_PATH" ]; then
+            echo "Missing bundled LiteRT Python worker assets in $APP_PATH." >&2
+            exit 1
+          fi
+
+          python3 scripts/smoke_litert_python_worker.py \
+            --ci \
+            --worker-script "$WORKER_PATH" \
+            --python-archive "$PYTHON_ARCHIVE_PATH" \
+            --python-wheel "$PYTHON_WHEEL_PATH"
 
       - name: Validate notarization staples
         if: needs.verify-tag.outputs.prerelease == 'false'

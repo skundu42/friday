@@ -1,142 +1,22 @@
-import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import MessageBubble, {
   areMessageBubblePropsEqual,
-  normalizeAssistantMarkdown,
+  normalizeAssistantMarkdownForDisplay,
   summarizeUserMessageForDisplay,
 } from "./MessageBubble";
 
-describe("normalizeAssistantMarkdown", () => {
-  it("moves misplaced bold markers to wrap the intended phrase", () => {
-    expect(
-      normalizeAssistantMarkdown(
-        "Circles is unaligned**—free from any single nation, corporation, geopolitical bloc influence**",
-      ),
-    ).toBe(
-      "Circles is **unaligned—free from any single nation, corporation, geopolitical bloc influence**",
-    );
-  });
+const invokeMock = vi.fn();
 
-  it("inserts a missing space after a closed bold span", () => {
-    expect(normalizeAssistantMarkdown("**Trust**Mechanism:**")).toBe(
-      "**Trust** Mechanism:",
-    );
-  });
-
-  it("inserts missing spaces around adjacent bold spans in prose", () => {
-    expect(
-      normalizeAssistantMarkdown(
-        "Royal Challengers Bengaluru and**Lucknow Super Giants**at**7:30 PM** in Bengaluru.",
-      ),
-    ).toBe(
-      "Royal Challengers Bengaluru and **Lucknow Super Giants** at **7:30 PM** in Bengaluru.",
-    );
-  });
-
-  it("does not corrupt later bold spans on the same line when fixing spacing", () => {
-    expect(
-      normalizeAssistantMarkdown(
-        "This document is a certificate for Sandipan Kundu, associated with the ID ** NISM20250000312171**, dated ** November 18, 2025**.",
-      ),
-    ).toBe(
-      "This document is a certificate for Sandipan Kundu, associated with the ID **NISM20250000312171**, dated **November 18, 2025**.",
-    );
-  });
-
-  it("trims stray whitespace inside bold markers", () => {
-    expect(
-      normalizeAssistantMarkdown(
-        "Current Conditions: The temperature is ** 22.1°C** with rain.",
-      ),
-    ).toBe("Current Conditions: The temperature is **22.1°C** with rain.");
-  });
-
-  it("removes a dangling unmatched bold marker on a line", () => {
-    expect(
-      normalizeAssistantMarkdown(
-        "**Problem with fiat money: issuance is centralized, leading to exploitation and control.",
-      ),
-    ).toBe(
-      "Problem with fiat money: issuance is centralized, leading to exploitation and control.",
-    );
-  });
-
-  it("leaves fenced code blocks unchanged while normalizing prose", () => {
-    expect(
-      normalizeAssistantMarkdown(
-        "Before and**after**.\n```ts\nconst value=foo**bar**;\n```\nThen **done**Now.",
-      ),
-    ).toBe(
-      "Before and **after**.\n```ts\nconst value=foo**bar**;\n```\nThen **done** Now.",
-    );
-  });
-
-  it("removes empty list items from malformed assistant markdown", () => {
-    expect(normalizeAssistantMarkdown("* item one\n*   \n* item two")).toBe(
-      "* item one\n\n* item two",
-    );
-  });
-
-  it("repairs broken bold labels inside list items", () => {
-    expect(
-      normalizeAssistantMarkdown(
-        "*   **Role: Developer Relations & Solutions Engineer.",
-      ),
-    ).toBe("*   **Role:** Developer Relations & Solutions Engineer.");
-  });
-
-  it("promotes plain section headings to consistent bold headings", () => {
-    expect(
-      normalizeAssistantMarkdown(
-        "About Sandipan Kundu:\n*   **Role: Developer Relations & Solutions Engineer.",
-      ),
-    ).toBe(
-      "**About Sandipan Kundu:**\n*   **Role:** Developer Relations & Solutions Engineer.",
-    );
-  });
-
-  it("normalizes malformed website summaries like the pasted-url response", () => {
-    expect(
-      normalizeAssistantMarkdown(
-        "About Sandipan Kundu:\n*   **Role: Developer Relations & Solutions Engineer.\n*   \n\nExperience:\n*   **Polygon (Jun 0210212 - Dec 2222): Developer Evangelist. Helped build DevRel team.",
-      ),
-    ).toBe(
-        "**About Sandipan Kundu:**\n*   **Role:** Developer Relations & Solutions Engineer.\n\n**Experience:**\n*   **Polygon (Jun 0210212 - Dec 2222):** Developer Evangelist. Helped build DevRel team.",
-    );
-  });
-
-  it("repairs missing spaces after markdown heading and ordered list markers", () => {
-    expect(
-      normalizeAssistantMarkdown(
-        "###2. Resource Estimates for Quantum Attacks\n1.First item\n2.Second item",
-      ),
-    ).toBe(
-      "### 2. Resource Estimates for Quantum Attacks\n1. First item\n2. Second item",
-    );
-  });
-
-  it("inserts a line break before inline bullet markers jammed into prose", () => {
-    expect(
-      normalizeAssistantMarkdown(
-        "Here are key things about LLMs:* Scale: They are trained on large text corpora.",
-      ),
-    ).toBe(
-      "Here are key things about LLMs:\n\n* Scale: They are trained on large text corpora.",
-    );
-  });
-
-  it("collapses fragmented OCR-style lines that duplicate the next line prefix", () => {
-    expect(
-      normalizeAssistantMarkdown(
-        "Physical Qubit:\n≤\n1450\n≤1450 logical qubits and $\\le70 million Toffoli gates.\n1\n0\n−\n3\n10−3 physical error rates.",
-      ),
-    ).toBe(
-      "**Physical Qubit:**\n≤1450 logical qubits and $\\le70 million Toffoli gates.\n10−3 physical error rates.",
-    );
-  });
-});
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: (...args: unknown[]) => invokeMock(...args),
+}));
 
 describe("MessageBubble", () => {
+  beforeEach(() => {
+    invokeMock.mockReset();
+  });
+
   it("collapses legacy attachment prompt text into a safe summary", () => {
     expect(
       summarizeUserMessageForDisplay(
@@ -169,8 +49,8 @@ describe("MessageBubble", () => {
     expect(screen.queryByText(/\$A = P\(1 \+ r\)\^n\$/)).toBeNull();
   });
 
-  it("opens assistant links out of band instead of navigating inline", () => {
-    const openSpy = vi.spyOn(window, "open").mockImplementation(() => null);
+  it("opens assistant links using the system browser command", () => {
+    invokeMock.mockResolvedValue(undefined);
 
     render(
       <MessageBubble
@@ -184,11 +64,37 @@ describe("MessageBubble", () => {
 
     fireEvent.click(screen.getByRole("link", { name: "OpenAI" }));
 
-    expect(openSpy).toHaveBeenCalledWith(
-      "https://openai.com/",
-      "_blank",
-      "noopener,noreferrer",
+    expect(invokeMock).toHaveBeenCalledWith(
+      "open_external_link",
+      { url: "https://openai.com/" },
     );
+  });
+
+  it("does not use window.open when system browser command fails", async () => {
+    const openSpy = vi.spyOn(window, "open").mockImplementation(() => null);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    invokeMock.mockRejectedValue(new Error("invoke failed"));
+
+    render(
+      <MessageBubble
+        message={{
+          id: "m-link-fallback",
+          role: "assistant",
+          content: "[Fallback](https://example.com)",
+        }}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("link", { name: "Fallback" }));
+
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith(
+        "open_external_link",
+        { url: "https://example.com/" },
+      ),
+    );
+    expect(openSpy).not.toHaveBeenCalled();
+    errorSpy.mockRestore();
     openSpy.mockRestore();
   });
 
@@ -205,6 +111,195 @@ describe("MessageBubble", () => {
 
     expect(screen.getByText("Blocked remote image: Remote chart")).not.toBeNull();
     expect(screen.queryByAltText("Remote chart")).toBeNull();
+  });
+
+  it("normalizes malformed markdown headings, tables, and lists for display", () => {
+    const content = `Python is a powerful, versatile and beginner-friendly programming language. I can teach you the fundamentals stepby
+Here practical starting guide###1 Setup (If haven' already)You need two things:* *
+Interpreter:*
+Download install latest version from pythonorg.Code Editor Use simple editor like VS Code PyCharm Community Edition or even just text for very basic tests2 Your First Program "Hello World" Python use print() function to display output
+
+\`\`\`python
+print("Hello, world!")
+\`\`\`
+3 Variables Data Types are labeled boxes that store information automatically figures type of data put| Type | Description | Example |
+| :--- | :--- | :--- |
+|String (str) | Text | "Friday" |
+|Integer (int)| Whole numbers | 0, -5 |
+|Float (float)| Decimal numbers | 4.9 |
+|Boolean (bool)| True or False | True |`;
+
+    const { container } = render(
+      <MessageBubble
+        message={{
+          id: "m-study-guide",
+          role: "assistant",
+          content,
+        }}
+      />,
+    );
+
+    expect(container.querySelector("h3")?.textContent).toContain(
+      "1 Setup (If haven' already)",
+    );
+    expect(screen.getByText(/print\("Hello, world!"\)/)).not.toBeNull();
+    expect(screen.getByRole("columnheader", { name: "Type" })).not.toBeNull();
+    expect(screen.getByRole("columnheader", { name: "Description" })).not.toBeNull();
+    expect(screen.getByRole("columnheader", { name: "Example" })).not.toBeNull();
+  });
+
+  it("repairs jammed multi-part assistant replies into readable markdown", () => {
+    const normalized = normalizeAssistantMarkdownForDisplay(
+      "I can help you with a variety of tasks including:Answering questions on a wide range of topicsProviding summaries and explanationsGenerating drafts and codeHelping plan and organize informationHow can I help right now?",
+    );
+
+    expect(normalized).toContain("including:\n\n- Answering");
+    expect(normalized).toContain("\n- Providing summaries and explanations");
+    expect(normalized).toContain("\n- Generating drafts and code");
+    expect(normalized).toContain("\n- Helping plan and organize information");
+    expect(normalized).toContain("\n\nHow can I help right now?");
+  });
+
+  it("repairs jammed technical step lists into separate bullets", () => {
+    const normalized = normalizeAssistantMarkdownForDisplay(
+      "The main steps are:Define the recurrence relationCompute the base casesDerive the closed formHow do we verify it?",
+    );
+
+    expect(normalized).toContain("The main steps are:\n\n- Define the recurrence relation");
+    expect(normalized).toContain("\n- Compute the base cases");
+    expect(normalized).toContain("\n- Derive the closed form");
+    expect(normalized).toContain("\n\nHow do we verify it?");
+  });
+
+  it("repairs malformed inline fenced code blocks before rendering", () => {
+    const content =
+      'Here are few Python code examples demonstrating different concepts:\n\n###1. Basic "Hello World and VariablesThis is the simplest program to get started```python A greetingprint(", world!") Defining printing variablesname =Fridayage30My name {} I am years old.")2 List Manipulation shows how create list add items loop through';
+
+    const normalized = normalizeAssistantMarkdownForDisplay(content);
+
+    expect(normalized).toContain("```python\nA greetingprint(");
+    expect(normalized).toContain('\n```\n\n2 List Manipulation shows how create list add items loop through');
+  });
+
+  it("does not split valid fenced code blocks that already use multiline markdown fences", () => {
+    const normalized = normalizeAssistantMarkdownForDisplay(
+      "Here is a Python implementation:\n```python\ndef fibonacci(n: int) -> list[int]:\n    seq = [0, 1]\n    while len(seq) < n:\n        seq.append(seq[-1] + seq[-2])\n    return seq[:n]\n\nprint(fibonacci(8))\n```\n\nExpected output:\n```text\n[0, 1, 1, 2, 3, 5, 8, 13]\n```",
+    );
+
+    expect(normalized).toContain("```python\ndef fibonacci(n: int) -> list[int]:");
+    expect(normalized).toContain("print(fibonacci(8))\n```");
+    expect(normalized).toContain("```text\n[0, 1, 1, 2, 3, 5, 8, 13]\n```");
+  });
+
+  it("renders recovered code text from malformed python examples", () => {
+    render(
+      <MessageBubble
+        message={{
+          id: "m-bad-python",
+          role: "assistant",
+          content:
+            'Here are few Python code examples demonstrating different concepts:\n\n###1. Basic "Hello World and VariablesThis is the simplest program to get started```python A greetingprint(", world!") Defining printing variablesname =Fridayage30My name {} I am years old.")2 List Manipulation shows how create list add items loop through',
+        }}
+      />,
+    );
+
+    expect(screen.getByText(/A greetingprint\(", world!"\)/)).not.toBeNull();
+    expect(screen.getByText(/2 List Manipulation shows how create list add items loop through/)).not.toBeNull();
+  });
+
+  it("renders valid multiline code fences as complete code blocks", () => {
+    render(
+      <MessageBubble
+        message={{
+          id: "m-valid-python",
+          role: "assistant",
+          content:
+            "Here is a Python implementation:\n```python\ndef fibonacci(n: int) -> list[int]:\n    seq = [0, 1]\n    while len(seq) < n:\n        seq.append(seq[-1] + seq[-2])\n    return seq[:n]\n\nprint(fibonacci(8))\n```\n\nExpected output:\n```text\n[0, 1, 1, 2, 3, 5, 8, 13]\n```",
+        }}
+      />,
+    );
+
+    expect(screen.getByText(/def fibonacci\(n: int\) -> list\[int\]:/)).not.toBeNull();
+    expect(screen.getByText(/seq = \[0, 1\]/)).not.toBeNull();
+    expect(screen.getByText(/print\(fibonacci\(8\)\)/)).not.toBeNull();
+    expect(screen.getByText(/\[0, 1, 1, 2, 3, 5, 8, 13\]/)).not.toBeNull();
+    expect(screen.getAllByLabelText("Copy code")).toHaveLength(2);
+  });
+
+  it("keeps code-only headings like #include inside fences instead of promoting them to markdown headings", () => {
+    const { container } = render(
+      <MessageBubble
+        message={{
+          id: "m-cpp",
+          role: "assistant",
+          content:
+            '```cpp\n#include <iostream>\n#include <vector>\n\nint main() {\n    std::vector<int> nums{1, 2, 3, 4};\n    int sum = 0;\n    for (int n : nums) sum += n;\n    std::cout << sum << "\\n";\n}\n```\nThe program prints $1+2+3+4 = 10$.',
+        }}
+      />,
+    );
+
+    expect(screen.getByText(/#include <vector>/)).not.toBeNull();
+    expect(screen.queryByRole("heading", { name: /include <vector>/i })).toBeNull();
+    expect(container.querySelector(".katex")).not.toBeNull();
+  });
+
+  it("renders display math that follows a repaired code block", () => {
+    const { container } = render(
+      <MessageBubble
+        message={{
+          id: "m-rust-math",
+          role: "assistant",
+          content:
+            "I can help with this in three parts:Explaining the formulaImplementing it in RustTesting it with sample values\n\n```rust\nfn area_of_circle(r: f64) -> f64 {\n    std::f64::consts::PI * r * r\n}\n```\n\nIf $r = 2.5$, then $$A = \\pi (2.5)^2 \\approx 19.63$$.",
+        }}
+      />,
+    );
+
+    expect(screen.getByText(/fn area_of_circle\(r: f64\) -> f64/)).not.toBeNull();
+    expect(screen.getByText(/std::f64::consts::PI \* r \* r/)).not.toBeNull();
+    expect(container.querySelector(".katex-display")).not.toBeNull();
+    expect(screen.queryByText(/\$\$A = \\pi \(2\.5\)\^2 \\approx 19\.63\$\$/)).toBeNull();
+  });
+
+  it("repairs malformed inline text fences without turning trailing prose into a fake code block", () => {
+    const { container } = render(
+      <MessageBubble
+        message={{
+          id: "m-text-math",
+          role: "assistant",
+          content:
+            "Result for the matrix multiplication:\n```text [ [19, 22], [43, 50] ]```Next, verify the determinant $$\\det\\begin{pmatrix}1 & 2\\\\3 & 4\\end{pmatrix} = -2$$.",
+        }}
+      />,
+    );
+
+    expect(screen.getByText(/\[\s*\[19,\s*22\],\s*\[43,\s*50\]\s*\]/)).not.toBeNull();
+    expect(screen.getByText(/Next, verify the determinant/)).not.toBeNull();
+    expect(container.querySelector(".katex-display")).not.toBeNull();
+    expect(screen.queryByText(/\$\$\\det\\begin\{pmatrix\}/)).toBeNull();
+  });
+
+  it("repairs collapsed text-part boundaries in persisted assistant prose", () => {
+    const normalized = normalizeAssistantMarkdownForDisplay(
+      "Here is a short story for you:\n\nThe old lighthouse keeper, Silas lived life measured by the rhythm of tides. His world was granite tower endless sea and steady sweepOne evening storm rolled in beast wind spray The flickered then sputtered threatening go dark worked tirelessly his hands rough from years rope iron coax lamp backAs raged outside small wooden boat drifted near base A single glowing lantern hung its mast peered through rain-streaked glass He saw not ship but solitary figure clinging waving bright cloth realized that wasn't just ships; beacon hope too polished lens one last time ensuring beam cut darkness promise against next morning calm gone smooth iridescent shell lay rocks below smiled rare quiet thing returned watch",
+    );
+
+    expect(normalized).toContain("steady sweep One evening");
+    expect(normalized).not.toContain("steady sweepOne evening");
+    expect(normalized).toContain("lamp back As raged outside");
+    expect(normalized).not.toContain("lamp backAs raged outside");
+  });
+
+  it("keeps compact nested lists from being normalized into loose lists", () => {
+    const content =
+      "### 1. The Basics: Variables and Data Types\n\n*   **Variables:** Think of these as labeled boxes where you store information.\n    *   Example: `age = 3 0`\n*   **Data Types:** Python needs to know what kind of data you are storing.\n    *   `int`: Whole numbers (e. g., `1 0`, `-5`)\n    *   `float`: Decimal numbers (e. g., `3. 1 4`, `0. 5`)";
+
+    const normalized = normalizeAssistantMarkdownForDisplay(content);
+
+    expect(normalized).toContain("store information.\n    *   Example:");
+    expect(normalized).not.toContain("store information.\n\n    *");
+    expect(normalized).toContain("are storing.\n    *   `int`:");
+    expect(normalized).not.toContain("are storing.\n\n    *");
   });
 
   it("shows copy actions without requiring hover when the reply is complete", () => {
