@@ -28,6 +28,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "resources": {
       "resources/litert-runtime/": "litert-runtime/",
       "resources/litert-python/": "litert-python/",
