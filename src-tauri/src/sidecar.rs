@@ -1048,6 +1048,7 @@ impl SidecarManager {
     fn validate_runtime_installation(&self) -> Result<(), String> {
         let lit_binary = self.lit_binary_path()?;
         let python_binary = self.python_binary_path()?;
+        let worker_launcher = self.python_worker_binary_path()?;
         let worker_script = self.python_worker_script_path()?;
         let python_site_packages = self.python_site_packages_path()?;
         let python_runtime_lib_dir = self.python_runtime_lib_dir_path()?;
@@ -1064,6 +1065,7 @@ impl SidecarManager {
                 python_binary.display()
             ));
         }
+        validate_python_worker_launcher(&python_binary, &worker_launcher)?;
         if !worker_script.exists() {
             return Err(format!(
                 "Friday Python worker script is missing at {}.",
@@ -1743,6 +1745,63 @@ fn install_python_worker_launcher(
     Ok(())
 }
 
+fn validate_python_worker_launcher(python_binary: &Path, launcher_path: &Path) -> Result<(), String> {
+    if !launcher_path.exists() {
+        return Err(format!(
+            "Friday Python worker launcher is missing at {}.",
+            launcher_path.display()
+        ));
+    }
+
+    let source_binary =
+        std::fs::canonicalize(python_binary).unwrap_or_else(|_| python_binary.to_path_buf());
+    let source_metadata = std::fs::metadata(&source_binary).map_err(|e| {
+        format!(
+            "Failed to read bundled Python interpreter metadata {}: {}",
+            source_binary.display(),
+            e
+        )
+    })?;
+    let launcher_metadata = std::fs::metadata(launcher_path).map_err(|e| {
+        format!(
+            "Failed to read Friday worker launcher metadata {}: {}",
+            launcher_path.display(),
+            e
+        )
+    })?;
+
+    if source_metadata.len() != launcher_metadata.len() {
+        return Err(format!(
+            "Friday Python worker launcher at {} does not match the bundled Python interpreter.",
+            launcher_path.display()
+        ));
+    }
+
+    let source_bytes = std::fs::read(&source_binary).map_err(|e| {
+        format!(
+            "Failed to read bundled Python interpreter {}: {}",
+            source_binary.display(),
+            e
+        )
+    })?;
+    let launcher_bytes = std::fs::read(launcher_path).map_err(|e| {
+        format!(
+            "Failed to read Friday worker launcher {}: {}",
+            launcher_path.display(),
+            e
+        )
+    })?;
+
+    if source_bytes != launcher_bytes {
+        return Err(format!(
+            "Friday Python worker launcher at {} does not match the bundled Python interpreter.",
+            launcher_path.display()
+        ));
+    }
+
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn detect_backend(manager: State<'_, SidecarManager>) -> Result<BackendStatus, String> {
     Ok(manager.auto_detect().await)
@@ -2067,6 +2126,59 @@ mod tests {
             std::fs::read(&launcher_path).expect("read launcher"),
             std::fs::read(&python_binary_real).expect("read python binary"),
         );
+
+        let _ = std::fs::remove_dir_all(temp_root);
+    }
+
+    #[test]
+    fn validate_python_worker_launcher_rejects_missing_launcher() {
+        let temp_root =
+            std::env::temp_dir().join(format!("friday-sidecar-test-{}", uuid::Uuid::new_v4()));
+        let python_dir = temp_root.join("python").join("bin");
+        std::fs::create_dir_all(&python_dir).expect("create python runtime dir");
+
+        let python_binary_real = python_dir.join("python3.12");
+        std::fs::write(&python_binary_real, b"#!/bin/sh\n").expect("write python binary stub");
+        let python_binary = python_dir.join("python3");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("python3.12", &python_binary).expect("create python symlink");
+        #[cfg(not(unix))]
+        std::fs::copy(&python_binary_real, &python_binary).expect("copy python binary");
+
+        let launcher_path = python_dir.join(python_worker_binary_name());
+        let error = validate_python_worker_launcher(&python_binary, &launcher_path)
+            .expect_err("missing launcher should fail validation");
+        assert!(error.contains("worker launcher is missing"));
+
+        let _ = std::fs::remove_dir_all(temp_root);
+    }
+
+    #[test]
+    fn validate_python_worker_launcher_accepts_installed_launcher() {
+        let temp_root =
+            std::env::temp_dir().join(format!("friday-sidecar-test-{}", uuid::Uuid::new_v4()));
+        let python_dir = temp_root.join("python").join("bin");
+        std::fs::create_dir_all(&python_dir).expect("create python runtime dir");
+
+        let python_binary_real = python_dir.join("python3.12");
+        std::fs::write(&python_binary_real, b"#!/bin/sh\n").expect("write python binary stub");
+        let python_binary = python_dir.join("python3");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("python3.12", &python_binary).expect("create python symlink");
+        #[cfg(not(unix))]
+        std::fs::copy(&python_binary_real, &python_binary).expect("copy python binary");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&python_binary_real, std::fs::Permissions::from_mode(0o755))
+                .expect("set python binary permissions");
+        }
+
+        let launcher_path = python_dir.join(python_worker_binary_name());
+        install_python_worker_launcher(&python_binary, &launcher_path).expect("install launcher");
+        validate_python_worker_launcher(&python_binary, &launcher_path)
+            .expect("installed launcher should validate");
 
         let _ = std::fs::remove_dir_all(temp_root);
     }
