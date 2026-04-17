@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import SetupWizard from "./SetupWizard";
+import { APP_VERSION_LABEL } from "../lib/app-version";
 import type { AppSettings, SetupStatus } from "../types";
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -92,6 +93,7 @@ describe("SetupWizard", () => {
       />,
     );
 
+    expect(screen.getByText(APP_VERSION_LABEL)).not.toBeNull();
     fireEvent.click(screen.getByRole("button", { name: /let.?s get started/i }));
     expect(screen.getByText("System Check")).not.toBeNull();
 

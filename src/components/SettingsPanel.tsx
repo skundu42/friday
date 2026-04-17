@@ -15,6 +15,7 @@ import {
 } from "@ant-design/icons";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { APP_VERSION_LABEL } from "../lib/app-version";
 import type {
   AppSettings,
   AppSettingsInput,
@@ -567,7 +568,7 @@ export default function SettingsPanel({
                 {[
                   {
                     label: "App",
-                    value: "Friday v0.1.0",
+                    value: APP_VERSION_LABEL,
                   },
                   {
                     label: "System RAM",
