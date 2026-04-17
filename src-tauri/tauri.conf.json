@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicholasgasior/tauri/dev/crates/tauri-config-schema/schema.json",
   "productName": "Friday",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "identifier": "com.friday.app",
   "build": {
     "frontendDist": "../dist",
