@@ -381,28 +381,26 @@ impl SidecarManager {
         *self.downloaded_model_ids_cache.lock().unwrap() = None;
     }
 
-    fn query_downloaded_model_ids(&self) -> Vec<String> {
-        let Ok(binary) = self.lit_binary_path() else {
-            return Vec::new();
-        };
+    fn query_downloaded_model_ids(&self) -> Result<Vec<String>, String> {
+        let binary = self.lit_binary_path()?;
         if !binary.exists() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
 
         let output = std::process::Command::new(binary)
             .arg("list")
             .env("LIT_DIR", self.lit_home_dir_path().unwrap_or_default())
-            .output();
-
-        let Ok(output) = output else {
-            return Vec::new();
-        };
+            .output()
+            .map_err(|error| format!("Failed to probe downloaded models: {}", error))?;
         if !output.status.success() {
-            return Vec::new();
+            return Err(format!(
+                "Model probe failed with status {}",
+                output.status
+            ));
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        stdout
+        Ok(stdout
             .lines()
             .skip_while(|line| !line.starts_with("ID"))
             .skip(1)
@@ -413,7 +411,7 @@ impl SidecarManager {
                 }
                 trimmed.split_whitespace().next().map(|s| s.to_string())
             })
-            .collect()
+            .collect())
     }
 
     pub fn downloaded_model_ids(&self) -> Vec<String> {
@@ -421,9 +419,16 @@ impl SidecarManager {
             return cached;
         }
 
-        let downloaded = self.query_downloaded_model_ids();
-        *self.downloaded_model_ids_cache.lock().unwrap() = Some(downloaded.clone());
-        downloaded
+        match self.query_downloaded_model_ids() {
+            Ok(downloaded) => {
+                *self.downloaded_model_ids_cache.lock().unwrap() = Some(downloaded.clone());
+                downloaded
+            }
+            Err(error) => {
+                tracing::warn!("Failed to refresh downloaded model ids: {}", error);
+                Vec::new()
+            }
+        }
     }
 
     pub fn get_setup_status(&self) -> SetupStatus {
@@ -1814,6 +1819,7 @@ pub async fn select_model(
 ) -> Result<ModelInfo, String> {
     let model = find_model(&model_id).ok_or_else(|| format!("Unknown model: {}", model_id))?;
     manager.ensure_model_ram_supported(model)?;
+    manager.invalidate_downloaded_model_ids_cache();
 
     if !manager.has_model_for(model) {
         return Err(format!(
@@ -1822,15 +1828,16 @@ pub async fn select_model(
         ));
     }
 
-    manager.set_active_model_id(&model_id);
-    manager.invalidate_downloaded_model_ids_cache();
+    manager.cancel_inference().await?;
+
     {
         let guard = state.db.lock().unwrap();
         let conn = guard.as_ref().ok_or("Database not initialized")?;
         persist_active_model_id(conn, &model_id)?;
     }
 
-    manager.cancel_inference().await?;
+    manager.set_active_model_id(&model_id);
+    manager.invalidate_downloaded_model_ids_cache();
     Ok(model_info(model))
 }
 

@@ -1,6 +1,8 @@
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
+const PYTHON_RUNTIME_ARCHIVE_HASH_FILE: &str = ".runtime-archive.sha256";
+
 #[derive(Debug, Clone)]
 pub struct EmbeddedPythonPaths {
     pub python_binary: PathBuf,
@@ -56,7 +58,8 @@ pub fn bundled_resource_source_path(resource_dir: &Path, relative_path: &str) ->
 }
 
 pub fn install_python_runtime_archive(source_path: &Path, target_dir: &Path) -> Result<(), String> {
-    if target_dir.join("bin").join("python3").exists() && target_dir.join("lib").exists() {
+    let expected_archive_hash = sha256_file_hex(source_path)?;
+    if runtime_install_matches_archive(target_dir, &expected_archive_hash) {
         return Ok(());
     }
 
@@ -89,8 +92,33 @@ pub fn install_python_runtime_archive(source_path: &Path, target_dir: &Path) -> 
     }
 
     replace_directory_atomically(&extracted_dir, target_dir, "bundled Python runtime")?;
+    if let Err(error) = std::fs::write(
+        target_dir.join(PYTHON_RUNTIME_ARCHIVE_HASH_FILE),
+        format!("{}\n", expected_archive_hash),
+    ) {
+        tracing::warn!(
+            "Failed to write Python runtime install marker {}: {}",
+            target_dir.display(),
+            error
+        );
+    }
     let _ = std::fs::remove_dir_all(&staging_root);
     Ok(())
+}
+
+fn runtime_install_matches_archive(target_dir: &Path, expected_archive_hash: &str) -> bool {
+    let has_runtime_dirs = target_dir.join("bin").join("python3").exists() && target_dir.join("lib").exists();
+    if !has_runtime_dirs {
+        return false;
+    }
+
+    let marker_path = target_dir.join(PYTHON_RUNTIME_ARCHIVE_HASH_FILE);
+    let installed_hash = match std::fs::read_to_string(&marker_path) {
+        Ok(value) => value,
+        Err(_) => return false,
+    };
+
+    installed_hash.trim() == expected_archive_hash
 }
 
 pub fn sync_file_if_changed(

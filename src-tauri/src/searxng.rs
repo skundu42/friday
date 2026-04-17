@@ -306,6 +306,7 @@ impl SearXNGManager {
     pub async fn ensure_ready(&self) -> Result<WebSearchStatus, String> {
         let _guard = self.startup_lock.lock().await;
         self.startup_in_progress.store(true, Ordering::SeqCst);
+        let status_before = self.status.lock().unwrap().clone();
 
         let result = self.ensure_ready_inner().await;
         self.startup_in_progress.store(false, Ordering::SeqCst);
@@ -316,8 +317,11 @@ impl SearXNGManager {
                 Ok(status)
             }
             Err(error) => {
-                let status = self.status_inner().await;
-                self.set_status(status);
+                let status_after = self.status.lock().unwrap().clone();
+                if status_after == status_before {
+                    let status = self.status_inner().await;
+                    self.set_status(status);
+                }
                 Err(error)
             }
         }

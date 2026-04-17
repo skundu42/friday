@@ -207,4 +207,63 @@ describe("TauriChatTransport", () => {
       { type: "finish" },
     ]);
   });
+
+  it("appends missing final text from the authoritative chat-done payload", async () => {
+    const bus = createEventBus();
+    const transport = new TauriChatTransport({
+      invokeFn: vi.fn(() => Promise.resolve(undefined)) as never,
+      listenFn: bus.listen as never,
+      generateId: () => "assistant-3",
+    });
+
+    const stream = await transport.sendMessages({
+      trigger: "submit-message",
+      chatId: "session-a",
+      messageId: undefined,
+      messages: [makeUserMessage()],
+      abortSignal: undefined,
+      body: {},
+    });
+
+    const chunksPromise = readAllChunks(stream);
+
+    bus.emit("chat-token", {
+      sessionId: "session-a",
+      token: "Hello",
+      kind: "answer",
+    });
+    bus.emit("chat-done", {
+      sessionId: "session-a",
+      model: "gemma-4-e2b-it",
+      hasContent: true,
+      content: "Hello world",
+      contentParts: null,
+    });
+
+    const chunks = await chunksPromise;
+
+    expect(chunks).toEqual([
+      {
+        type: "start",
+        messageId: "assistant-3",
+        messageMetadata: {
+          sessionId: "session-a",
+          createdAt: expect.any(String),
+        },
+      },
+      { type: "text-start", id: "assistant-3:text" },
+      { type: "text-delta", id: "assistant-3:text", delta: "Hello" },
+      { type: "text-delta", id: "assistant-3:text", delta: " world" },
+      { type: "text-end", id: "assistant-3:text" },
+      {
+        type: "message-metadata",
+        messageMetadata: {
+          sessionId: "session-a",
+          createdAt: expect.any(String),
+          modelUsed: "gemma-4-e2b-it",
+        },
+      },
+      { type: "finish" },
+    ]);
+  });
 });

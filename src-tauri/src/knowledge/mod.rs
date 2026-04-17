@@ -249,6 +249,7 @@ impl Drop for KnowledgeUseGuard {
 pub struct KnowledgeManager {
     root_dir: Mutex<Option<PathBuf>>,
     runtime: Arc<AsyncMutex<KnowledgeRuntime>>,
+    runtime_init_lock: AsyncMutex<()>,
     status: Mutex<KnowledgeStatus>,
     activity: Arc<KnowledgeActivity>,
 }
@@ -264,6 +265,7 @@ impl KnowledgeManager {
         Self {
             root_dir: Mutex::new(None),
             runtime: Arc::new(AsyncMutex::new(KnowledgeRuntime::default())),
+            runtime_init_lock: AsyncMutex::new(()),
             status: Mutex::new(KnowledgeStatus::unavailable()),
             activity: Arc::new(KnowledgeActivity::new()),
         }
@@ -326,6 +328,19 @@ impl KnowledgeManager {
         let root_dir = self.storage_dir()?;
         Self::configure_environment(&root_dir);
 
+        let (initial_load_db, initial_load_text, initial_load_image) = {
+            let runtime = self.runtime.lock().await;
+            (
+                runtime.db.is_none(),
+                need_text && runtime.text_embedder.is_none(),
+                need_image && runtime.image_embedder.is_none(),
+            )
+        };
+        if !(initial_load_db || initial_load_text || initial_load_image) {
+            return Ok(());
+        }
+
+        let _runtime_init_guard = self.runtime_init_lock.lock().await;
         let (load_db, load_text, load_image) = {
             let runtime = self.runtime.lock().await;
             (
@@ -674,10 +689,10 @@ pub async fn ingest_file(
     }
 
     let result = ingest_file_inner(manager, db_path, &path).await;
-    manager.set_status(app, KnowledgeStatus::ready());
 
     match result {
         Ok(result) => {
+            manager.set_status(app, KnowledgeStatus::ready());
             if let Some(app) = app {
                 let _ = app.emit(
                     "knowledge-ingest-progress",
@@ -691,6 +706,13 @@ pub async fn ingest_file(
             Ok(result)
         }
         Err(error) => {
+            manager.set_status(
+                app,
+                KnowledgeStatus {
+                    state: KnowledgeStatusState::Error,
+                    message: error.clone(),
+                },
+            );
             if let Some(app) = app {
                 let _ = app.emit(
                     "knowledge-ingest-progress",
@@ -722,73 +744,90 @@ pub async fn ingest_url(
         },
     );
 
-    let source = {
-        let runtime_guard = manager.runtime.lock().await;
-        let runtime = &*runtime_guard;
-        let text_embedder = runtime
-            .text_embedder
-            .as_ref()
-            .ok_or_else(|| "Knowledge text runtime is unavailable.".to_string())?;
+    let result: Result<KnowledgeIngestResult, String> = async {
+        let source = {
+            let runtime_guard = manager.runtime.lock().await;
+            let runtime = &*runtime_guard;
+            let text_embedder = runtime
+                .text_embedder
+                .as_ref()
+                .ok_or_else(|| "Knowledge text runtime is unavailable.".to_string())?;
 
-        let embeddings = embed_webpage(
-            url.to_string(),
-            text_embedder,
-            Some(&runtime.text_config),
-            None,
-        )
-        .await
-        .map_err(|error| format!("Failed to ingest URL {}: {}", url, error))?
-        .ok_or_else(|| format!("No Knowledge content was extracted from {}", url))?;
-        let hash = hash_embed_texts(embeddings.iter())
-            .ok_or_else(|| format!("No text content was extracted from {}", url))?;
+            let embeddings = embed_webpage(
+                url.to_string(),
+                text_embedder,
+                Some(&runtime.text_config),
+                None,
+            )
+            .await
+            .map_err(|error| format!("Failed to ingest URL {}: {}", url, error))?
+            .ok_or_else(|| format!("No Knowledge content was extracted from {}", url))?;
+            let hash = hash_embed_texts(embeddings.iter())
+                .ok_or_else(|| format!("No text content was extracted from {}", url))?;
 
-        let display_name = url.to_string();
-        let source = SourceRecord {
-            id: uuid::Uuid::new_v4().to_string(),
-            source_kind: KnowledgeSourceKind::Url,
-            modality: KnowledgeModality::Webpage,
-            locator: url.to_string(),
-            display_name,
-            mime_type: Some("text/html".to_string()),
-            file_size_bytes: None,
-            asset_path: None,
-            content_hash: hash,
-            chunk_count: embeddings.len(),
+            let display_name = url.to_string();
+            let source = SourceRecord {
+                id: uuid::Uuid::new_v4().to_string(),
+                source_kind: KnowledgeSourceKind::Url,
+                modality: KnowledgeModality::Webpage,
+                locator: url.to_string(),
+                display_name,
+                mime_type: Some("text/html".to_string()),
+                file_size_bytes: None,
+                asset_path: None,
+                content_hash: hash,
+                chunk_count: embeddings.len(),
+            };
+
+            let url_source_unchanged = {
+                let conn = open_db(db_path)?;
+                source_unchanged(&conn, &source)?
+            };
+            if let Some(existing_source) = url_source_unchanged {
+                return Ok(KnowledgeIngestResult {
+                    source_id: Some(existing_source.id),
+                    display_name: source.display_name,
+                    modality: source.modality,
+                    status: "skipped".to_string(),
+                    chunk_count: existing_source.chunk_count,
+                    error: None,
+                });
+            }
+
+            let chunk_count = write_text_embeddings(manager, &source, embeddings).await?;
+            let mut finalized_source = source;
+            finalized_source.chunk_count = chunk_count;
+            finalized_source
         };
 
-        let url_source_unchanged = {
-            let conn = open_db(db_path)?;
-            source_unchanged(&conn, &source)?
-        };
-        if let Some(existing_source) = url_source_unchanged {
+        persist_replacement_source_with_cleanup(manager, db_path, &source).await?;
+        Ok(KnowledgeIngestResult {
+            source_id: Some(source.id),
+            display_name: source.display_name,
+            modality: source.modality,
+            status: "indexed".to_string(),
+            chunk_count: source.chunk_count,
+            error: None,
+        })
+    }
+    .await;
+
+    match result {
+        Ok(result) => {
             manager.set_status(app, KnowledgeStatus::ready());
-            return Ok(KnowledgeIngestResult {
-                source_id: Some(existing_source.id),
-                display_name: source.display_name,
-                modality: source.modality,
-                status: "skipped".to_string(),
-                chunk_count: existing_source.chunk_count,
-                error: None,
-            });
+            Ok(result)
         }
-
-        let chunk_count = write_text_embeddings(manager, &source, embeddings).await?;
-        let mut finalized_source = source;
-        finalized_source.chunk_count = chunk_count;
-        finalized_source
-    };
-
-    persist_replacement_source_with_cleanup(manager, db_path, &source).await?;
-    manager.set_status(app, KnowledgeStatus::ready());
-
-    Ok(KnowledgeIngestResult {
-        source_id: Some(source.id),
-        display_name: source.display_name,
-        modality: source.modality,
-        status: "indexed".to_string(),
-        chunk_count: source.chunk_count,
-        error: None,
-    })
+        Err(error) => {
+            manager.set_status(
+                app,
+                KnowledgeStatus {
+                    state: KnowledgeStatusState::Error,
+                    message: error.clone(),
+                },
+            );
+            Err(error)
+        }
+    }
 }
 
 pub fn list_sources(conn: &rusqlite::Connection) -> Result<Vec<KnowledgeSource>, String> {

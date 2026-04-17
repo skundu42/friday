@@ -11,10 +11,6 @@ const INLINE_ATTACHMENT_SUMMARY_RE = /^📎\s+(.+?)(?:\n|$)/;
 
 type MessageWithParts = Partial<Pick<FridayChatMessage, "metadata" | "parts">> &
   Partial<Pick<Message, "content" | "content_parts">>;
-const MESSAGE_CONTENT_PARTS_CACHE = new WeakMap<
-  object,
-  FridayAssistantContentParts | null
->();
 
 function isKnowledgeCitationArray(value: unknown): value is KnowledgeCitation[] {
   return Array.isArray(value);
@@ -101,33 +97,17 @@ export function getMessageAttachmentsSummary(message: MessageWithParts): string[
 export function getMessageContentParts(
   message: MessageWithParts,
 ): FridayAssistantContentParts | null {
-  const cacheKey =
-    typeof message === "object" && message !== null
-      ? (message as object)
-      : null;
-  if (cacheKey) {
-    const cached = MESSAGE_CONTENT_PARTS_CACHE.get(cacheKey);
-    if (cached !== undefined) {
-      return cached;
-    }
-  }
-
   const thinking = getMessageReasoning(message);
   const sources = getMessageSources(message);
 
-  const resolved =
+  return (
     !thinking && sources.length === 0
       ? null
       : {
           ...(thinking ? { thinking } : {}),
           ...(sources.length > 0 ? { sources } : {}),
-        };
-
-  if (cacheKey) {
-    MESSAGE_CONTENT_PARTS_CACHE.set(cacheKey, resolved);
-  }
-
-  return resolved;
+        }
+  );
 }
 
 export function normalizeFridayMessage(message: FridayChatMessage): FridayUIMessage {

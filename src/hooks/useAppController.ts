@@ -421,7 +421,7 @@ export function useAppController() {
     }
 
     const sessionId =
-      activeSessionRef.current?.id ?? activeRequestSessionIdRef.current;
+      activeRequestSessionIdRef.current ?? activeSessionRef.current?.id;
     const errorMessage = lastChatErrorRef.current ?? toErrorMessage(chatError);
 
     if (sessionId) {
@@ -814,7 +814,7 @@ export function useAppController() {
   }, []);
 
   const createSession = async () => {
-    if (isGenerating) return;
+    if (isGenerating || activeRequestSessionIdRef.current) return;
 
     const session = await invoke<Session>("create_session", {
       title: "New chat",
@@ -830,7 +830,7 @@ export function useAppController() {
   };
 
   const selectSession = async (sessionId: string) => {
-    if (isGenerating) return;
+    if (isGenerating || activeRequestSessionIdRef.current) return;
 
     const result = await invoke<SessionSelectionResult>("select_session", {
       sessionId,
@@ -841,7 +841,7 @@ export function useAppController() {
   };
 
   const deleteSession = async (sessionId: string) => {
-    if (isGenerating) return;
+    if (isGenerating || activeRequestSessionIdRef.current) return;
 
     await invoke("delete_session", { sessionId });
     const deletedActiveSession = activeSessionRef.current?.id === sessionId;

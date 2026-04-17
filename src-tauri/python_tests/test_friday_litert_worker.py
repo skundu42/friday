@@ -448,6 +448,13 @@ class WorkerProtocolTests(unittest.TestCase):
         self.assertTrue(conversation.cancelled)
         self.assertEqual(worker._cancelled_request_id, "req-2")
 
+    def test_cancel_is_queued_when_request_is_not_active_yet(self) -> None:
+        worker = _MODULE.LiteRtWorker()
+
+        worker.handle_cancel({"request_id": "req-queued"})
+
+        self.assertIn("req-queued", worker._pending_cancel_request_ids)
+
     def test_parse_bool_flag_rejects_ambiguous_truthy_strings(self) -> None:
         with self.assertRaisesRegex(ValueError, "must be a boolean"):
             _MODULE.parse_bool_flag("yes", field_name="tool_permissions.web")

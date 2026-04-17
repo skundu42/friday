@@ -91,7 +91,7 @@ describe("friday-chat adapters", () => {
     expect(normalized.model_used).toBe("gemma-4-e4b-it");
   });
 
-  it("reuses computed content parts for the same message object", () => {
+  it("recomputes content parts when a streamed message object is mutated", () => {
     const sourceMessage = {
       id: "assistant-cache",
       role: "assistant" as const,
@@ -115,10 +115,30 @@ describe("friday-chat adapters", () => {
     };
 
     const first = normalizeFridayMessage(sourceMessage);
+    sourceMessage.parts = [
+      { type: "text" as const, text: "Answer", state: "done" as const },
+      {
+        type: "reasoning" as const,
+        text: "Updated thought",
+        state: "done" as const,
+      },
+    ];
     const second = normalizeFridayMessage(sourceMessage);
 
     expect(first.content_parts).not.toBeNull();
-    expect(first.content_parts).toBe(second.content_parts);
+    expect(first.content_parts).not.toEqual(second.content_parts);
+    expect(second.content_parts).toEqual({
+      thinking: "Updated thought",
+      sources: [
+        {
+          sourceId: "src-cache",
+          modality: "text",
+          displayName: "cache.md",
+          locator: "/cache.md",
+          score: 0.91,
+        },
+      ],
+    });
   });
 
   it("derives attachment summaries from persisted user display text", () => {
