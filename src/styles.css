@@ -827,6 +827,18 @@ body[data-theme="dark"] .primary-action.ant-btn:disabled {
   text-wrap: pretty;
 }
 
+.message-card__loading {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 28px;
+  color: var(--friday-text-secondary);
+}
+
+.message-card__loading-dot {
+  flex-shrink: 0;
+}
+
 .message-card__blocked-image {
   display: inline-flex;
   padding: 8px 10px;

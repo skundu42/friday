@@ -897,7 +897,7 @@ export default function ChatPane({
     : undefined;
   const composerGenerationStatus =
     isGenericThinkingStatus(generationStatus) ||
-    isWebActivityStatus(generationStatus)
+      isWebActivityStatus(generationStatus)
       ? null
       : generationStatus;
   const isWebSearchActive = webSearchAvailable && webSearchEnabled;
@@ -1013,6 +1013,7 @@ export default function ChatPane({
                   "Help me plan today’s work.",
                   "Summarize the attached document.",
                   "Review this file and explain the key points.",
+                  "Explain what is in this image",
                 ].map((suggestion) => (
                   <Button
                     key={suggestion}
@@ -1032,6 +1033,9 @@ export default function ChatPane({
               message={message}
               showCopyActions={message.id !== liveAssistantMessageId}
               isStreaming={message.id === liveAssistantMessageId}
+              streamingStatus={
+                message.id === liveAssistantMessageId ? generationStatus : null
+              }
             />
           ))}
 
@@ -1099,42 +1103,42 @@ export default function ChatPane({
 
           <div className="chat-composer__toolbar">
             <div className="chat-composer__toggles">
-            <Button
-              icon={<GlobalOutlined />}
-              onClick={() => onToggleWebSearch?.()}
-              disabled={!webSearchAvailable}
-              aria-pressed={isWebSearchActive}
-              className={`composer-toggle${isWebSearchActive ? " is-active" : ""}`}
-            >
-              Web
-            </Button>
-            <Button
-              icon={<DatabaseOutlined />}
-              onClick={() => onToggleKnowledge?.()}
-              disabled={!knowledgeAvailable}
-              aria-pressed={isKnowledgeActive}
-              className={`composer-toggle${isKnowledgeActive ? " is-active" : ""}`}
-            >
-              Knowledge
-            </Button>
-            <Button
-              icon={<ThunderboltOutlined />}
-              onClick={() => onToggleThinking?.()}
-              disabled={!thinkingAvailable}
-              aria-pressed={isThinkingActive}
-              className={`composer-toggle${isThinkingActive ? " is-active" : ""}`}
-            >
-              Think
-            </Button>
-            <Button
-              icon={<AudioOutlined />}
-              onClick={() => void handleToggleRecording()}
-              disabled={!audioRecordingSupported}
-              aria-pressed={isRecordingAudio}
-              className={`composer-toggle${isRecordingAudio ? " is-recording" : ""}`}
-            >
-              {isRecordingAudio ? "Recording" : "Voice"}
-            </Button>
+              <Button
+                icon={<GlobalOutlined />}
+                onClick={() => onToggleWebSearch?.()}
+                disabled={!webSearchAvailable}
+                aria-pressed={isWebSearchActive}
+                className={`composer-toggle${isWebSearchActive ? " is-active" : ""}`}
+              >
+                Web
+              </Button>
+              <Button
+                icon={<DatabaseOutlined />}
+                onClick={() => onToggleKnowledge?.()}
+                disabled={!knowledgeAvailable}
+                aria-pressed={isKnowledgeActive}
+                className={`composer-toggle${isKnowledgeActive ? " is-active" : ""}`}
+              >
+                Knowledge
+              </Button>
+              <Button
+                icon={<ThunderboltOutlined />}
+                onClick={() => onToggleThinking?.()}
+                disabled={!thinkingAvailable}
+                aria-pressed={isThinkingActive}
+                className={`composer-toggle${isThinkingActive ? " is-active" : ""}`}
+              >
+                Think
+              </Button>
+              <Button
+                icon={<AudioOutlined />}
+                onClick={() => void handleToggleRecording()}
+                disabled={!audioRecordingSupported}
+                aria-pressed={isRecordingAudio}
+                className={`composer-toggle${isRecordingAudio ? " is-recording" : ""}`}
+              >
+                {isRecordingAudio ? "Recording" : "Voice"}
+              </Button>
             </div>
 
             <div className="chat-composer__hint">

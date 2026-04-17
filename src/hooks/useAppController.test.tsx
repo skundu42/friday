@@ -397,7 +397,7 @@ describe("useAppController", () => {
     });
 
     await waitFor(() =>
-      expect(result.current.generationStatus).toBe("Starting local web search…"),
+      expect(result.current.generationStatus).toBe("Starting web search…"),
     );
 
     act(() => {
