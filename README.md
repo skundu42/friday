@@ -1,67 +1,42 @@
 # Friday
 
-Friday is a your personal local AI assistant which runs efficienltly even in a 8gb Macbook Air. Private by design so works 100% offline. Keep your data where it belongs - with you!
+Friday is a your personal local AI assistant which runs efficienltly even in a 8GB Macbook Air. Private by design so works 100% offline. No subscriptions, No ratelimits.
+
+![Demo Image](./demo.png)
 
 ## Why Friday
 
 - Zero Setup needed. Install and get started right away.
 - Local-first by default: chats, prompts, settings, and attached files stay on-device.
-- Supports toolcalling including web search out of the box.
+- Supports toolcalling including web search and custom knowledgebase out of the box.
 - Practical multimodality: text/code files, PDFs, DOCX, images, and audio can all be attached in the main chat flow.
-- Runs Google Gemma models which are highly capable efficiently by using Google's own llm runtime engine natively.
+- Runs Google Gemma models using Google's own llm runtime engine natively for superfast performance.
 
-## Privacy And Network Behavior
+## Platform Support
 
-Friday is on-device by default:
+Friday currently supports **macOS on Apple Silicon (M-series) only**.
 
-- chats are stored in local SQLite
-- models and runtime assets are stored in the platform app-data directory
-- attached files are read and normalized locally before they are added to prompts
-- audio recording stays local and is passed to the local model runtime
+Support for other platforms may be added in future releases.
 
-Friday still uses the network in a few cases:
+## Stack
 
-- first-run runtime and model setup
-- explicit model downloads
-- optional web-assisted replies when the user enables the web toggle and Friday downloads the pinned local SearXNG source/dependency set on first use
-- optional app update checks against the GitHub release manifest endpoint
-
-If web assist is off, normal chatting does not require network access after setup.
-
-Web assist operational notes:
-
-- Friday manages a localhost-only SearXNG Python process under the app-data directory on demand.
-- Friday reuses its bundled embedded CPython runtime and downloads the pinned SearXNG source archive plus wheel-locked dependencies on first use.
-- Friday validates both `/healthz` and `/search?format=json` before allowing a tool-enabled chat turn.
-- The shipped chat flow always allows a local date/time tool, and web assist additionally enables `web_search`, `web_fetch`, and `calculate`.
+- Tauri
+- LiteRT-LM Runtime
+- Google's Gemma Models
+- SearXNG for Web Search
+- embed_anything
+- Lance DB vector storage
 
 ## Model Registry
 
 The app ships a small built-in model registry in [`src-tauri/src/sidecar.rs`](src-tauri/src/sidecar.rs).
 
-| Model | Download | Minimum RAM | Context | Recommended Output | Capabilities |
+| Model | Download | Minimum Recommended RAM | Context | Recommended Output | Capabilities |
 | --- | ---: | ---: | ---: | ---: | --- |
 | `Gemma 4 E2B` | ~2.41 GB | 4 GB | 131,072 | 4,096 | text, image, audio, thinking |
 | `Gemma 4 E4B` | ~3.40 GB | 8 GB | 131,072 | 8,192 | text, image, audio, thinking |
 
 Friday defaults to `Gemma 4 E2B` on most systems and to `Gemma 4 E4B` when total RAM is above `16 GB`.
-
-## Architecture
-
-```text
-React app
-  -> Tauri IPC commands
-Rust backend
-  -> settings/session persistence
-  -> managed LiteRT runtime installer
-  -> embedded CPython + worker bootstrap
-  -> localhost SearXNG manager (web assist only)
-Python worker
-  -> LiteRT-LM Python API
-  -> optional tool execution
-LiteRT-LM runtime
-  -> Gemma 4 local inference
-```
 
 ## Getting Started
 
@@ -73,7 +48,7 @@ For local development you need:
 - npm
 - Rust toolchain
 - Tauri 2 system prerequisites for your OS
-- macOS Apple Silicon if you want the managed runtime flow to work end-to-end without extra porting work
+- macOS Apple Silicon
 
 Friday does not require a separately installed system Python runtime for the shipped app flow.
 
@@ -103,8 +78,6 @@ Build the desktop app:
 npm run tauri build
 ```
 
-Current note: `npm run tauri build` is aligned with the managed runtime only on macOS Apple Silicon because `src-tauri/build.rs` rejects other target OS/arch combinations today.
-
 ### Test And Check
 
 ```bash
@@ -119,20 +92,7 @@ npm run check
 `npm run check` is the default local validation flow. CI and release workflows additionally run `npm run cargo:clippy`.
 
 
-## First-Run Setup
-
-On first launch, Friday will:
-
-1. Inspect system RAM and select a default model.
-2. Check whether the bundled LiteRT runtime assets are installed.
-3. Prepare local runtime, log, RAG, temp, and SearXNG directories.
-4. Install the bundled `lit` binary, embedded CPython runtime, patched LiteRT Python wheel, and worker script if needed.
-5. Download the active model with resumable progress events.
-6. Pre-warm the backend during startup so the first reply arrives faster.
-
-The setup wizard listens to `model-download-progress` events to drive the UI.
-
-## Features In The Current UI
+## Features
 
 - Setup wizard with user display-name capture
 - Session sidebar with create/select/delete flows
@@ -198,7 +158,7 @@ Accepted tag formats:
 
 ## Contributing
 
-- Issues and pull requests are the intended contribution path.
+- Create a new separate branch and only add PR's for the dev branch.
 - Use `npm run tauri dev` and `npm run tauri build` so the frontend hooks defined in `src-tauri/tauri.conf.json` stay in sync.
 - There is no root `Cargo.toml`; use `--manifest-path src-tauri/Cargo.toml`.
 - When changing a Tauri command or payload, update both Rust handlers and the matching TypeScript types in [`src/types.ts`](src/types.ts).
@@ -206,4 +166,4 @@ Accepted tag formats:
 
 ## License
 
-Check the License.md file for license details
+[License](./License.md)

@@ -418,7 +418,7 @@ describe("ChatPane", () => {
     expect(screen.queryByText("Friday is thinking…")).toBeNull();
   });
 
-  it("keeps specific generation status text in the composer", () => {
+  it("hides web activity generation text in the composer", () => {
     renderChatPane({
       isGenerating: true,
       generationStatus: "Searching the web…",
@@ -433,7 +433,7 @@ describe("ChatPane", () => {
       ],
     });
 
-    expect(screen.getByText("Searching the web…")).not.toBeNull();
+    expect(screen.queryByText("Searching the web…")).toBeNull();
   });
 
   it("uses the latest image capability state for dropped files after rerender", async () => {
