@@ -160,8 +160,8 @@ function makeController() {
   };
 }
 
-function getChatView() {
-  return screen.getByPlaceholderText("Ask Friday anything...").closest(".app-view");
+function queryChatInput() {
+  return screen.queryByPlaceholderText("Ask Friday anything...");
 }
 
 describe("App", () => {
@@ -242,12 +242,12 @@ describe("App", () => {
         screen.getByRole("heading", { level: 3, name: "Conversation" }),
       ).not.toBeNull(),
     );
-    expect(getChatView()?.classList.contains("is-hidden")).toBe(true);
+    expect(queryChatInput()).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: /back to chat/i }));
 
     await waitFor(() =>
-      expect(getChatView()?.classList.contains("is-hidden")).toBe(false),
+      expect(queryChatInput()).not.toBeNull(),
     );
     expect(controller.refreshBackendStatus).toHaveBeenCalledTimes(1);
   });
@@ -306,7 +306,7 @@ describe("App", () => {
       expect(screen.getByRole("heading", { level: 3, name: "Knowledge" })).not.toBeNull(),
     );
     expect(controller.refreshKnowledge).toHaveBeenCalledTimes(1);
-    expect(getChatView()?.classList.contains("is-hidden")).toBe(true);
+    expect(queryChatInput()).toBeNull();
     expect(screen.queryByRole("button", { name: /add folder/i })).toBeNull();
     expect(screen.queryByText(/stored under/i)).toBeNull();
     expect(screen.queryByText("How Friday uses it")).toBeNull();
@@ -329,12 +329,12 @@ describe("App", () => {
         screen.getByRole("heading", { level: 3, name: "Conversation" }),
       ).not.toBeNull(),
     );
-    expect(getChatView()?.classList.contains("is-hidden")).toBe(true);
+    expect(queryChatInput()).toBeNull();
 
     fireEvent.click(screen.getAllByRole("button", { name: /new chat/i })[0]!);
 
     await waitFor(() =>
-      expect(getChatView()?.classList.contains("is-hidden")).toBe(false),
+      expect(queryChatInput()).not.toBeNull(),
     );
     expect(controller.createSession).toHaveBeenCalledTimes(1);
     expect(controller.refreshBackendStatus).toHaveBeenCalledTimes(1);

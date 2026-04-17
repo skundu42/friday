@@ -84,6 +84,27 @@ function getDoneContentParts(
   };
 }
 
+function appendDonePayloadDelta(current: string, authoritative: string): string {
+  if (!authoritative || authoritative === current) {
+    return "";
+  }
+  if (!current) {
+    return authoritative;
+  }
+  if (authoritative.startsWith(current)) {
+    return authoritative.slice(current.length);
+  }
+
+  const maxOverlap = Math.min(current.length, authoritative.length);
+  for (let overlap = maxOverlap; overlap > 0; overlap -= 1) {
+    if (current.endsWith(authoritative.slice(0, overlap))) {
+      return authoritative.slice(overlap);
+    }
+  }
+
+  return "";
+}
+
 function getRequestMessage(
   messages: FridayChatMessage[],
   messageId?: string,
@@ -179,6 +200,8 @@ export class TauriChatTransport
         let textEnded = false;
         let reasoningStarted = false;
         let reasoningEnded = false;
+        let streamedText = "";
+        let streamedReasoning = "";
         let currentMetadata: FridayMessageMetadata = {
           sessionId,
           createdAt,
@@ -254,6 +277,7 @@ export class TauriChatTransport
             id: textPartId,
             delta,
           });
+          streamedText += delta;
         };
 
         const emitReasoningDelta = (delta: string) => {
@@ -275,6 +299,7 @@ export class TauriChatTransport
             id: reasoningPartId,
             delta,
           });
+          streamedReasoning += delta;
         };
 
         const endText = () => {
@@ -302,12 +327,22 @@ export class TauriChatTransport
 
           const contentParts = getDoneContentParts(payload?.contentParts);
 
-          if (!textStarted && typeof payload?.content === "string" && payload.content) {
-            emitTextDelta(payload.content);
+          if (typeof payload?.content === "string" && payload.content) {
+            const delta = textStarted
+              ? appendDonePayloadDelta(streamedText, payload.content)
+              : payload.content;
+            if (delta) {
+              emitTextDelta(delta);
+            }
           }
 
-          if (!reasoningStarted && contentParts?.thinking) {
-            emitReasoningDelta(contentParts.thinking);
+          if (contentParts?.thinking) {
+            const delta = reasoningStarted
+              ? appendDonePayloadDelta(streamedReasoning, contentParts.thinking)
+              : contentParts.thinking;
+            if (delta) {
+              emitReasoningDelta(delta);
+            }
           }
 
           const hasRenderableContent = textStarted || reasoningStarted;

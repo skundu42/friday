@@ -14,7 +14,7 @@ use searxng::SearXNGManager;
 use serde::{Deserialize, Serialize};
 use session::{Message, Session};
 use sidecar::SidecarManager;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::fs::OpenOptions;
 use std::io::{Cursor, Read, Write};
 use std::path::Path;
@@ -35,6 +35,7 @@ const MAX_PROMPT_HISTORY_QUERY_LIMIT: usize = 24;
 const MAX_ATTACHMENT_TEXT_CHARS_PER_FILE: usize = 40_000;
 const MAX_ATTACHMENT_TEXT_CHARS_TOTAL: usize = 80_000;
 const MAX_KNOWLEDGE_PROMPT_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
+const MAX_KNOWLEDGE_TEXT_CITATIONS: usize = 4;
 const KNOWLEDGE_SEARCH_TIMEOUT: Duration = Duration::from_secs(8);
 const DEFAULT_SESSION_TITLE: &str = "New chat";
 const SESSION_TITLE_PREVIEW_CHARS: usize = 48;
@@ -1654,7 +1655,10 @@ async fn send_message(
     } else {
         knowledge::KnowledgeSearchResults::default()
     };
-    let prompt_message = augment_prompt_with_knowledge(prompt_message, &knowledge_results)?;
+    let AugmentedPrompt {
+        prompt_message,
+        used_citations: used_knowledge_citations,
+    } = augment_prompt_with_knowledge(prompt_message, &knowledge_results)?;
     chat_messages.push(prompt_message);
 
     if state.cancel_flag.load(Ordering::SeqCst) {
@@ -1871,8 +1875,7 @@ async fn send_message(
         log_web_assist_turn(&session_id, status, trace, None, None);
     }
 
-    let assistant_parts =
-        build_assistant_content_parts(&full_thinking, &knowledge_results.citations);
+    let assistant_parts = build_assistant_content_parts(&full_thinking, &used_knowledge_citations);
 
     if !full_response.trim().is_empty() || !full_thinking.trim().is_empty() {
         if let Err(error) = save_message_json_inner(
@@ -1914,29 +1917,76 @@ async fn send_message(
     Ok(())
 }
 
+struct AugmentedPrompt {
+    prompt_message: models::ChatMessage,
+    used_citations: Vec<knowledge::KnowledgeCitation>,
+}
+
+fn dedupe_knowledge_citations(
+    citations: Vec<knowledge::KnowledgeCitation>,
+) -> Vec<knowledge::KnowledgeCitation> {
+    let mut seen = HashSet::new();
+    let mut deduped = Vec::new();
+    for citation in citations {
+        let key = (
+            citation.source_id.clone(),
+            std::mem::discriminant(&citation.modality),
+            citation.chunk_index,
+            citation.locator.clone(),
+        );
+        if seen.insert(key) {
+            deduped.push(citation);
+        }
+    }
+    deduped
+}
+
 fn augment_prompt_with_knowledge(
     prompt: models::ChatMessage,
     knowledge_results: &knowledge::KnowledgeSearchResults,
-) -> Result<models::ChatMessage, String> {
+) -> Result<AugmentedPrompt, String> {
     let knowledge_text = knowledge::summarize_text_snippets(knowledge_results);
-    let knowledge_images = knowledge_results
-        .images
+    let selected_text_citations = knowledge_results
+        .text_snippets
         .iter()
-        .take(2)
-        .filter_map(|image| {
-            image_file_to_data_url(&image.asset_path, image.mime_type.as_deref())
-                .ok()
-                .map(|blob| models::ChatContentPart::Image { blob })
-        })
+        .take(MAX_KNOWLEDGE_TEXT_CITATIONS)
+        .map(|snippet| snippet.citation.clone())
         .collect::<Vec<_>>();
+
+    let mut used_citations = Vec::new();
+    if knowledge_text.is_some() {
+        used_citations.extend(selected_text_citations);
+    }
+
+    let mut knowledge_images = Vec::new();
+    for image in knowledge_results.images.iter().take(2) {
+        if let Ok(blob) = image_file_to_data_url(&image.asset_path, image.mime_type.as_deref()) {
+            knowledge_images.push(models::ChatContentPart::Image { blob });
+            used_citations.push(image.citation.clone());
+        }
+    }
     let knowledge_audio = knowledge::audio_prompt_asset(knowledge_results).map(|audio| {
         models::ChatContentPart::Audio {
             path: audio.asset_path.to_string_lossy().to_string(),
         }
     });
+    if knowledge_audio.is_some() {
+        used_citations.extend(
+            knowledge_results
+                .citations
+                .iter()
+                .filter(|citation| {
+                    matches!(citation.modality, knowledge::KnowledgeModality::Audio)
+                })
+                .cloned(),
+        );
+    }
 
     if knowledge_text.is_none() && knowledge_images.is_empty() && knowledge_audio.is_none() {
-        return Ok(prompt);
+        return Ok(AugmentedPrompt {
+            prompt_message: prompt,
+            used_citations: Vec::new(),
+        });
     }
 
     let mut prefixed_parts = Vec::new();
@@ -1951,16 +2001,22 @@ fn augment_prompt_with_knowledge(
     match prompt.content {
         models::ChatContent::Text(text) => {
             prefixed_parts.push(models::ChatContentPart::Text { text });
-            Ok(models::ChatMessage {
-                role: prompt.role,
-                content: models::ChatContent::Parts(prefixed_parts),
+            Ok(AugmentedPrompt {
+                prompt_message: models::ChatMessage {
+                    role: prompt.role,
+                    content: models::ChatContent::Parts(prefixed_parts),
+                },
+                used_citations: dedupe_knowledge_citations(used_citations),
             })
         }
         models::ChatContent::Parts(mut parts) => {
             prefixed_parts.append(&mut parts);
-            Ok(models::ChatMessage {
-                role: prompt.role,
-                content: models::ChatContent::Parts(prefixed_parts),
+            Ok(AugmentedPrompt {
+                prompt_message: models::ChatMessage {
+                    role: prompt.role,
+                    content: models::ChatContent::Parts(prefixed_parts),
+                },
+                used_citations: dedupe_knowledge_citations(used_citations),
             })
         }
     }
@@ -2046,6 +2102,7 @@ fn list_sessions(state: State<'_, AppState>) -> Result<Vec<Session>, String> {
 
 #[tauri::command]
 fn load_messages(state: State<'_, AppState>, session_id: String) -> Result<Vec<Message>, String> {
+    let _ = load_session_inner(&state, &session_id)?;
     load_messages_inner(&state, &session_id)
 }
 
@@ -2422,8 +2479,8 @@ fn list_sessions_inner(state: &AppState) -> Result<Vec<Session>, String> {
                 })
             })
             .map_err(|e| e.to_string())?
-            .filter_map(|s| s.ok())
-            .collect();
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
         Ok(sessions)
     })
 }
@@ -2442,7 +2499,10 @@ fn load_session_inner(state: &AppState, session_id: &str) -> Result<Session, Str
                 updated_at: row.get(3)?,
             })
         })
-        .map_err(|_| format!("Session {} not found", session_id))
+        .map_err(|error| match error {
+            rusqlite::Error::QueryReturnedNoRows => format!("Session {} not found", session_id),
+            other => format!("Failed to load session {}: {}", session_id, other),
+        })
     })
 }
 
@@ -2646,14 +2706,13 @@ fn preferred_session_id(state: &AppState) -> Result<Option<String>, String> {
 }
 
 fn set_current_session(state: &AppState, session_id: Option<String>) -> Result<(), String> {
-    *state.current_session.lock().unwrap() = session_id.clone();
-
-    if let Some(session_id) = session_id {
+    if let Some(session_id) = session_id.as_deref() {
         with_db(state, |conn| {
             storage::save_string_setting(conn, CURRENT_SESSION_KEY, &session_id)
         })?;
     }
 
+    *state.current_session.lock().unwrap() = session_id;
     Ok(())
 }
 
@@ -3220,7 +3279,7 @@ mod tests {
         )
         .unwrap();
 
-        match augmented.content {
+        match augmented.prompt_message.content {
             models::ChatContent::Parts(parts) => {
                 assert!(parts.iter().any(|part| {
                     matches!(
@@ -3242,6 +3301,8 @@ mod tests {
             }
             other => panic!("expected parts prompt content, got {:?}", other),
         }
+        assert_eq!(augmented.used_citations.len(), 1);
+        assert_eq!(augmented.used_citations[0].source_id, "src-2");
 
         let _ = std::fs::remove_file(&oversized_path);
     }

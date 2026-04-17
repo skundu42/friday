@@ -46,10 +46,6 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
         Some(archive_legacy_rag_tables),
     )?;
 
-    // Migration 004: Knowledge sources and legacy knowledge-store cleanup.
-    conn.execute_batch(include_str!("../../migrations/004_knowledge.sql"))
-        .map_err(|e| format!("Migration 004 failed: {}", e))?;
-
     tracing::info!("Database migrations applied successfully");
     Ok(())
 }

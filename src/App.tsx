@@ -66,6 +66,7 @@ export default function App() {
   const [showWizard, setShowWizard] = useState(false);
   const [wizardChecked, setWizardChecked] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [restartError, setRestartError] = useState<string | null>(null);
   const controller = useAppController();
   const isNarrowLayout = useNarrowLayout();
   const themeMode: ThemeMode = controller.settings?.theme_mode ?? "light";
@@ -141,8 +142,10 @@ export default function App() {
   };
 
   const handleRestartForUpdate = () => {
+    setRestartError(null);
     void controller.restartApp().catch((error) => {
       console.error("[App] restartApp error:", error);
+      setRestartError(error instanceof Error ? error.message : String(error));
     });
   };
 
@@ -307,7 +310,10 @@ export default function App() {
                         </Button>
                       }
                       closable
-                      onClose={controller.clearInstalledAppUpdateVersion}
+                      onClose={() => {
+                        setRestartError(null);
+                        controller.clearInstalledAppUpdateVersion();
+                      }}
                     />
                   </div>
                 ) : null}
@@ -325,43 +331,56 @@ export default function App() {
                   </div>
                 ) : null}
 
-                <div
-                  className={`app-view${activeView === "chat" ? " is-active" : " is-hidden"}`}
-                >
-                  <ChatPane
-                    messages={controller.messages}
-                    isGenerating={controller.isGenerating}
-                    generationStatus={controller.generationStatus}
-                    onSendMessage={(content, attachments) =>
-                      controller.sendMessage(content, attachments)
-                    }
-                    onCancelGeneration={() => controller.cancelGeneration()}
-                    webSearchEnabled={controller.webSearchEnabled}
-                    thinkingEnabled={controller.thinkingEnabled}
-                    webSearchAvailable={controller.webSearchToggleAvailable}
-                    webSearchStatus={controller.webSearchStatus}
-                    knowledgeEnabled={controller.knowledgeEnabled}
-                    knowledgeStatus={controller.knowledgeStatus}
-                    thinkingAvailable={controller.thinkingAvailable}
-                    knowledgeAvailable={controller.knowledgeToggleAvailable}
-                    audioInputAvailable={controller.audioInputAvailable}
-                    onToggleWebSearch={() => controller.toggleWebSearch()}
-                    onToggleKnowledge={() => controller.toggleKnowledge()}
-                    onToggleThinking={() => controller.toggleThinking()}
-                    activeSessionTitle={controller.activeSession?.title ?? "New chat"}
-                    userDisplayName={controller.settings?.user_display_name ?? ""}
-                    replyLanguage={
-                      controller.settings?.chat.reply_language ?? "english"
-                    }
-                    onLanguageChange={(lang) =>
-                      void controller.setReplyLanguage(lang as ReplyLanguage)
-                    }
-                    backendStatus={controller.backendStatus}
-                    onToggleSidebar={handleToggleSidebar}
-                    isSidebarOpen={sidebarOpen}
-                    isNarrowLayout={isNarrowLayout}
-                  />
-                </div>
+                {restartError ? (
+                  <div className="app-update-banner">
+                    <Alert
+                      type="warning"
+                      showIcon
+                      message="Restart failed"
+                      description={restartError}
+                      closable
+                      onClose={() => setRestartError(null)}
+                    />
+                  </div>
+                ) : null}
+
+                {activeView === "chat" ? (
+                  <div className="app-view is-active">
+                    <ChatPane
+                      messages={controller.messages}
+                      isGenerating={controller.isGenerating}
+                      generationStatus={controller.generationStatus}
+                      onSendMessage={(content, attachments) =>
+                        controller.sendMessage(content, attachments)
+                      }
+                      onCancelGeneration={() => controller.cancelGeneration()}
+                      webSearchEnabled={controller.webSearchEnabled}
+                      thinkingEnabled={controller.thinkingEnabled}
+                      webSearchAvailable={controller.webSearchToggleAvailable}
+                      webSearchStatus={controller.webSearchStatus}
+                      knowledgeEnabled={controller.knowledgeEnabled}
+                      knowledgeStatus={controller.knowledgeStatus}
+                      thinkingAvailable={controller.thinkingAvailable}
+                      knowledgeAvailable={controller.knowledgeToggleAvailable}
+                      audioInputAvailable={controller.audioInputAvailable}
+                      onToggleWebSearch={() => controller.toggleWebSearch()}
+                      onToggleKnowledge={() => controller.toggleKnowledge()}
+                      onToggleThinking={() => controller.toggleThinking()}
+                      activeSessionTitle={controller.activeSession?.title ?? "New chat"}
+                      userDisplayName={controller.settings?.user_display_name ?? ""}
+                      replyLanguage={
+                        controller.settings?.chat.reply_language ?? "english"
+                      }
+                      onLanguageChange={(lang) =>
+                        void controller.setReplyLanguage(lang as ReplyLanguage)
+                      }
+                      backendStatus={controller.backendStatus}
+                      onToggleSidebar={handleToggleSidebar}
+                      isSidebarOpen={sidebarOpen}
+                      isNarrowLayout={isNarrowLayout}
+                    />
+                  </div>
+                ) : null}
 
                 {activeView === "knowledge" ? (
                   <AppPageFrame

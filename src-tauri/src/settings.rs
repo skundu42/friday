@@ -284,7 +284,7 @@ fn validate_settings_input(input: &AppSettingsInput) -> Result<(), String> {
         }
     }
 
-    if input.user_display_name.trim().len() > 60 {
+    if input.user_display_name.trim().chars().count() > 60 {
         return Err("user_display_name must be 60 characters or fewer".to_string());
     }
 
@@ -327,7 +327,7 @@ fn normalize_stored_settings(
         .top_p
         .map(|top_p| top_p.clamp(0.0, 1.0));
 
-    if stored.user_display_name.len() > 60 {
+    if stored.user_display_name.chars().count() > 60 {
         stored.user_display_name = stored.user_display_name.chars().take(60).collect();
     }
 
@@ -543,6 +543,37 @@ mod tests {
         )
         .unwrap_err();
 
+        assert!(error.contains("user_display_name"));
+    }
+
+    #[test]
+    fn save_settings_counts_display_name_length_by_characters() {
+        let conn = test_conn();
+        let valid_name = "आ".repeat(60);
+        let too_long_name = "आ".repeat(61);
+
+        let saved = save_settings(
+            &conn,
+            &AppSettingsInput {
+                auto_start_backend: true,
+                user_display_name: valid_name.clone(),
+                theme_mode: DEFAULT_THEME_MODE.to_string(),
+                chat: ChatSettingsInput::default(),
+            },
+        )
+        .expect("save valid multibyte name");
+        assert_eq!(saved.user_display_name, valid_name);
+
+        let error = save_settings(
+            &conn,
+            &AppSettingsInput {
+                auto_start_backend: true,
+                user_display_name: too_long_name,
+                theme_mode: DEFAULT_THEME_MODE.to_string(),
+                chat: ChatSettingsInput::default(),
+            },
+        )
+        .unwrap_err();
         assert!(error.contains("user_display_name"));
     }
 

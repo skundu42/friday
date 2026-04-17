@@ -1888,6 +1888,7 @@ class LiteRtWorker:
         self._active_conversation = None
         self._active_request_id: str | None = None
         self._cancelled_request_id: str | None = None
+        self._pending_cancel_request_ids: set[str] = set()
         self._chat_thread: threading.Thread | None = None
         self._state_lock = threading.RLock()
 
@@ -1905,6 +1906,7 @@ class LiteRtWorker:
             self._active_conversation = None
             self._active_request_id = None
             self._cancelled_request_id = None
+            self._pending_cancel_request_ids.clear()
             engine = self._engine
             self._engine = None
             self._engine_config = None
@@ -2059,10 +2061,20 @@ class LiteRtWorker:
             extra_context={"enable_thinking": thinking_enabled},
         )
         conversation.__enter__()
+        should_cancel_immediately = False
         with self._state_lock:
             self._active_conversation = conversation
             self._active_request_id = request_id
             self._cancelled_request_id = None
+            if request_id in self._pending_cancel_request_ids:
+                self._pending_cancel_request_ids.discard(request_id)
+                self._cancelled_request_id = request_id
+                should_cancel_immediately = True
+        if should_cancel_immediately:
+            try:
+                conversation.cancel_process()
+            except Exception:
+                pass
         streamed_answer_text = ""
         streamed_thought_text = ""
         latest_answer_snapshot = ""
@@ -2140,11 +2152,13 @@ class LiteRtWorker:
                     self._active_conversation = None
                     self._active_request_id = None
                     self._cancelled_request_id = None
+                    self._pending_cancel_request_ids.discard(request_id)
 
     def handle_cancel(self, command: dict[str, Any]) -> None:
         request_id = str(command["request_id"])
         with self._state_lock:
             if request_id != self._active_request_id or self._active_conversation is None:
+                self._pending_cancel_request_ids.add(request_id)
                 return
             self._cancelled_request_id = request_id
             active_conversation = self._active_conversation
