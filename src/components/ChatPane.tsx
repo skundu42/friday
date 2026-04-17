@@ -248,6 +248,16 @@ function isGenericThinkingStatus(status?: string | null) {
   return status === "Friday is thinking…" || status === "Friday is thinking...";
 }
 
+function isWebActivityStatus(status?: string | null) {
+  if (!status) return false;
+  const normalized = status.toLowerCase();
+  return (
+    normalized.includes("searching the web") ||
+    normalized.includes("web search") ||
+    normalized.includes("reading the page")
+  );
+}
+
 export default function ChatPane({
   messages,
   isGenerating,
@@ -885,9 +895,11 @@ export default function ChatPane({
       ? messages[messages.length - 1]?.id
       : undefined
     : undefined;
-  const composerGenerationStatus = isGenericThinkingStatus(generationStatus)
-    ? null
-    : generationStatus;
+  const composerGenerationStatus =
+    isGenericThinkingStatus(generationStatus) ||
+    isWebActivityStatus(generationStatus)
+      ? null
+      : generationStatus;
   const isWebSearchActive = webSearchAvailable && webSearchEnabled;
   const isKnowledgeActive = knowledgeAvailable && knowledgeEnabled;
   const isThinkingActive = thinkingAvailable && thinkingEnabled;

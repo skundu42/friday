@@ -91,16 +91,16 @@ function mergeDownloadProgress(
     incoming.state === "complete"
       ? totalBytes
       : incoming.downloadedBytes ||
-        previous?.downloadedBytes ||
-        setupStatus?.partialDownloadBytes ||
-        0;
+      previous?.downloadedBytes ||
+      setupStatus?.partialDownloadBytes ||
+      0;
   const percentage =
     incoming.state === "complete"
       ? 100
       : incoming.percentage ||
-        (totalBytes > 0
-          ? Math.round((downloadedBytes / totalBytes) * 100)
-          : previous?.percentage ?? 0);
+      (totalBytes > 0
+        ? Math.round((downloadedBytes / totalBytes) * 100)
+        : previous?.percentage ?? 0);
 
   return {
     ...incoming,
@@ -552,9 +552,9 @@ export default function SetupWizard({
       <div className="setup-stage__inner">
         <Title level={3} style={{ textAlign: "center", marginBottom: 8 }}>
           {isComplete
-              ? "Setup Complete!"
-              : isPreparing
-                ? "Preparing Friday..."
+            ? "Setup Complete!"
+            : isPreparing
+              ? "Preparing Friday..."
               : `Downloading ${setupStatus?.modelDisplayName ?? "your model"}...`}
         </Title>
         <Paragraph
@@ -567,7 +567,7 @@ export default function SetupWizard({
               ? "Friday is preparing the local runtime on this device."
               : !hasConcreteProgress
                 ? "Friday is downloading your local model."
-                : "This usually takes a few minutes, depending on your connection."}
+                : "This usually takes a few minutes, depending on your connection and is a one-time process"}
         </Paragraph>
 
         <Card className="setup-progress-card" style={{ marginBottom: 20 }}>
@@ -632,8 +632,8 @@ export default function SetupWizard({
         </Card>
 
         {(setupStatus?.partialDownloadBytes ?? 0) > 0 &&
-        !isDownloading &&
-        !downloadError ? (
+          !isDownloading &&
+          !downloadError ? (
           <div className="setup-inline-message setup-inline-message--info">
             <Text style={{ color: "var(--friday-info)", fontSize: 13 }}>
               Resuming from {formatBytes(setupStatus?.partialDownloadBytes ?? 0)}{" "}

@@ -14,34 +14,36 @@ Current user-facing app capabilities:
 - Microphone recording for audio prompts when the environment supports `MediaRecorder`
 - Model management for `Gemma 4 E2B` and `Gemma 4 E4B`
 - Reply language control for English, Hindi, Bengali, Marathi, Tamil, and Punjabi
-- Optional thinking mode for supported models
-- Assistant reasoning disclosure UI for replies that include thinking content
-- Assistant answer rendering with GitHub-flavored Markdown, copyable code blocks, and KaTeX math
-- Optional web-assisted replies via the chat composer
-- Friday-managed localhost SearXNG provisioning and startup for web search on first web-assisted use
-- Connection/privacy status pills and inline tool-activity status text during assisted replies
-- Settings for token budget, reply language, theme selection, and model downloads/switching
+- Optional per-turn toggles for web assist, Knowledge grounding, and thinking mode
+- Assistant rendering with GitHub-flavored Markdown, copyable code blocks, KaTeX math, collapsible reasoning, and collapsible Knowledge sources
+- Optional web-assisted replies via a Friday-managed localhost SearXNG stack
+- Dedicated Knowledge view for ingesting local files/URLs and managing indexed sources
+- Theme selection (light/dark), token budget controls, and model downloads/switching in Settings
+- In-app update surfaces for available/installable app updates and restart prompts
 
 Current backend-only or partially surfaced capabilities:
 
-- RAG ingestion and search commands exist in the backend
-- Prompt-time RAG augmentation exists, but RAG is disabled by default and not wired to a dedicated UI
+- `knowledge-ingest-progress` events exist, but there is no dedicated per-item ingest timeline UI yet
+- `get_system_info` command exists but is not a primary user-facing panel
 - The shipped LiteRT-LM Python worker exposes `get_current_datetime`, `web_search`, `web_fetch`, `file_read`, `list_directory`, and `calculate`
 - In the shipped chat flow, `get_current_datetime` is always enabled and web assist additionally enables `web_search`, `web_fetch`, and `calculate`; local file helper tools remain disabled for user chats
 - Local observability logs are written to `app_data/logs/friday.log`, but there is no dedicated log viewer UI
 
 Privacy note:
 
-- Inference, sessions, settings, and local files stay on-device by default
-- First-run setup downloads the native LiteRT runtime assets and model files from the network when the bundle is incomplete
-- If the user enables web-assisted replies, Friday downloads the pinned local SearXNG dependencies on first use and can then send search/fetch requests to external sites
+- Inference, sessions, settings, Knowledge storage, and local files stay on-device by default
+- First-run setup downloads managed LiteRT runtime assets and model files from the network when the bundle is incomplete
+- If the user enables web-assisted replies, Friday provisions local SearXNG dependencies on first use and can send search/fetch requests to external sites
+- If the user adds URL-based Knowledge sources, Friday fetches those URLs for indexing
+- Knowledge embedding models are downloaded on first Knowledge use
 
 ## Current Platform Support
 
 Friday's managed runtime flow currently supports macOS Apple Silicon only.
 
-- `src-tauri/build.rs` only defines LiteRT runtime, bundled CPython runtime, and patched wheel specs for `macos/aarch64`
-- the shipped worker script path is also wired for `macos/aarch64`
+- `src-tauri/build.rs` validates platform assets from the runtime manifest and fails unsupported targets
+- the runtime manifest currently declares only `macos/aarch64`
+- the shipped worker script path is wired for `macos/aarch64`
 - treat Apple Silicon as the supported build and packaging target until additional target specs are added
 
 ## Stack
@@ -52,6 +54,7 @@ Frontend:
 - TypeScript
 - Vite 6
 - Ant Design 5
+- `@ai-sdk/react` + `ai`
 - `@tauri-apps/api` v2
 - `@tauri-apps/plugin-dialog` v2
 - `react-markdown`
@@ -79,18 +82,24 @@ Backend:
 - `tar`
 - `base64`
 - `sha2`
-- `meval`
+- `anyhow`
+- `arrow-array` / `arrow-schema`
+- `embed_anything`
+- `lancedb` / `lance-index`
+- `futures`
+- `url`
+- `walkdir`
 
 Inference/runtime:
 
 - LiteRT-LM `0.10.1`
 - managed native LiteRT runtime via bundled `lit` release assets
 - embedded CPython `3.12.10`
-- locally patched `litert_lm_api` wheel for Gemma 4 image slots
+- locally patched `litert_lm_api` wheel for Gemma 4 multimodal support
 
 ## Model Registry
 
-The app currently ships a small local model registry in [`src-tauri/src/sidecar.rs`](src-tauri/src/sidecar.rs).
+Model metadata is sourced from the runtime manifest at [`src-tauri/resources/litert-runtime/runtime-manifest.json`](src-tauri/resources/litert-runtime/runtime-manifest.json) and consumed via [`src-tauri/src/runtime_manifest.rs`](src-tauri/src/runtime_manifest.rs).
 
 - `gemma-4-e2b-it`
   - Display name: `Gemma 4 E2B`
@@ -127,6 +136,7 @@ daksha-ai/
 │   ├── styles.css
 │   ├── types.ts
 │   ├── test/
+│   ├── lib/
 │   ├── components/
 │   ├── hooks/
 │   └── theme/
@@ -142,25 +152,27 @@ daksha-ai/
 
 Key files:
 
-- [`src/App.tsx`](src/App.tsx): top-level layout, setup gating, sidebar/drawer behavior, settings/chat split
-- [`src/hooks/useAppController.ts`](src/hooks/useAppController.ts): frontend state hub, bootstrapping, event listeners, model inventory, send/cancel flow, startup warmup
-- [`src/components/ChatPane.tsx`](src/components/ChatPane.tsx): chat UI, attachments, web/thinking toggles, microphone recording
-- [`src/components/MessageBubble.tsx`](src/components/MessageBubble.tsx): assistant Markdown rendering, reasoning disclosure UI, code-copy actions, KaTeX math
-- [`src/components/SettingsPanel.tsx`](src/components/SettingsPanel.tsx): reply language, token presets, theme selection, and model downloads/switching
-- [`src/components/SetupWizard.tsx`](src/components/SetupWizard.tsx): first-run onboarding and model download flow
-- [`src/test/setup.ts`](src/test/setup.ts): shared Vitest/jsdom test shims
-- [`vite.config.ts`](vite.config.ts): Vite build config, test environment, and vendor chunk strategy
-- [`src-tauri/build.rs`](src-tauri/build.rs): build-time LiteRT and Python asset vendoring plus resource path env wiring
-- [`src-tauri/src/lib.rs`](src-tauri/src/lib.rs): Tauri commands, app state, prompt assembly, persistence flow, streaming event emission, log initialization
-- [`src-tauri/src/sidecar.rs`](src-tauri/src/sidecar.rs): runtime bootstrap, model downloads, native runtime lifecycle, model registry, warmup
+- [`src/App.tsx`](src/App.tsx): top-level layout, setup gating, sidebar/drawer behavior, chat/knowledge/settings view switching, and update banners
+- [`src/hooks/useAppController.ts`](src/hooks/useAppController.ts): frontend state hub, bootstrapping, event listeners, model inventory, send/cancel flow, settings persistence, knowledge operations, and update actions
+- [`src/components/ChatPane.tsx`](src/components/ChatPane.tsx): chat UI, attachments, web/knowledge/thinking toggles, microphone recording, and generation status copy
+- [`src/components/KnowledgePanel.tsx`](src/components/KnowledgePanel.tsx): Knowledge source ingest (file/url), source list, and source deletion
+- [`src/components/MessageBubble.tsx`](src/components/MessageBubble.tsx): assistant Markdown rendering, reasoning disclosure UI, Knowledge source rendering, code-copy actions, KaTeX math, and safe external-link handling
+- [`src/components/SettingsPanel.tsx`](src/components/SettingsPanel.tsx): reply language, token presets, theme mode, and model downloads/switching
+- [`src/components/SetupWizard.tsx`](src/components/SetupWizard.tsx): onboarding flow, display-name capture, runtime/model readiness checks, and model download flow
+- [`src/lib/tauri-chat-transport.ts`](src/lib/tauri-chat-transport.ts): AI SDK transport bridge to Tauri command/event chat streaming
+- [`src/lib/friday-chat.ts`](src/lib/friday-chat.ts): normalization helpers for persisted content parts, reasoning, and Knowledge citations
+- [`src-tauri/build.rs`](src-tauri/build.rs): build-time runtime asset verification/vendoring using runtime manifest entries
+- [`src-tauri/src/lib.rs`](src-tauri/src/lib.rs): Tauri command handlers, app state, prompt assembly, Knowledge augmentation, persistence flow, streaming event emission, updater commands, and log initialization
+- [`src-tauri/src/sidecar.rs`](src-tauri/src/sidecar.rs): runtime bootstrap, model downloads, native runtime lifecycle, model selection, and warmup
+- [`src-tauri/src/runtime_manifest.rs`](src-tauri/src/runtime_manifest.rs): runtime/model manifest parsing, validation, and platform/model selection policies
 - [`src-tauri/src/python_runtime.rs`](src-tauri/src/python_runtime.rs): embedded CPython install/sync helpers
 - [`src-tauri/src/searxng.rs`](src-tauri/src/searxng.rs): local SearXNG provisioning, process management, health checks, and web-search status
-- [`src-tauri/src/models/python_worker.rs`](src-tauri/src/models/python_worker.rs): Rust bridge to the bundled Friday LiteRT-LM Python worker
-- [`src-tauri/resources/litert-python/macos-aarch64/worker/friday_litert_worker.py`](src-tauri/resources/litert-python/macos-aarch64/worker/friday_litert_worker.py): shipped LiteRT-LM Python worker, tool hooks, streaming logic, and SearXNG-backed web search
+- [`src-tauri/src/knowledge/mod.rs`](src-tauri/src/knowledge/mod.rs): Knowledge ingestion/search/status, LanceDB integration, and citation shaping
+- [`src-tauri/src/models/python_worker.rs`](src-tauri/src/models/python_worker.rs): Rust bridge to the bundled LiteRT-LM Python worker
+- [`src-tauri/resources/litert-python/macos-aarch64/worker/friday_litert_worker.py`](src-tauri/resources/litert-python/macos-aarch64/worker/friday_litert_worker.py): worker tool hooks and streaming logic
 - [`src-tauri/resources/searxng/`](src-tauri/resources/searxng/): vendored Friday-owned SearXNG config, source manifest, and dependency lockfile templates
-- [`src-tauri/src/rag/mod.rs`](src-tauri/src/rag/mod.rs): Rust-owned RAG ingestion and search
-- [`src-tauri/src/settings.rs`](src-tauri/src/settings.rs): settings schema, defaults, validation
-- [`src-tauri/src/storage/mod.rs`](src-tauri/src/storage/mod.rs): SQLite init and setting helpers
+- [`src-tauri/src/settings.rs`](src-tauri/src/settings.rs): settings schema/defaults/validation
+- [`src-tauri/src/storage/mod.rs`](src-tauri/src/storage/mod.rs): SQLite init, migration ledger, and settings helpers
 
 ## Runtime And Data Paths
 
@@ -177,52 +189,60 @@ Important subdirectories:
 - `app_data/searxng/`
 - `app_data/temp/`
 - `app_data/rag/`
+  - `app_data/rag/lancedb/`
+  - `app_data/rag/models/`
+  - `app_data/rag/hf-cache/`
+  - `app_data/rag/staging/`
 
 Notes:
 
-- The backend still creates `app_data/models/` during setup, but the managed LiteRT runtime currently stores downloaded model files under `app_data/lit-home/models/...` because the runtime is launched with `LIT_DIR=app_data/lit-home`
-- the backend stores the SQLite database beside those directories
+- the backend still creates `app_data/models/` during setup, but the managed LiteRT runtime currently stores downloaded model files under `app_data/lit-home/models/...` because the runtime is launched with `LIT_DIR=app_data/lit-home`
+- the backend stores SQLite beside these directories
 - Friday cleans up temp uploads and recordings under `temp/` on startup
 - local observability logs live under `logs/`
+- Knowledge storage currently uses the `rag/` app-data directory name even though product/UI terminology is now `Knowledge`
 
 ## Architecture
 
 High-level flow:
 
 1. The React app boots and calls `bootstrap_app`
-2. Rust loads settings, ensures there is an active session, and reports both model-backend and web-search status
-3. The UI opportunistically calls `warm_backend` during startup when the backend is ready but not yet connected
-4. On first run, the setup wizard calls `get_setup_status` and then `pull_model`
+2. Rust loads settings, ensures there is an active session, and reports backend, web-search, and knowledge status
+3. The UI opportunistically calls `warm_backend` during startup when backend state is `ready` but not yet connected
+4. On first run, setup calls `get_setup_status` and `pull_model`
 5. Rust ensures the bundled `lit` binary, embedded CPython runtime, patched LiteRT wheel, and worker script are installed under `app_data/litert-runtime/`
 6. The active model is stored under `app_data/lit-home/models/<model-id>/model.litertlm`
-7. If web assist is enabled for a chat turn, Rust ensures the localhost SearXNG install is provisioned and healthy before inference starts
-8. Chat requests are sent from Rust to the local Python worker, which drives LiteRT-LM and optional tool execution
-9. The worker streams answer tokens, thought tokens, tool-call events, and tool results back to Rust, which forwards them to the frontend
-10. Rust persists multimodal user content and assistant thinking traces in `messages.content_parts` and promotes the chat title from `New chat` using the first user message when possible
+7. If web assist is enabled for a turn, Rust ensures the localhost SearXNG stack is provisioned and healthy before inference starts
+8. If Knowledge is enabled for a turn, Rust runs Knowledge search and augments the user prompt with retrieved text/image/audio context
+9. Chat requests are sent from Rust to the local Python worker, which drives LiteRT-LM and optional tool execution
+10. The worker streams answer tokens, thought tokens, tool-call events, and tool results back to Rust, which forwards them to the frontend
+11. Rust persists multimodal user content and assistant content parts (thinking/sources), and promotes chat titles from `New chat` using the first user message when possible
 
 Frontend surfaces:
 
-- Sidebar for session management
-- Chat pane with attachment ingestion, microphone capture, web toggle, and thinking toggle
-- Assistant bubbles with GitHub-flavored Markdown, KaTeX math, copyable code blocks, and collapsible reasoning
-- Footer/header status surfaces that expose session title, backend state, reply language, and generation status
-- Settings drawer for model downloads/switching, token budget, reply language, and theme selection
+- Sidebar for session management and navigation to chat/knowledge/settings
+- Chat pane with attachment ingestion, microphone capture, web/knowledge/thinking toggles, and status hints
+- Assistant bubbles with GitHub-flavored Markdown, KaTeX math, copyable code blocks, collapsible reasoning, and collapsible Knowledge sources
+- Settings page for model downloads/switching, token budget, reply language, and theme mode
+- Knowledge page for source ingestion/listing/deletion and Knowledge status/stats
+- Update banners for available updates, installed updates requiring restart, and update errors
 
 Backend responsibilities:
 
 - Session/message persistence in SQLite
 - Local observability setup and log writing to `logs/friday.log`
 - Setup/runtime bootstrapping
+- Runtime manifest parsing and model/platform policy enforcement
 - Model registry and active-model selection
 - Bundled embedded Python runtime installation and sync
-- Local SearXNG provisioning, process lifecycle, config sync, and readiness probes for web assist
+- Local SearXNG provisioning, process lifecycle, config sync, and readiness probes
+- Knowledge ingestion/search/status over LanceDB + embedding runtime
 - Prompt building and history trimming
-- Auto-titling sessions from the first user message when the title is still `New chat`
-- Persisting multimodal user attachment context and assistant thinking traces in `messages.content_parts`
-- Attachment normalization for text, image, and audio inputs
-- Optional RAG lookup
-- Optional tool-enabled chat rounds
+- Auto-titling sessions from first user messages when title is still `New chat`
+- Persisting multimodal user context and assistant thinking/citations in `messages.content_parts`
+- Attachment normalization for text/image/audio inputs
 - Runtime warmup, cancellation, and idle shutdown
+- App update check/install/restart command handling
 
 ## Settings And Runtime Behavior
 
@@ -230,11 +250,13 @@ Settings live in SQLite under the `app_settings` JSON key.
 
 Current app settings schema includes:
 
-- `auto_start_backend` (legacy persisted field; startup pre-warm is always enabled)
+- `auto_start_backend` (legacy persisted field; normalized to true)
 - `user_display_name`
+- `theme_mode`
 - `chat.reply_language`
 - `chat.max_tokens`
 - `chat.web_assist_enabled`
+- `chat.knowledge_enabled`
 - `chat.generation.temperature`
 - `chat.generation.top_p`
 - `chat.generation.thinking_enabled`
@@ -243,21 +265,31 @@ Current behavior worth remembering:
 
 - default max tokens is `4096`
 - systems with more than `8 GB` RAM get a higher default token budget of `16384`
-- the settings UI uses token presets from `1K` through `128K`
+- settings UI uses token presets from `1K` through `128K`
 - `temperature` must be between `0.0` and `2.0`
 - `top_p` must be between `0.0` and `1.0`
-- the settings UI currently exposes reply language, token presets, theme selection, and model downloads/switching
-- `temperature` and `top_p` are supported by the backend schema but are not currently surfaced in the main settings UI
-- the chat composer, not the settings drawer, owns the per-turn web assist and thinking toggles
+- settings UI currently exposes reply language, token presets, theme mode, and model downloads/switching
+- `temperature` and `top_p` are supported in backend schema but not surfaced in the main settings page
+- chat composer owns per-turn web/knowledge/thinking toggles
 
-The sidecar daemon has an idle shutdown policy:
+The sidecar daemon idle shutdown policy (from runtime manifest policy):
 
 - idle timeout: `10` minutes
 - idle check interval: `30` seconds
 
+Knowledge runtime idle policy:
+
+- idle timeout: `2` minutes
+- idle check interval: `30` seconds
+
 ## Current Database Shape
 
-Migrations live in [`src-tauri/migrations/001_initial.sql`](src-tauri/migrations/001_initial.sql), [`src-tauri/migrations/002_rag.sql`](src-tauri/migrations/002_rag.sql), and [`src-tauri/migrations/003_message_content_parts.sql`](src-tauri/migrations/003_message_content_parts.sql).
+Migrations currently used by storage init:
+
+- [`src-tauri/migrations/001_initial.sql`](src-tauri/migrations/001_initial.sql)
+- [`src-tauri/migrations/003_message_content_parts.sql`](src-tauri/migrations/003_message_content_parts.sql)
+- [`src-tauri/migrations/004_knowledge.sql`](src-tauri/migrations/004_knowledge.sql)
+- [`src-tauri/migrations/005_migration_ledger.sql`](src-tauri/migrations/005_migration_ledger.sql)
 
 Primary tables:
 
@@ -266,24 +298,26 @@ Primary tables:
 - `audit_log`
 - `workspace_memory`
 - `settings`
-- `rag_documents`
-- `rag_chunks`
+- `knowledge_sources`
+- `legacy_rag_archive_log`
+- `migration_ledger`
 
 Notes:
 
 - SQLite runs with WAL mode
-- current session id is persisted under the `current_session` setting key
+- current session id is persisted under `current_session`
 - app settings are stored as JSON under `app_settings`
-- active model id is persisted separately and reloaded during startup
-- the `messages` table includes a `content_parts` JSON column for multimodal user content and assistant thinking traces
-- session rows start with title `New chat` and are updated from the first user message preview when possible
+- active model id is persisted under `active_model_id`
+- `messages` includes `content_parts` for multimodal user context and assistant thinking/sources
+- legacy `rag_documents` / `rag_chunks` are archived during migration flow and are not part of the active schema
 
 ## Current IPC Surface
 
-Core app commands in [`src-tauri/src/lib.rs`](src-tauri/src/lib.rs):
+Commands registered in [`src-tauri/src/lib.rs`](src-tauri/src/lib.rs):
+
+Core app/chat commands:
 
 - `bootstrap_app`
-- `get_web_search_status`
 - `send_message`
 - `cancel_generation`
 - `read_file_context`
@@ -296,16 +330,16 @@ Core app commands in [`src-tauri/src/lib.rs`](src-tauri/src/lib.rs):
 - `load_messages`
 - `load_settings`
 - `save_settings`
+- `open_external_link`
 
-RAG commands:
+Knowledge commands:
 
-- `rag_ingest_file`
-- `rag_ingest_folder`
-- `rag_search`
-- `rag_list_documents`
-- `rag_delete_document`
-- `rag_stats`
-- `set_rag_enabled`
+- `knowledge_ingest_file`
+- `knowledge_ingest_url`
+- `knowledge_list_sources`
+- `knowledge_delete_source`
+- `knowledge_stats`
+- `get_knowledge_status`
 - `set_tools_enabled`
 
 Model/runtime commands:
@@ -321,16 +355,27 @@ Model/runtime commands:
 - `get_active_model`
 - `select_model`
 
-Events sent to the frontend:
+Web search command:
+
+- `get_web_search_status`
+
+Updater commands:
+
+- `check_for_app_update`
+- `install_app_update`
+- `restart_app`
+
+Events emitted from backend:
 
 - `chat-token`
 - `chat-done`
 - `chat-error`
 - `model-download-progress`
-- `activity`
 - `web-search-status`
 - `tool-call-start`
 - `tool-call-result`
+- `knowledge-status`
+- `knowledge-ingest-progress`
 
 ## Development Commands
 
@@ -339,9 +384,11 @@ From repo root:
 ```bash
 npm install
 npm run typecheck
-npm run tauri dev
-npm run build
 npm run test:run
+npm run python:test
+npm run tauri dev
+npm run tauri build
+npm run build
 npm run cargo:check
 npm run cargo:test
 npm run cargo:clippy
@@ -352,33 +399,33 @@ cargo test --manifest-path src-tauri/Cargo.toml
 
 Notes:
 
-- Use `npm run tauri dev` and `npm run tauri build` to stay aligned with the configured frontend hooks in [`src-tauri/tauri.conf.json`](src-tauri/tauri.conf.json)
+- use `npm run tauri dev` and `npm run tauri build` to stay aligned with frontend hooks in [`src-tauri/tauri.conf.json`](src-tauri/tauri.conf.json)
 - there is no root `Cargo.toml`; use `--manifest-path src-tauri/Cargo.toml`
-- `npm run check` is the default local validation flow; `npm run cargo:clippy` remains a separate command locally but is required in CI and release workflows
-- `npm run tauri build` is currently aligned with the managed runtime only on macOS Apple Silicon because `src-tauri/build.rs` rejects unsupported targets
-- web assist depends on Friday's managed embedded CPython runtime plus a pinned first-use SearXNG download
+- `npm run check` is the default local validation flow
+- `npm run cargo:clippy` is available as a separate local quality gate
+- `npm run tauri build` is currently aligned with managed runtime support only on macOS Apple Silicon
 
 ## Implementation Notes For Contributors
 
 - Changing a Tauri command requires updating `generate_handler!` in [`src-tauri/src/lib.rs`](src-tauri/src/lib.rs)
-- If a command payload changes, update the matching TypeScript types in [`src/types.ts`](src/types.ts)
-- Model/runtime asset changes usually touch [`src-tauri/build.rs`](src-tauri/build.rs), [`src-tauri/src/sidecar.rs`](src-tauri/src/sidecar.rs), [`src-tauri/src/python_runtime.rs`](src-tauri/src/python_runtime.rs), and bundled resources under `src-tauri/resources/`
-- LiteRT runtime integration changes typically span [`src-tauri/src/sidecar.rs`](src-tauri/src/sidecar.rs), [`src-tauri/src/models/python_worker.rs`](src-tauri/src/models/python_worker.rs), the worker script under [`src-tauri/resources/litert-python/macos-aarch64/worker/friday_litert_worker.py`](src-tauri/resources/litert-python/macos-aarch64/worker/friday_litert_worker.py), and sometimes [`src-tauri/python_tests/`](src-tauri/python_tests/)
+- If command payloads change, update matching TypeScript types in [`src/types.ts`](src/types.ts) and transport mapping in [`src/lib/tauri-chat-transport.ts`](src/lib/tauri-chat-transport.ts)
+- Runtime/model asset changes usually touch [`src-tauri/build.rs`](src-tauri/build.rs), [`src-tauri/src/runtime_manifest.rs`](src-tauri/src/runtime_manifest.rs), [`src-tauri/resources/litert-runtime/runtime-manifest.json`](src-tauri/resources/litert-runtime/runtime-manifest.json), and [`src-tauri/src/sidecar.rs`](src-tauri/src/sidecar.rs)
+- LiteRT worker integration changes typically span [`src-tauri/src/sidecar.rs`](src-tauri/src/sidecar.rs), [`src-tauri/src/models/python_worker.rs`](src-tauri/src/models/python_worker.rs), and [`src-tauri/resources/litert-python/macos-aarch64/worker/friday_litert_worker.py`](src-tauri/resources/litert-python/macos-aarch64/worker/friday_litert_worker.py)
 - Web-assist lifecycle changes usually touch [`src-tauri/src/searxng.rs`](src-tauri/src/searxng.rs), [`src-tauri/src/lib.rs`](src-tauri/src/lib.rs), [`src-tauri/src/models/python_worker.rs`](src-tauri/src/models/python_worker.rs), and [`src/types.ts`](src/types.ts)
+- Knowledge behavior lives in [`src-tauri/src/knowledge/mod.rs`](src-tauri/src/knowledge/mod.rs) with UI in [`src/components/KnowledgePanel.tsx`](src/components/KnowledgePanel.tsx)
 - Attachment-flow changes can require coordinated updates across [`src/components/ChatPane.tsx`](src/components/ChatPane.tsx), `read_file_context`, `save_temp_file`, and `delete_temp_file`
-- Assistant rendering changes usually touch [`src/components/MessageBubble.tsx`](src/components/MessageBubble.tsx) and [`src/styles.css`](src/styles.css)
-- If model capability metadata changes, update both Rust model structs and the mirrored TypeScript types/UI consumers
-- RAG behavior lives in [`src-tauri/src/rag/mod.rs`](src-tauri/src/rag/mod.rs)
-- CI and release behavior live in [`.github/workflows/ci.yml`](.github/workflows/ci.yml) and [`.github/workflows/release.yml`](.github/workflows/release.yml)
+- Assistant rendering and citation/reasoning presentation usually touch [`src/components/MessageBubble.tsx`](src/components/MessageBubble.tsx), [`src/lib/friday-chat.ts`](src/lib/friday-chat.ts), and [`src/styles.css`](src/styles.css)
+- Release automation currently lives in [`.github/workflows/release.yml`](.github/workflows/release.yml)
 
 ## Current Caveats
 
 - Managed runtime/build support is currently limited to `macos/aarch64`
-- RAG exists as backend/API functionality, but there is no dedicated frontend document-management flow yet
-- The app is local-first, not network-free; enabling web assist requires a first-use SearXNG download and allows outbound requests through SearXNG search plus direct page fetches
-- `temperature` and `top_p` are supported in the backend settings schema but not surfaced in the main settings UI
-- Tool execution status is visible in the UI, but detailed tool traces/results are not yet presented as a first-class conversation artifact
-- Local file tools remain disabled in the shipped chat flow
+- Knowledge model provisioning happens lazily on first use and can add noticeable first-run latency
+- The app is local-first, not network-free: web assist requires first-use SearXNG provisioning and performs outbound search/fetch requests; URL-based Knowledge ingest also fetches network content
+- `temperature` and `top_p` are supported in backend settings but not exposed in the current settings UI
+- Tool execution status is visible in the UI, but full raw tool traces are not shown as first-class conversation artifacts
+- Local file helper tools (`file_read`, `list_directory`) remain disabled in normal chat flows
+- Auto-update command surface exists, but update checks require a correctly configured updater signing key
 
 ## Preferred Mental Model
 
@@ -386,8 +433,8 @@ Friday today is best understood as:
 
 - a working local chat desktop app
 - with setup/bootstrap, model management, multimodal attachments, automatic chat titles, and multilingual reply controls in place
-- with optional thinking mode and optional web-assisted replies in the main chat flow
-- with rich Markdown and reasoning rendering in the conversation UI
-- with a Friday-managed localhost SearXNG process behind `web_search`
-- with always-on startup pre-warming and daemon lifecycle management already implemented
-- and with RAG infrastructure present but not yet fully productized in the UI
+- with optional per-turn web assist, Knowledge grounding, and thinking mode in the main chat flow
+- with rich Markdown/reasoning rendering and explicit source disclosure for Knowledge-grounded replies
+- with a Friday-managed localhost SearXNG process behind web assist
+- with managed runtime lifecycle (warmup, cancellation, idle shutdown) implemented
+- with a dedicated Knowledge workspace for file/URL ingestion and local retrieval-backed prompt augmentation
