@@ -52,7 +52,7 @@ function toErrorMessage(error: unknown) {
 }
 
 function unavailableWebSearchStatus(
-  message = "Local web search is unavailable.",
+  message = "Web search is unavailable.",
 ): WebSearchStatus {
   return {
     provider: "searxng",
@@ -78,9 +78,9 @@ function webSearchStartupMessage(status: WebSearchStatus | null): string {
   switch (status?.state) {
     case "needs_install":
     case "installing":
-      return "Preparing local web search…";
+      return "Preparing web search…";
     default:
-      return "Starting local web search…";
+      return "Starting web search…";
   }
 }
 
@@ -90,10 +90,10 @@ function generationStatusForWebSearchLifecycle(
   switch (state) {
     case "needs_install":
     case "installing":
-      return "Preparing local web search…";
+      return "Preparing web search…";
     case "stopped":
     case "starting":
-      return "Starting local web search…";
+      return "Starting web search…";
     case "ready":
       return "Friday is thinking…";
     default:
@@ -240,18 +240,18 @@ function canUseWebSearch(
 ) {
   return Boolean(
     backendStatus?.supports_native_tools &&
-      webSearchStatus?.available &&
-      webSearchStatus.state !== "unavailable" &&
-      webSearchStatus.state !== "config_error" &&
-      webSearchStatus.state !== "port_conflict",
+    webSearchStatus?.available &&
+    webSearchStatus.state !== "unavailable" &&
+    webSearchStatus.state !== "config_error" &&
+    webSearchStatus.state !== "port_conflict",
   );
 }
 
 function canUseKnowledge(status: KnowledgeStatus | null) {
   return Boolean(
     status &&
-      status.state !== "unavailable" &&
-      status.state !== "error",
+    status.state !== "unavailable" &&
+    status.state !== "error",
   );
 }
 

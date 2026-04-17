@@ -120,6 +120,5 @@ jobs:
 
             Download the macOS assets below for Apple Silicon.
           releaseCommitish: ${{ github.sha }}
+          includeUpdaterJson: true
           args: --target aarch64-apple-darwin
-          uploadWorkflowArtifacts: true
-          workflowArtifactNamePattern: daksha-[target]-[bundle]

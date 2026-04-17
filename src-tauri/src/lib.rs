@@ -40,7 +40,6 @@ const KNOWLEDGE_SEARCH_TIMEOUT: Duration = Duration::from_secs(8);
 const DEFAULT_SESSION_TITLE: &str = "New chat";
 const SESSION_TITLE_PREVIEW_CHARS: usize = 48;
 const MAIN_WINDOW_LABEL: &str = "main";
-const UPDATER_PUBKEY_PLACEHOLDER: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDYyNzQxOUEyNUM2MkUyMkIKUldRcjRtSmNvaGwwWXZZSXVwcUw4NVRjREIwaGhLRm04ZkV1Ujk0RWpqV25PR3lGNVRJcFdNMHoK";
 const UPDATER_CHECK_TIMEOUT: Duration = Duration::from_secs(4);
 
 static OBSERVABILITY_INIT: OnceLock<Result<(), String>> = OnceLock::new();
@@ -943,18 +942,22 @@ pub fn run() {
     });
 }
 
+fn updater_pubkey_is_configured(pubkey: Option<&str>) -> bool {
+    pubkey
+        .map(str::trim)
+        .map(|trimmed| !trimmed.is_empty())
+        .unwrap_or(false)
+}
+
 fn updater_pubkey_configured(app: &tauri::AppHandle) -> bool {
-    app.config()
+    updater_pubkey_is_configured(
+        app.config()
         .plugins
         .0
         .get("updater")
         .and_then(|updater| updater.get("pubkey"))
         .and_then(|pubkey| pubkey.as_str())
-        .map(|pubkey| {
-            let trimmed = pubkey.trim();
-            !trimmed.is_empty() && trimmed != UPDATER_PUBKEY_PLACEHOLDER
-        })
-        .unwrap_or(false)
+    )
 }
 
 fn build_stable_updater(app: &tauri::AppHandle) -> Result<tauri_plugin_updater::Updater, String> {
@@ -2898,6 +2901,14 @@ mod tests {
         let selected = choose_session(&sessions, Some("missing")).unwrap();
 
         assert_eq!(selected.id, "a");
+    }
+
+    #[test]
+    fn updater_pubkey_is_configured_accepts_any_non_empty_key() {
+        assert!(updater_pubkey_is_configured(Some("real-public-key")));
+        assert!(updater_pubkey_is_configured(Some("  real-public-key  ")));
+        assert!(!updater_pubkey_is_configured(Some("   ")));
+        assert!(!updater_pubkey_is_configured(None));
     }
 
     #[test]

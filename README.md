@@ -147,14 +147,14 @@ Current release behavior:
 - any pushed tag triggers the release workflow
 - the workflow builds and uploads the macOS Apple Silicon app assets to the GitHub release for that tag
 - GitHub release notes are generated automatically
-- tags containing `-` are marked as prereleases (for example: `v0.1.0-rc.1`)
+- tags containing `-` are marked as prereleases (for example: `v0.2.0-rc.1`)
 - releases can fall back to ad-hoc signing when Apple signing secrets are missing
 - Apple Silicon is the supported packaging target today because `src-tauri/build.rs` only vendors the managed runtime for `macos/aarch64`
 
 Accepted tag formats:
 
-- `v0.1.0`
-- `0.1.0`
+- `v0.2.0`
+- `0.2.0`
 
 ## Contributing
 

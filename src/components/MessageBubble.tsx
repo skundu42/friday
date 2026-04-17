@@ -46,12 +46,14 @@ interface Props {
   message: FridayRenderableMessage;
   showCopyActions?: boolean;
   isStreaming?: boolean;
+  streamingStatus?: string | null;
 }
 
 export function areMessageBubblePropsEqual(previous: Props, next: Props) {
   return (
     previous.showCopyActions === next.showCopyActions &&
     previous.isStreaming === next.isStreaming &&
+    previous.streamingStatus === next.streamingStatus &&
     previous.message.id === next.message.id &&
     previous.message.role === next.message.role &&
     previous.message.content === next.message.content &&
@@ -386,6 +388,7 @@ function MessageBubble({
   message,
   showCopyActions = true,
   isStreaming = false,
+  streamingStatus = null,
 }: Props) {
   const isUser = message.role === "user";
   const [isThinkingExpanded, setIsThinkingExpanded] = useState(isStreaming);
@@ -403,6 +406,10 @@ function MessageBubble({
     () => normalizeAssistantMarkdownForDisplay(rawThinkingContent),
     [rawThinkingContent],
   );
+  const hasRenderableAssistantContent =
+    assistantContent.length > 0 ||
+    thinkingContent.length > 0 ||
+    sources.length > 0;
   const markdownComponents = useMemo(
     () => ({
       code(
@@ -531,15 +538,24 @@ function MessageBubble({
           <Text type="secondary" className="message-card__eyebrow">
             Friday
           </Text>
-          <div className="markdown-body message-card__body">
-            <ReactMarkdown
-              remarkPlugins={MARKDOWN_REMARK_PLUGINS}
-              rehypePlugins={MARKDOWN_REHYPE_PLUGINS}
-              components={markdownComponents}
-            >
-              {assistantContent}
-            </ReactMarkdown>
-          </div>
+          {isStreaming && !hasRenderableAssistantContent ? (
+            <div className="message-card__loading" aria-live="polite">
+              <span className="chat-loading__dot message-card__loading-dot" />
+              <Text type="secondary">
+                {streamingStatus ?? "Friday is thinking…"}
+              </Text>
+            </div>
+          ) : (
+            <div className="markdown-body message-card__body">
+              <ReactMarkdown
+                remarkPlugins={MARKDOWN_REMARK_PLUGINS}
+                rehypePlugins={MARKDOWN_REHYPE_PLUGINS}
+                components={markdownComponents}
+              >
+                {assistantContent}
+              </ReactMarkdown>
+            </div>
+          )}
           {thinkingContent ? (
             <div className="message-reasoning">
               <Button

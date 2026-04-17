@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import SettingsPanel from "./SettingsPanel";
+import { APP_VERSION_LABEL } from "../lib/app-version";
 import type {
   AppSettings,
   AppSettingsInput,
@@ -124,6 +125,7 @@ describe("SettingsPanel", () => {
     await waitFor(() =>
       expect(screen.getByText("Gemma 4 E2B")).not.toBeNull(),
     );
+    expect(screen.getByText(APP_VERSION_LABEL)).not.toBeNull();
     expect(document.body.textContent).toContain("128K context");
     expect(screen.getByText("Downloaded")).not.toBeNull();
     expect(screen.queryByRole("button", { name: /save settings/i })).toBeNull();

@@ -18,6 +18,7 @@ import {
 } from "@ant-design/icons";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
+import { APP_VERSION_LABEL } from "../lib/app-version";
 import type {
   AppSettings,
   AppSettingsInput,
@@ -758,7 +759,7 @@ export default function SetupWizard({
             })}
           </div>
 
-          <Text className="setup-rail__footer">Friday v0.1.0</Text>
+          <Text className="setup-rail__footer">{APP_VERSION_LABEL}</Text>
         </div>
 
         <div className="setup-stage">{renderStep()}</div>

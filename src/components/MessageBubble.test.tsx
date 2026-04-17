@@ -359,6 +359,24 @@ print("Hello, world!")
     expect(screen.queryByLabelText("Copy code")).toBeNull();
   });
 
+  it("shows an in-place loading state while a streaming assistant bubble has no content yet", () => {
+    render(
+      <MessageBubble
+        message={{
+          id: "m2-loading",
+          role: "assistant",
+          content: "",
+        }}
+        isStreaming
+        showCopyActions={false}
+        streamingStatus="Searching the web…"
+      />,
+    );
+
+    expect(screen.getByText("Searching the web…")).not.toBeNull();
+    expect(screen.queryByLabelText("Copy reply")).toBeNull();
+  });
+
   it("renders legacy stored user attachment messages without exposing extracted text", () => {
     render(
       <MessageBubble
@@ -496,6 +514,7 @@ print("Hello, world!")
           },
           showCopyActions: false,
           isStreaming: true,
+          streamingStatus: "Thinking…",
         },
         {
           message: {
@@ -505,6 +524,32 @@ print("Hello, world!")
           },
           showCopyActions: false,
           isStreaming: false,
+          streamingStatus: null,
+        },
+      ),
+    ).toBe(false);
+
+    expect(
+      areMessageBubblePropsEqual(
+        {
+          message: {
+            id: "live-loading",
+            role: "assistant",
+            content: "",
+          },
+          showCopyActions: false,
+          isStreaming: true,
+          streamingStatus: "Searching the web…",
+        },
+        {
+          message: {
+            id: "live-loading",
+            role: "assistant",
+            content: "",
+          },
+          showCopyActions: false,
+          isStreaming: true,
+          streamingStatus: "Reading the page…",
         },
       ),
     ).toBe(false);
