@@ -107,6 +107,7 @@ describe("useAppController", () => {
   let bootstrapSettings: AppSettings;
   let sessions: Session[];
   let availableAppUpdate: AppUpdateInfo | null;
+  let onSendMessageInvoke: ((args: unknown) => void) | null;
 
   beforeEach(() => {
     listeners.clear();
@@ -120,6 +121,7 @@ describe("useAppController", () => {
     };
     bootstrapSettings = makeSettings();
     availableAppUpdate = null;
+    onSendMessageInvoke = null;
 
     invokeMock.mockImplementation(
       (
@@ -257,6 +259,7 @@ describe("useAppController", () => {
             } satisfies SessionSelectionResult);
           }
           case "send_message":
+            onSendMessageInvoke?.(args);
             return Promise.resolve(undefined);
           case "cancel_generation":
             return Promise.resolve(undefined);
@@ -548,6 +551,81 @@ describe("useAppController", () => {
         result.current.messages[result.current.messages.length - 1]?.content,
       ).toContain("backend unavailable"),
     );
+  });
+
+  it("refreshes session state after a failed request and preserves the error bubble", async () => {
+    onSendMessageInvoke = (args) => {
+      const request = (
+        args as
+          | {
+              request?: {
+                sessionId?: string;
+                message?: string;
+              };
+            }
+          | undefined
+      )?.request;
+      const sessionId = request?.sessionId ?? "session-a";
+      const message = request?.message ?? "Untitled";
+      const persistedUserMessage: Message = {
+        id: "user-persisted-1",
+        session_id: sessionId,
+        role: "user",
+        content: message,
+        content_parts: null,
+        model_used: null,
+        tokens_used: null,
+        latency_ms: null,
+        created_at: "2026-04-16T04:05:00Z",
+      };
+
+      sessionMessages[sessionId] = [persistedUserMessage];
+      sessions = sessions.map((session) =>
+        session.id === sessionId
+          ? {
+              ...session,
+              title: message,
+              updated_at: "2026-04-16T04:05:00Z",
+            }
+          : session,
+      );
+    };
+
+    const { result } = renderHook(() => useAppController());
+    await waitForBootstrap(result);
+
+    let sendPromise: Promise<void> | undefined;
+    act(() => {
+      sendPromise = result.current.sendMessage("Failure should still retitle");
+    });
+
+    await waitFor(() => expect(result.current.isGenerating).toBe(true));
+    act(() => {
+      emitEvent("chat-error", {
+        sessionId: "session-a",
+        message: "backend unavailable",
+      });
+    });
+
+    await act(async () => {
+      await sendPromise;
+    });
+
+    await waitFor(() =>
+      expect(result.current.activeSession?.title).toBe(
+        "Failure should still retitle",
+      ),
+    );
+    expect(result.current.sessions[0]?.title).toBe(
+      "Failure should still retitle",
+    );
+    expect(
+      result.current.messages.some(
+        (message) =>
+          message.role === "assistant" &&
+          message.content.includes("backend unavailable"),
+      ),
+    ).toBe(true);
   });
 
   it("tracks web-search lifecycle and tool activity status while streaming", async () => {

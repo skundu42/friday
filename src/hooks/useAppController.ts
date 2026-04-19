@@ -489,7 +489,6 @@ export function useAppController() {
 
     activeRequestSessionIdRef.current = null;
     activeRequestIdRef.current = null;
-    lastChatErrorRef.current = null;
   }, [appendAssistantError, chatError]);
 
   const resetGenerationUiState = () => {
@@ -1079,7 +1078,15 @@ export function useAppController() {
       await Promise.resolve();
 
       if (requestFailedRef.current) {
+        const errorMessage =
+          lastChatErrorRef.current ??
+          toErrorMessage(chatError) ??
+          "Something went wrong while processing your request.";
         requestFailedRef.current = false;
+        if (activeSessionRef.current?.id === sessionId) {
+          await refreshSessionState(sessionId);
+          appendAssistantError(sessionId, errorMessage);
+        }
         lastChatErrorRef.current = null;
         return;
       }

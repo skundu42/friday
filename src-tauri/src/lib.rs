@@ -16,10 +16,10 @@ use serde::{Deserialize, Serialize};
 use service_diagnostics::ServiceDiagnostics;
 use session::{Message, Session};
 use sidecar::SidecarManager;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::io::{Cursor, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -733,6 +733,17 @@ fn temp_dir_path(app: &tauri::AppHandle) -> std::path::PathBuf {
         .unwrap_or_else(|_| std::env::temp_dir().join("friday-temp"))
 }
 
+fn managed_audio_attachments_dir_path(app: &tauri::AppHandle) -> std::path::PathBuf {
+    app.path()
+        .app_data_dir()
+        .map(|p| p.join("attachments").join("audio"))
+        .unwrap_or_else(|_| {
+            std::env::temp_dir()
+                .join("friday-attachments")
+                .join("audio")
+        })
+}
+
 fn cleanup_temp_dir(temp_dir: &std::path::Path) -> Result<(), String> {
     if !temp_dir.exists() {
         return Ok(());
@@ -755,15 +766,26 @@ fn cleanup_temp_dir(temp_dir: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
-fn is_temp_managed_file(file_path: &std::path::Path, temp_dir: &std::path::Path) -> bool {
-    let Ok(canonical_temp_dir) = std::fs::canonicalize(temp_dir) else {
+fn is_managed_file_in_dir(file_path: &std::path::Path, root_dir: &std::path::Path) -> bool {
+    let Ok(canonical_root_dir) = std::fs::canonicalize(root_dir) else {
         return false;
     };
     let Ok(canonical_file_path) = std::fs::canonicalize(file_path) else {
         return false;
     };
 
-    canonical_file_path.starts_with(canonical_temp_dir)
+    canonical_file_path.starts_with(canonical_root_dir)
+}
+
+fn is_temp_managed_file(file_path: &std::path::Path, temp_dir: &std::path::Path) -> bool {
+    is_managed_file_in_dir(file_path, temp_dir)
+}
+
+fn is_managed_audio_attachment_file(
+    file_path: &std::path::Path,
+    managed_audio_dir: &std::path::Path,
+) -> bool {
+    is_managed_file_in_dir(file_path, managed_audio_dir)
 }
 
 fn normalized_attachment_name(file_path: &std::path::Path) -> String {
@@ -834,6 +856,171 @@ fn ensure_session_deletable(
     } else {
         Ok(())
     }
+}
+
+fn attachment_audio_path(attachment: &serde_json::Value, mime_type: &str) -> Option<String> {
+    if !mime_type.starts_with("audio/") {
+        return None;
+    }
+
+    attachment
+        .get("path")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| value.to_string())
+        .or_else(|| {
+            attachment
+                .get("content")
+                .and_then(|value| value.get("path"))
+                .and_then(|value| value.as_str())
+                .filter(|value| !value.trim().is_empty())
+                .map(|value| value.to_string())
+        })
+}
+
+fn rewrite_attachment_audio_path(attachment: &mut serde_json::Value, path: &str) {
+    if let Some(object) = attachment.as_object_mut() {
+        object.insert(
+            "path".to_string(),
+            serde_json::Value::String(path.to_string()),
+        );
+        if let Some(content) = object
+            .get_mut("content")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            content.insert(
+                "path".to_string(),
+                serde_json::Value::String(path.to_string()),
+            );
+        }
+    }
+}
+
+fn persist_temp_audio_attachments(
+    attachments: Option<&[serde_json::Value]>,
+    temp_dir: &Path,
+    managed_audio_dir: &Path,
+) -> Result<Option<Vec<serde_json::Value>>, String> {
+    let Some(attachments) = attachments else {
+        return Ok(None);
+    };
+
+    std::fs::create_dir_all(managed_audio_dir).map_err(|e| {
+        format!(
+            "Failed to create managed audio attachment directory {}: {}",
+            managed_audio_dir.display(),
+            e
+        )
+    })?;
+
+    let mut copied_paths = HashMap::<PathBuf, String>::new();
+    let mut normalized = Vec::with_capacity(attachments.len());
+
+    for attachment in attachments {
+        let mut next = attachment.clone();
+        let mime_type = attachment
+            .get("mimeType")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+
+        if let Some(source_path) = attachment_audio_path(attachment, mime_type) {
+            let source_path_buf = PathBuf::from(&source_path);
+            if is_temp_managed_file(&source_path_buf, temp_dir) {
+                if !source_path_buf.exists() {
+                    return Err(format!(
+                        "Audio attachment is no longer available: {}",
+                        source_path_buf.display()
+                    ));
+                }
+
+                let persisted_path = if let Some(existing) =
+                    copied_paths.get(&source_path_buf).cloned()
+                {
+                    existing
+                } else {
+                    let attachment_name = attachment
+                        .get("name")
+                        .and_then(|value| value.as_str())
+                        .or_else(|| source_path_buf.file_name().and_then(|value| value.to_str()))
+                        .unwrap_or("audio");
+                    let persisted_path = unique_temp_file_path(managed_audio_dir, attachment_name);
+                    std::fs::copy(&source_path_buf, &persisted_path).map_err(|e| {
+                        format!(
+                            "Failed to persist audio attachment {}: {}",
+                            source_path_buf.display(),
+                            e
+                        )
+                    })?;
+                    let persisted_path = persisted_path.to_string_lossy().to_string();
+                    copied_paths.insert(source_path_buf.clone(), persisted_path.clone());
+                    persisted_path
+                };
+
+                rewrite_attachment_audio_path(&mut next, &persisted_path);
+            }
+        }
+
+        normalized.push(next);
+    }
+
+    Ok(Some(normalized))
+}
+
+fn managed_audio_paths_for_message(
+    message: &Message,
+    managed_audio_dir: &Path,
+) -> BTreeSet<PathBuf> {
+    if message.role != "user" {
+        return BTreeSet::new();
+    }
+
+    let Ok(Some(content)) = normalized_user_chat_content(message) else {
+        return BTreeSet::new();
+    };
+
+    let models::ChatContent::Parts(parts) = content else {
+        return BTreeSet::new();
+    };
+
+    parts
+        .into_iter()
+        .filter_map(|part| match part {
+            models::ChatContentPart::Audio { path } => {
+                let path_buf = PathBuf::from(path);
+                is_managed_audio_attachment_file(&path_buf, managed_audio_dir).then_some(path_buf)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn delete_session_and_cleanup_managed_audio(
+    database: &storage::DatabaseHandle,
+    session_id: &str,
+    managed_audio_dir: &Path,
+) -> Result<(), String> {
+    let managed_audio_paths = database
+        .load_messages(session_id)?
+        .iter()
+        .flat_map(|message| managed_audio_paths_for_message(message, managed_audio_dir))
+        .collect::<BTreeSet<_>>();
+
+    database.delete_session(session_id)?;
+
+    for path in managed_audio_paths {
+        if let Err(error) = std::fs::remove_file(&path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(
+                    "Failed to remove managed audio attachment {} after deleting session {}: {}",
+                    path.display(),
+                    session_id,
+                    error
+                );
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1583,6 +1770,10 @@ async fn send_message(
 
     let _generation_guard = prepare_session_for_generation(state.inner(), &session_id)?;
     let _daemon_use = sidecar.begin_daemon_use();
+    let temp_dir = temp_dir_path(&app);
+    let managed_audio_dir = managed_audio_attachments_dir_path(&app);
+    let attachments =
+        persist_temp_audio_attachments(attachments.as_deref(), &temp_dir, &managed_audio_dir)?;
 
     let database = database_handle(&state)?;
     let app_settings = database.load_app_settings()?;
@@ -2354,10 +2545,19 @@ fn open_external_link(url: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn delete_session(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
+fn delete_session(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<(), String> {
     let active_generation_session = state.active_generation_session.lock().unwrap().clone();
     ensure_session_deletable(active_generation_session.as_deref(), &session_id)?;
-    database_handle(&state)?.delete_session(&session_id)?;
+    let managed_audio_dir = managed_audio_attachments_dir_path(&app);
+    delete_session_and_cleanup_managed_audio(
+        &database_handle(&state)?,
+        &session_id,
+        &managed_audio_dir,
+    )?;
 
     let _ = ensure_active_session(&state)?;
     Ok(())
@@ -3493,6 +3693,148 @@ mod tests {
             }
             other => panic!("expected multimodal prompt, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn persist_temp_audio_attachments_copies_only_temp_managed_audio() {
+        let root = std::env::temp_dir().join(format!("friday-managed-audio-{}", Uuid::new_v4()));
+        let temp_dir = root.join("temp");
+        let managed_audio_dir = root.join("attachments").join("audio");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        std::fs::create_dir_all(&managed_audio_dir).unwrap();
+
+        let temp_audio_path = temp_dir.join("recording.webm");
+        let external_audio_path = root.join("external.mp3");
+        std::fs::write(&temp_audio_path, b"temp-audio").unwrap();
+        std::fs::write(&external_audio_path, b"external-audio").unwrap();
+
+        let attachments = vec![
+            serde_json::json!({
+                "path": temp_audio_path.to_string_lossy().to_string(),
+                "name": "recording.webm",
+                "mimeType": "audio/webm",
+                "content": {
+                    "path": temp_audio_path.to_string_lossy().to_string()
+                }
+            }),
+            serde_json::json!({
+                "path": external_audio_path.to_string_lossy().to_string(),
+                "name": "external.mp3",
+                "mimeType": "audio/mpeg",
+                "content": {
+                    "path": external_audio_path.to_string_lossy().to_string()
+                }
+            }),
+            serde_json::json!({
+                "path": temp_dir.join("paper.pdf").to_string_lossy().to_string(),
+                "name": "paper.pdf",
+                "mimeType": "application/pdf",
+                "content": {
+                    "text": "source material"
+                }
+            }),
+        ];
+
+        let normalized =
+            persist_temp_audio_attachments(Some(&attachments), &temp_dir, &managed_audio_dir)
+                .unwrap()
+                .unwrap();
+
+        let persisted_temp_audio_path = normalized[0]
+            .get("path")
+            .and_then(|value| value.as_str())
+            .unwrap()
+            .to_string();
+        assert_ne!(persisted_temp_audio_path, temp_audio_path.to_string_lossy());
+        assert!(Path::new(&persisted_temp_audio_path).starts_with(&managed_audio_dir));
+        assert_eq!(
+            normalized[0]
+                .get("content")
+                .and_then(|value| value.get("path"))
+                .and_then(|value| value.as_str()),
+            Some(persisted_temp_audio_path.as_str())
+        );
+        assert_eq!(
+            std::fs::read(Path::new(&persisted_temp_audio_path)).unwrap(),
+            b"temp-audio"
+        );
+
+        assert_eq!(normalized[1], attachments[1]);
+        assert_eq!(normalized[2], attachments[2]);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn delete_session_and_cleanup_managed_audio_removes_only_files_owned_by_that_session() {
+        let conn = test_conn();
+        insert_session(&conn, "session-a");
+        insert_session(&conn, "session-b");
+
+        let root =
+            std::env::temp_dir().join(format!("friday-delete-session-audio-{}", Uuid::new_v4()));
+        let managed_audio_dir = root.join("attachments").join("audio");
+        std::fs::create_dir_all(&managed_audio_dir).unwrap();
+
+        let session_a_audio_path = managed_audio_dir.join("session-a.wav");
+        let session_b_audio_path = managed_audio_dir.join("session-b.wav");
+        let external_audio_path = root.join("external.wav");
+        std::fs::write(&session_a_audio_path, b"session-a").unwrap();
+        std::fs::write(&session_b_audio_path, b"session-b").unwrap();
+        std::fs::write(&external_audio_path, b"external").unwrap();
+
+        let session_a_parts = serde_json::json!([
+            { "type": "text", "text": "Summarize this audio." },
+            { "type": "audio", "path": session_a_audio_path.to_string_lossy().to_string() },
+            { "type": "audio", "path": external_audio_path.to_string_lossy().to_string() }
+        ])
+        .to_string();
+        let session_b_parts = serde_json::json!([
+            { "type": "audio", "path": session_b_audio_path.to_string_lossy().to_string() }
+        ])
+        .to_string();
+
+        insert_message_with_raw_parts(
+            &conn,
+            "session-a",
+            "msg-a",
+            "user",
+            "📎 session-a.wav",
+            Some(&session_a_parts),
+        );
+        insert_message_with_raw_parts(
+            &conn,
+            "session-b",
+            "msg-b",
+            "user",
+            "📎 session-b.wav",
+            Some(&session_b_parts),
+        );
+
+        let db_path = test_db_path(&conn);
+        drop(conn);
+
+        let database = storage::DatabaseHandle::new(&db_path).unwrap();
+        delete_session_and_cleanup_managed_audio(&database, "session-a", &managed_audio_dir)
+            .unwrap();
+
+        assert!(!session_a_audio_path.exists());
+        assert!(session_b_audio_path.exists());
+        assert!(external_audio_path.exists());
+        assert_eq!(
+            database
+                .list_sessions()
+                .unwrap()
+                .into_iter()
+                .map(|session| session.id)
+                .collect::<Vec<_>>(),
+            vec!["session-b".to_string()]
+        );
+
+        drop(database);
+        let _ = std::fs::remove_file(&external_audio_path);
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_file(&db_path);
     }
 
     #[test]

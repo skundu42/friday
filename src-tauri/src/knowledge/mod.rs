@@ -84,6 +84,10 @@ impl KnowledgeStatus {
             message: "Knowledge is ready.".to_string(),
         }
     }
+
+    fn is_error(&self) -> bool {
+        self.state == KnowledgeStatusState::Error
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -313,6 +317,31 @@ impl KnowledgeManager {
             .unwrap()
             .clone()
             .ok_or_else(|| "Knowledge storage is unavailable.".to_string())
+    }
+
+    fn steady_status(&self) -> KnowledgeStatus {
+        let Some(root_dir) = self.root_dir.lock().unwrap().clone() else {
+            return KnowledgeStatus::unavailable();
+        };
+
+        if root_dir.join("models").join(".provisioned").exists() {
+            KnowledgeStatus::ready()
+        } else {
+            KnowledgeStatus::needs_models()
+        }
+    }
+
+    fn restore_status_after_ingest_failure(&self, app: Option<&tauri::AppHandle>) {
+        let next_status = {
+            let current = self.status();
+            if current.is_error() {
+                current
+            } else {
+                self.steady_status()
+            }
+        };
+
+        self.set_status(app, next_status);
     }
 
     fn set_status(&self, app: Option<&tauri::AppHandle>, status: KnowledgeStatus) {
@@ -748,13 +777,7 @@ pub async fn ingest_file(
             Ok(result)
         }
         Err(error) => {
-            manager.set_status(
-                app,
-                KnowledgeStatus {
-                    state: KnowledgeStatusState::Error,
-                    message: error.clone(),
-                },
-            );
+            manager.restore_status_after_ingest_failure(app);
             emit_ingest_progress(
                 app,
                 None,
@@ -886,13 +909,7 @@ pub async fn ingest_url(
             Ok(result)
         }
         Err(error) => {
-            manager.set_status(
-                app,
-                KnowledgeStatus {
-                    state: KnowledgeStatusState::Error,
-                    message: error.clone(),
-                },
-            );
+            manager.restore_status_after_ingest_failure(app);
             emit_ingest_progress(
                 app,
                 None,
@@ -1483,14 +1500,14 @@ fn infer_file_modality(path: &Path) -> Option<KnowledgeModality> {
 
     if matches!(
         ext.as_str(),
-        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tif" | "tiff"
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg" | "tif" | "tiff"
     ) {
         return Some(KnowledgeModality::Image);
     }
 
     if matches!(
         ext.as_str(),
-        "wav" | "mp3" | "m4a" | "aac" | "flac" | "ogg" | "opus"
+        "wav" | "mp3" | "m4a" | "aac" | "flac" | "ogg" | "opus" | "webm"
     ) {
         return Some(KnowledgeModality::Audio);
     }
@@ -2625,6 +2642,78 @@ mod tests {
         assert!(!should_skip_knowledge_query(
             "Summarize the local product notes"
         ));
+    }
+
+    #[test]
+    fn infer_file_modality_includes_svg_and_webm() {
+        assert_eq!(
+            infer_file_modality(Path::new("/tmp/diagram.svg")),
+            Some(KnowledgeModality::Image)
+        );
+        assert_eq!(
+            infer_file_modality(Path::new("/tmp/recording.webm")),
+            Some(KnowledgeModality::Audio)
+        );
+    }
+
+    #[test]
+    fn restore_status_after_ingest_failure_returns_steady_status() {
+        let ready_root = temp_test_dir("knowledge-steady-ready");
+        std::fs::create_dir_all(ready_root.join("models")).expect("models dir");
+        std::fs::write(ready_root.join("models").join(".provisioned"), b"ready")
+            .expect("provisioned marker");
+
+        let ready_manager = KnowledgeManager::new();
+        ready_manager
+            .set_root_dir(ready_root)
+            .expect("knowledge root");
+        ready_manager.set_status(
+            None,
+            KnowledgeStatus {
+                state: KnowledgeStatusState::Indexing,
+                message: "Indexing".to_string(),
+            },
+        );
+        ready_manager.restore_status_after_ingest_failure(None);
+        assert_eq!(ready_manager.status().state, KnowledgeStatusState::Ready);
+
+        let needs_models_root = temp_test_dir("knowledge-steady-needs-models");
+        let needs_models_manager = KnowledgeManager::new();
+        needs_models_manager
+            .set_root_dir(needs_models_root)
+            .expect("knowledge root");
+        needs_models_manager.set_status(
+            None,
+            KnowledgeStatus {
+                state: KnowledgeStatusState::Indexing,
+                message: "Indexing".to_string(),
+            },
+        );
+        needs_models_manager.restore_status_after_ingest_failure(None);
+        assert_eq!(
+            needs_models_manager.status().state,
+            KnowledgeStatusState::NeedsModels
+        );
+    }
+
+    #[test]
+    fn restore_status_after_ingest_failure_preserves_error_state() {
+        let manager = KnowledgeManager::new();
+        manager.set_status(
+            None,
+            KnowledgeStatus {
+                state: KnowledgeStatusState::Error,
+                message: "Knowledge runtime failed to load.".to_string(),
+            },
+        );
+
+        manager.restore_status_after_ingest_failure(None);
+
+        assert_eq!(manager.status().state, KnowledgeStatusState::Error);
+        assert_eq!(
+            manager.status().message,
+            "Knowledge runtime failed to load.".to_string()
+        );
     }
 
     #[test]
