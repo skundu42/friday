@@ -99,7 +99,12 @@ export type ReplyLanguage =
   | "bengali"
   | "marathi"
   | "tamil"
-  | "punjabi";
+  | "punjabi"
+  | "spanish"
+  | "french"
+  | "mandarin"
+  | "portuguese"
+  | "japanese";
 
 export type ThemeMode = "light" | "dark";
 

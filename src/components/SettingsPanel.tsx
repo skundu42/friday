@@ -17,6 +17,10 @@ import {
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { APP_VERSION_LABEL } from "../lib/app-version";
+import {
+  REPLY_LANGUAGE_OPTIONS,
+  REPLY_LANGUAGE_SELECT_PROPS,
+} from "../lib/reply-languages";
 import type {
   AppSettings,
   AppSettingsInput,
@@ -37,14 +41,6 @@ const TOKEN_PRESET_LABELS = [
   "64K",
   "128K",
 ] as const;
-const REPLY_LANGUAGE_OPTIONS: { label: string; value: ReplyLanguage }[] = [
-  { label: "English", value: "english" },
-  { label: "Hindi", value: "hindi" },
-  { label: "Bengali", value: "bengali" },
-  { label: "Marathi", value: "marathi" },
-  { label: "Tamil", value: "tamil" },
-  { label: "Punjabi", value: "punjabi" },
-];
 function coerceMaxTokens(value: unknown) {
   if (typeof value !== "number" || !Number.isFinite(value)) {
     return 16384;
@@ -512,6 +508,7 @@ export default function SettingsPanel({
                   className="friday-compact-select"
                   style={{ width: 220, maxWidth: "100%" }}
                   options={REPLY_LANGUAGE_OPTIONS}
+                  {...REPLY_LANGUAGE_SELECT_PROPS}
                   loading={isSaving}
                 />
               </div>

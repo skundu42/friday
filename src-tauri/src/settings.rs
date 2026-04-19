@@ -9,6 +9,19 @@ pub const HIGH_RAM_DEFAULT_MAX_TOKENS: u32 = 16384;
 pub const MIN_MAX_TOKENS: u32 = 1024;
 pub const MAX_MAX_TOKENS: u32 = 131072;
 const DEFAULT_THEME_MODE: &str = "light";
+const SUPPORTED_REPLY_LANGUAGES: &[&str] = &[
+    "english",
+    "hindi",
+    "bengali",
+    "marathi",
+    "tamil",
+    "punjabi",
+    "spanish",
+    "french",
+    "mandarin",
+    "portuguese",
+    "japanese",
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
@@ -265,12 +278,13 @@ pub fn save_settings(conn: &Connection, input: &AppSettingsInput) -> Result<AppS
     load_settings(conn)
 }
 
+fn is_supported_reply_language(reply_language: &str) -> bool {
+    SUPPORTED_REPLY_LANGUAGES.contains(&reply_language)
+}
+
 fn validate_settings_input(input: &AppSettingsInput) -> Result<(), String> {
     let reply_language = input.chat.reply_language.as_str();
-    if !matches!(
-        reply_language,
-        "english" | "hindi" | "bengali" | "marathi" | "tamil" | "punjabi"
-    ) {
+    if !is_supported_reply_language(reply_language) {
         return Err(format!("Unsupported reply language: {}", reply_language));
     }
 
@@ -315,10 +329,7 @@ fn normalize_stored_settings(
         stored.theme_mode = defaults.theme_mode.clone();
     }
 
-    if !matches!(
-        stored.chat.reply_language.as_str(),
-        "english" | "hindi" | "bengali" | "marathi" | "tamil" | "punjabi"
-    ) {
+    if !is_supported_reply_language(stored.chat.reply_language.as_str()) {
         stored.chat.reply_language = defaults.chat.reply_language.clone();
     }
 
@@ -397,7 +408,7 @@ mod tests {
                 user_display_name: "Asha".to_string(),
                 theme_mode: "dark".to_string(),
                 chat: ChatSettingsInput {
-                    reply_language: "hindi".to_string(),
+                    reply_language: "spanish".to_string(),
                     max_tokens: 6144,
                     web_assist_enabled: true,
                     knowledge_enabled: true,
@@ -415,7 +426,7 @@ mod tests {
         assert!(!saved.auto_download_updates);
         assert_eq!(saved.user_display_name, "Asha");
         assert_eq!(saved.theme_mode, "dark");
-        assert_eq!(saved.chat.reply_language, "hindi");
+        assert_eq!(saved.chat.reply_language, "spanish");
         assert_eq!(saved.chat.max_tokens, 6144);
         assert!(saved.chat.web_assist_enabled);
         assert!(saved.chat.knowledge_enabled);
@@ -438,7 +449,7 @@ mod tests {
                 user_display_name: String::new(),
                 theme_mode: DEFAULT_THEME_MODE.to_string(),
                 chat: ChatSettingsInput {
-                    reply_language: "spanish".to_string(),
+                    reply_language: "korean".to_string(),
                     ..ChatSettingsInput::default()
                 },
             },
@@ -655,7 +666,7 @@ mod tests {
             "user_display_name": oversized_name,
             "theme_mode": "system",
             "chat": {
-                "reply_language": "spanish",
+                "reply_language": "mandarin",
                 "max_tokens": 0,
                 "web_assist_enabled": true,
                 "knowledge_enabled": true,
@@ -674,7 +685,7 @@ mod tests {
         assert!(loaded.auto_start_backend);
         assert!(loaded.auto_download_updates);
         assert_eq!(loaded.theme_mode, DEFAULT_THEME_MODE);
-        assert_eq!(loaded.chat.reply_language, "english");
+        assert_eq!(loaded.chat.reply_language, "mandarin");
         assert_eq!(loaded.chat.max_tokens, MIN_MAX_TOKENS);
         assert_eq!(loaded.chat.generation.temperature, Some(0.0));
         assert_eq!(loaded.chat.generation.top_p, Some(1.0));
@@ -687,6 +698,7 @@ mod tests {
             serde_json::from_str(&rewritten).expect("valid rewritten settings JSON");
         assert_eq!(persisted.auto_start_backend, true);
         assert!(persisted.auto_download_updates);
+        assert_eq!(persisted.chat.reply_language, "mandarin");
         assert_eq!(persisted.chat.max_tokens, MIN_MAX_TOKENS);
         assert_eq!(persisted.chat.generation.temperature, Some(0.0));
         assert_eq!(persisted.chat.generation.top_p, Some(1.0));

@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import SettingsPanel from "./SettingsPanel";
 import { APP_VERSION_LABEL } from "../lib/app-version";
+import { REPLY_LANGUAGE_OPTIONS } from "../lib/reply-languages";
 import type {
   AppSettings,
   AppSettingsInput,
@@ -311,6 +312,66 @@ describe("SettingsPanel", () => {
       chat: {
         reply_language: "hindi",
         max_tokens: 6144,
+        web_assist_enabled: false,
+        knowledge_enabled: false,
+        generation: {},
+      },
+    });
+  });
+
+  it("shows the expanded language list and persists a new searchable choice", async () => {
+    const onSaveSettings = vi.fn(async (input: AppSettingsInput) => ({
+      auto_start_backend: input.auto_start_backend,
+      auto_download_updates: input.auto_download_updates,
+      user_display_name: input.user_display_name,
+      theme_mode: input.theme_mode,
+      chat: input.chat,
+    }));
+
+    render(
+      <SettingsPanel
+        settings={settings}
+        backendStatus={backendStatus}
+        activeModelId={activeModel.id}
+        isSwitchingModel={false}
+        onModelChange={vi.fn(async () => undefined)}
+        isSaving={false}
+        isInstallingAppUpdate={false}
+        onSaveSettings={onSaveSettings}
+      />,
+    );
+
+    expect(REPLY_LANGUAGE_OPTIONS.map((option) => option.value)).toEqual([
+      "english",
+      "hindi",
+      "bengali",
+      "marathi",
+      "tamil",
+      "punjabi",
+      "spanish",
+      "french",
+      "mandarin",
+      "portuguese",
+      "japanese",
+    ]);
+
+    const replyLanguageSelectors = document.querySelectorAll(".ant-select-selector");
+    fireEvent.mouseDown(replyLanguageSelectors[0]!);
+
+    fireEvent.change(screen.getByRole("combobox"), {
+      target: { value: "japa" },
+    });
+    fireEvent.click(await screen.findByText("Japanese"));
+
+    await waitFor(() => expect(onSaveSettings).toHaveBeenCalledTimes(1));
+    expect(onSaveSettings.mock.calls[0]?.[0]).toEqual({
+      auto_start_backend: true,
+      auto_download_updates: true,
+      user_display_name: "Asha",
+      theme_mode: "light",
+      chat: {
+        reply_language: "japanese",
+        max_tokens: 4096,
         web_assist_enabled: false,
         knowledge_enabled: false,
         generation: {},

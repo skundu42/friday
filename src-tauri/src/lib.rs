@@ -3021,19 +3021,28 @@ fn native_web_tools_instruction() -> &'static str {
     "Web tools are available in this turn. For current, live, recent, or otherwise time-sensitive public facts, use the available web tools before answering. Carry forward relevant chat context when the latest user message is a short correction or follow-up, and search for the concrete subject instead of the meta wording of the correction. Do not finalize a time-sensitive public fact unless the tool output shows successful verification. If tool results are missing, inconclusive, or fail, say that verification was incomplete and avoid presenting uncertain current facts as certain."
 }
 
-fn system_prompt_for_preferences(
-    reply_language: &str,
-    thinking_enabled: bool,
-    web_tools_enabled: bool,
-) -> String {
-    let language_instruction = match reply_language {
+fn reply_language_instruction(reply_language: &str) -> &'static str {
+    match reply_language {
         "hindi" => "Reply in Hindi only. Do not switch to English unless the user explicitly asks for translation, quoted text, or code syntax that must stay in English.",
         "bengali" => "Reply in Bengali only. Do not switch to English unless the user explicitly asks for translation, quoted text, or code syntax that must stay in English.",
         "marathi" => "Reply in Marathi only. Do not switch to English unless the user explicitly asks for translation, quoted text, or code syntax that must stay in English.",
         "tamil" => "Reply in Tamil only. Do not switch to English unless the user explicitly asks for translation, quoted text, or code syntax that must stay in English.",
         "punjabi" => "Reply in Punjabi only. Do not switch to English unless the user explicitly asks for translation, quoted text, or code syntax that must stay in English.",
+        "spanish" => "Reply in Spanish only. Do not switch to English unless the user explicitly asks for translation, quoted text, or code syntax that must stay in English.",
+        "french" => "Reply in French only. Do not switch to English unless the user explicitly asks for translation, quoted text, or code syntax that must stay in English.",
+        "mandarin" => "Reply in Mandarin only. Do not switch to English unless the user explicitly asks for translation, quoted text, or code syntax that must stay in English.",
+        "portuguese" => "Reply in Portuguese only. Do not switch to English unless the user explicitly asks for translation, quoted text, or code syntax that must stay in English.",
+        "japanese" => "Reply in Japanese only. Do not switch to English unless the user explicitly asks for translation, quoted text, or code syntax that must stay in English.",
         _ => "Reply in English only. Do not switch to another language unless the user explicitly asks for translation, quoted text, or code syntax that must stay in that language.",
-    };
+    }
+}
+
+fn system_prompt_for_preferences(
+    reply_language: &str,
+    thinking_enabled: bool,
+    web_tools_enabled: bool,
+) -> String {
+    let language_instruction = reply_language_instruction(reply_language);
 
     let thinking_instruction = if thinking_enabled {
         "Reason privately before answering. Never expose chain-of-thought, internal scratchpad, instruction summaries, or step-by-step analysis in the visible answer. If a hidden reasoning channel is available, keep detailed reasoning there and provide only the final answer to the user unless they ask for more detail."
@@ -3333,6 +3342,11 @@ mod tests {
         let marathi = system_prompt_for_preferences("marathi", false, false);
         let tamil = system_prompt_for_preferences("tamil", false, false);
         let punjabi = system_prompt_for_preferences("punjabi", false, false);
+        let spanish = system_prompt_for_preferences("spanish", false, false);
+        let french = system_prompt_for_preferences("french", false, false);
+        let mandarin = system_prompt_for_preferences("mandarin", false, false);
+        let portuguese = system_prompt_for_preferences("portuguese", false, false);
+        let japanese = system_prompt_for_preferences("japanese", false, false);
 
         assert!(english.contains("Reply in English only"));
         assert!(hindi.contains("Reply in Hindi only"));
@@ -3340,6 +3354,11 @@ mod tests {
         assert!(marathi.contains("Reply in Marathi only"));
         assert!(tamil.contains("Reply in Tamil only"));
         assert!(punjabi.contains("Reply in Punjabi only"));
+        assert!(spanish.contains("Reply in Spanish only"));
+        assert!(french.contains("Reply in French only"));
+        assert!(mandarin.contains("Reply in Mandarin only"));
+        assert!(portuguese.contains("Reply in Portuguese only"));
+        assert!(japanese.contains("Reply in Japanese only"));
     }
 
     #[test]

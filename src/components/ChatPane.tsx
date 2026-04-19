@@ -16,6 +16,10 @@ import {
 } from "@ant-design/icons";
 import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
+import {
+  REPLY_LANGUAGE_OPTIONS,
+  REPLY_LANGUAGE_SELECT_PROPS,
+} from "../lib/reply-languages";
 import MessageBubble from "./MessageBubble";
 import AppLogo from "./AppLogo";
 import type {
@@ -171,15 +175,6 @@ interface ChatPaneProps {
   onToggleKnowledge?: () => void;
   onToggleThinking?: () => void;
 }
-
-const REPLY_LANGUAGE_OPTIONS: { label: string; value: ReplyLanguage }[] = [
-  { label: "English", value: "english" },
-  { label: "Hindi", value: "hindi" },
-  { label: "Bengali", value: "bengali" },
-  { label: "Marathi", value: "marathi" },
-  { label: "Tamil", value: "tamil" },
-  { label: "Punjabi", value: "punjabi" },
-];
 
 function formatFileSize(bytes: number): string {
   if (bytes === 0) return "0 B";
@@ -796,6 +791,7 @@ export default function ChatPane({
             value={replyLanguage}
             onChange={onLanguageChange}
             options={REPLY_LANGUAGE_OPTIONS}
+            {...REPLY_LANGUAGE_SELECT_PROPS}
             className="friday-compact-select"
             aria-label="Reply language"
           />
