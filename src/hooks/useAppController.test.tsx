@@ -86,6 +86,7 @@ function makeSettings(
 ): AppSettings {
   return {
     auto_start_backend: true,
+    auto_download_updates: true,
     user_display_name: "Asha",
     theme_mode: "light",
     chat: {
@@ -106,6 +107,7 @@ describe("useAppController", () => {
   let bootstrapSettings: AppSettings;
   let sessions: Session[];
   let availableAppUpdate: AppUpdateInfo | null;
+  let onSendMessageInvoke: ((args: unknown) => void) | null;
 
   beforeEach(() => {
     listeners.clear();
@@ -119,9 +121,13 @@ describe("useAppController", () => {
     };
     bootstrapSettings = makeSettings();
     availableAppUpdate = null;
+    onSendMessageInvoke = null;
 
     invokeMock.mockImplementation(
-      (command: string, args?: { sessionId?: string; input?: AppSettingsInput }) => {
+      (
+        command: string,
+        args?: { sessionId?: string; input?: AppSettingsInput },
+      ) => {
         switch (command) {
           case "bootstrap_app":
             return Promise.resolve({
@@ -134,6 +140,67 @@ describe("useAppController", () => {
               knowledgeStatus: {
                 state: "ready",
                 message: "Knowledge is ready.",
+              },
+              knowledgeStats: {
+                totalSources: 0,
+                readySources: 0,
+                totalTextChunks: 0,
+                totalImageAssets: 0,
+                storageDir: "/tmp/knowledge",
+              },
+              knowledgeSources: [],
+              availableModels: [
+                {
+                  id: "gemma-4-e2b-it",
+                  repo: "",
+                  filename: "gemma-4-e2b-it.litertlm",
+                  display_name: "Gemma 4 E2B",
+                  size_bytes: 2_400_000_000,
+                  size_gb: 2.4,
+                  min_ram_gb: 4,
+                  supports_image_input: true,
+                  supports_audio_input: true,
+                  supports_video_input: false,
+                  supports_thinking: true,
+                  max_context_tokens: 131072,
+                  recommended_max_output_tokens: 4096,
+                },
+              ],
+              downloadedModelIds: ["gemma-4-e2b-it"],
+              activeModel: {
+                id: "gemma-4-e2b-it",
+                repo: "",
+                filename: "gemma-4-e2b-it.litertlm",
+                display_name: "Gemma 4 E2B",
+                size_bytes: 2_400_000_000,
+                size_gb: 2.4,
+                min_ram_gb: 4,
+                supports_image_input: true,
+                supports_audio_input: true,
+                supports_video_input: false,
+                supports_thinking: true,
+                max_context_tokens: 131072,
+                recommended_max_output_tokens: 4096,
+              },
+              serviceDiagnostics: {
+                sidecar: {
+                  service: "sidecar",
+                  state: "ready",
+                  message: "LiteRT runtime is ready.",
+                  consecutiveFailures: 0,
+                },
+                searxng: {
+                  service: "searxng",
+                  state: "ready",
+                  message: "Local web search is ready.",
+                  consecutiveFailures: 0,
+                },
+                knowledge: {
+                  service: "knowledge",
+                  state: "ready",
+                  message: "Knowledge is ready.",
+                  consecutiveFailures: 0,
+                },
               },
             } satisfies BootstrapPayload);
           case "detect_backend":
@@ -184,19 +251,23 @@ describe("useAppController", () => {
             return Promise.resolve(sessions);
           case "select_session": {
             const sessionId = args?.sessionId ?? sessionA.id;
-            const session = sessions.find((item) => item.id === sessionId) ?? sessionA;
+            const session =
+              sessions.find((item) => item.id === sessionId) ?? sessionA;
             return Promise.resolve({
               session,
               messages: sessionMessages[sessionId] ?? [],
             } satisfies SessionSelectionResult);
           }
           case "send_message":
+            onSendMessageInvoke?.(args);
             return Promise.resolve(undefined);
           case "cancel_generation":
             return Promise.resolve(undefined);
           case "save_settings":
             bootstrapSettings = {
               auto_start_backend: args?.input?.auto_start_backend ?? true,
+              auto_download_updates:
+                args?.input?.auto_download_updates ?? true,
               user_display_name: args?.input?.user_display_name ?? "Asha",
               theme_mode: args?.input?.theme_mode ?? "light",
               chat: {
@@ -204,8 +275,7 @@ describe("useAppController", () => {
                 max_tokens: args?.input?.chat.max_tokens ?? 4096,
                 web_assist_enabled:
                   args?.input?.chat.web_assist_enabled ?? false,
-                knowledge_enabled:
-                  args?.input?.chat.knowledge_enabled ?? false,
+                knowledge_enabled: args?.input?.chat.knowledge_enabled ?? false,
                 generation: {
                   temperature: args?.input?.chat.generation.temperature,
                   top_p: args?.input?.chat.generation.top_p,
@@ -217,6 +287,12 @@ describe("useAppController", () => {
             return Promise.resolve(bootstrapSettings);
           case "check_for_app_update":
             return Promise.resolve(availableAppUpdate);
+          case "install_app_update":
+            return Promise.resolve({
+              installed: true,
+              version: availableAppUpdate?.version ?? "0.0.0",
+              restartRequired: true,
+            });
           default:
             return Promise.resolve(undefined);
         }
@@ -227,7 +303,9 @@ describe("useAppController", () => {
   async function waitForBootstrap(result: {
     current: ReturnType<typeof useAppController>;
   }) {
-    await waitFor(() => expect(result.current.activeSession?.id).toBe("session-a"));
+    await waitFor(() =>
+      expect(result.current.activeSession?.id).toBe("session-a"),
+    );
   }
 
   it("bootstraps and normalizes persisted assistant messages into UI-message content", async () => {
@@ -267,7 +345,33 @@ describe("useAppController", () => {
     });
   });
 
-  it("checks for stable app updates during bootstrap", async () => {
+  it("auto-installs updates during bootstrap when autodownload is enabled", async () => {
+    availableAppUpdate = {
+      version: "0.2.0",
+      currentVersion: "0.1.0",
+      notes: "Stable improvements",
+      publishedAt: "2026-04-16T10:00:00Z",
+    };
+
+    const { result } = renderHook(() => useAppController());
+    await waitForBootstrap(result);
+
+    await waitFor(() =>
+      expect(result.current.installedAppUpdateVersion).toBe("0.2.0"),
+    );
+    expect(result.current.availableAppUpdate).toBeNull();
+    expect(
+      invokeMock.mock.calls.some(
+        ([command]) => command === "install_app_update",
+      ),
+    ).toBe(true);
+  });
+
+  it("keeps updates manual during bootstrap when autodownload is disabled", async () => {
+    bootstrapSettings = {
+      ...makeSettings(),
+      auto_download_updates: false,
+    };
     availableAppUpdate = {
       version: "0.2.0",
       currentVersion: "0.1.0",
@@ -281,6 +385,70 @@ describe("useAppController", () => {
     await waitFor(() =>
       expect(result.current.availableAppUpdate?.version).toBe("0.2.0"),
     );
+    expect(result.current.installedAppUpdateVersion).toBeNull();
+    expect(
+      invokeMock.mock.calls.some(
+        ([command]) => command === "install_app_update",
+      ),
+    ).toBe(false);
+  });
+
+  it("auto-installs a known update when autodownload is enabled later", async () => {
+    bootstrapSettings = {
+      ...makeSettings(),
+      auto_download_updates: false,
+    };
+    availableAppUpdate = {
+      version: "0.2.0",
+      currentVersion: "0.1.0",
+      notes: "Stable improvements",
+      publishedAt: "2026-04-16T10:00:00Z",
+    };
+
+    const { result } = renderHook(() => useAppController());
+    await waitForBootstrap(result);
+    await waitFor(() =>
+      expect(result.current.availableAppUpdate?.version).toBe("0.2.0"),
+    );
+
+    await act(async () => {
+      await result.current.saveAppSettings({
+        auto_start_backend: true,
+        auto_download_updates: true,
+        user_display_name: "Asha",
+        theme_mode: "light",
+        chat: {
+          reply_language: "english",
+          max_tokens: 4096,
+          web_assist_enabled: false,
+          knowledge_enabled: false,
+          generation: {
+            thinking_enabled: true,
+          },
+        },
+      });
+    });
+
+    await waitFor(() =>
+      expect(result.current.installedAppUpdateVersion).toBe("0.2.0"),
+    );
+  });
+
+  it("checks for app updates only once during bootstrap", async () => {
+    const { result } = renderHook(() => useAppController());
+    await waitForBootstrap(result);
+
+    expect(
+      invokeMock.mock.calls.filter(([command]) => command === "check_for_app_update"),
+    ).toHaveLength(1);
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+
+    expect(
+      invokeMock.mock.calls.filter(([command]) => command === "check_for_app_update"),
+    ).toHaveLength(1);
   });
 
   it("refreshes the persisted session transcript after a streamed turn completes", async () => {
@@ -347,7 +515,9 @@ describe("useAppController", () => {
     });
 
     await waitFor(() =>
-      expect(result.current.messages[result.current.messages.length - 1]).toMatchObject({
+      expect(
+        result.current.messages[result.current.messages.length - 1],
+      ).toMatchObject({
         content: "Persisted final answer",
         content_parts: { thinking: "Persisted reasoning" },
       }),
@@ -381,6 +551,81 @@ describe("useAppController", () => {
         result.current.messages[result.current.messages.length - 1]?.content,
       ).toContain("backend unavailable"),
     );
+  });
+
+  it("refreshes session state after a failed request and preserves the error bubble", async () => {
+    onSendMessageInvoke = (args) => {
+      const request = (
+        args as
+          | {
+              request?: {
+                sessionId?: string;
+                message?: string;
+              };
+            }
+          | undefined
+      )?.request;
+      const sessionId = request?.sessionId ?? "session-a";
+      const message = request?.message ?? "Untitled";
+      const persistedUserMessage: Message = {
+        id: "user-persisted-1",
+        session_id: sessionId,
+        role: "user",
+        content: message,
+        content_parts: null,
+        model_used: null,
+        tokens_used: null,
+        latency_ms: null,
+        created_at: "2026-04-16T04:05:00Z",
+      };
+
+      sessionMessages[sessionId] = [persistedUserMessage];
+      sessions = sessions.map((session) =>
+        session.id === sessionId
+          ? {
+              ...session,
+              title: message,
+              updated_at: "2026-04-16T04:05:00Z",
+            }
+          : session,
+      );
+    };
+
+    const { result } = renderHook(() => useAppController());
+    await waitForBootstrap(result);
+
+    let sendPromise: Promise<void> | undefined;
+    act(() => {
+      sendPromise = result.current.sendMessage("Failure should still retitle");
+    });
+
+    await waitFor(() => expect(result.current.isGenerating).toBe(true));
+    act(() => {
+      emitEvent("chat-error", {
+        sessionId: "session-a",
+        message: "backend unavailable",
+      });
+    });
+
+    await act(async () => {
+      await sendPromise;
+    });
+
+    await waitFor(() =>
+      expect(result.current.activeSession?.title).toBe(
+        "Failure should still retitle",
+      ),
+    );
+    expect(result.current.sessions[0]?.title).toBe(
+      "Failure should still retitle",
+    );
+    expect(
+      result.current.messages.some(
+        (message) =>
+          message.role === "assistant" &&
+          message.content.includes("backend unavailable"),
+      ),
+    ).toBe(true);
   });
 
   it("tracks web-search lifecycle and tool activity status while streaming", async () => {
@@ -468,7 +713,8 @@ describe("useAppController", () => {
       invokeMock.mock.calls.some(
         ([command, args]) =>
           command === "select_session" &&
-          (args as { sessionId?: string } | undefined)?.sessionId === "session-b",
+          (args as { sessionId?: string } | undefined)?.sessionId ===
+            "session-b",
       ),
     ).toBe(false);
 

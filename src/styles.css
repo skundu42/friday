@@ -674,18 +674,50 @@ body[data-theme="dark"] .primary-action.ant-btn:disabled {
   padding-inline: 12px;
   border-radius: 999px;
   color: var(--friday-text-secondary);
+  font-weight: 600;
+  transition:
+    transform 140ms ease,
+    border-color 140ms ease,
+    background-color 140ms ease,
+    color 140ms ease,
+    box-shadow 140ms ease;
 }
 
-.composer-toggle.ant-btn.is-active {
-  border-color: rgba(47, 143, 87, 0.24);
-  background: var(--friday-green-soft);
-  color: var(--friday-green-strong);
+.composer-toggle.ant-btn .anticon {
+  transition:
+    color 140ms ease,
+    transform 140ms ease;
 }
 
-.composer-toggle.ant-btn.is-recording {
-  border-color: rgba(197, 77, 61, 0.24);
-  background: var(--friday-danger-soft);
-  color: var(--friday-danger);
+.composer-toggle.ant-btn:hover,
+.composer-toggle.ant-btn:focus-visible {
+  transform: translateY(-1px);
+}
+
+.composer-toggle.ant-btn:active {
+  transform: translateY(0);
+}
+
+.composer-toggle.ant-btn.is-active,
+.composer-toggle.ant-btn.is-active:hover,
+.composer-toggle.ant-btn.is-active:focus,
+.composer-toggle.ant-btn.is-active:focus-visible,
+.composer-toggle.ant-btn.is-active:active {
+  border-color: var(--friday-green-strong) !important;
+  background: linear-gradient(
+    135deg,
+    var(--friday-green) 0%,
+    var(--friday-green-strong) 100%
+  ) !important;
+  color: #fff !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.22),
+    0 0 0 3px color-mix(in srgb, var(--friday-green) 18%, transparent);
+}
+
+.composer-toggle.ant-btn.is-active .anticon {
+  color: #fff;
+  transform: scale(1.04);
 }
 
 .chat-composer__hint {

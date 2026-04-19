@@ -2,6 +2,7 @@ use crate::python_runtime::{
     bundled_resource_source_path, ensure_embedded_python_runtime, sha256_bytes_hex, sha256_file_hex,
 };
 use crate::runtime_manifest::embedded_runtime_manifest;
+use crate::service_diagnostics::{DiagnosticsTracker, ServiceDiagnostics, ServiceName};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
@@ -240,6 +241,7 @@ pub struct SearXNGManager {
     process: Arc<AsyncMutex<Option<ManagedSearxProcess>>>,
     startup_lock: AsyncMutex<()>,
     startup_in_progress: AtomicBool,
+    diagnostics: DiagnosticsTracker,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -265,7 +267,15 @@ impl SearXNGManager {
             process: Arc::new(AsyncMutex::new(None)),
             startup_lock: AsyncMutex::new(()),
             startup_in_progress: AtomicBool::new(false),
+            diagnostics: DiagnosticsTracker::new(
+                ServiceName::Searxng,
+                "Local web search is not configured yet.",
+            ),
         }
+    }
+
+    pub fn diagnostics(&self) -> ServiceDiagnostics {
+        self.diagnostics.current()
     }
 
     pub fn set_app_data_dir(&self, path: PathBuf) {
@@ -304,6 +314,7 @@ impl SearXNGManager {
     }
 
     pub async fn ensure_ready(&self) -> Result<WebSearchStatus, String> {
+        self.diagnostics.can_attempt(false)?;
         let _guard = self.startup_lock.lock().await;
         self.startup_in_progress.store(true, Ordering::SeqCst);
         let status_before = self.status.lock().unwrap().clone();
@@ -317,6 +328,9 @@ impl SearXNGManager {
                 Ok(status)
             }
             Err(error) => {
+                let log_tail = self.process_log_tail().await;
+                self.diagnostics
+                    .record_failure("ensure_ready", error.clone(), log_tail);
                 let status_after = self.status.lock().unwrap().clone();
                 if status_after == status_before {
                     let status = self.status_inner().await;
@@ -567,6 +581,13 @@ impl SearXNGManager {
     }
 
     fn set_status(&self, status: WebSearchStatus) {
+        match status.state {
+            WebSearchState::Ready => self.diagnostics.mark_ready(status.message.clone()),
+            WebSearchState::NeedsInstall | WebSearchState::Stopped => {
+                self.diagnostics.mark_unavailable(status.message.clone())
+            }
+            _ => {}
+        }
         let changed = {
             let mut guard = self.status.lock().unwrap();
             if *guard == status {
@@ -1170,6 +1191,18 @@ impl SearXNGManager {
             return stderr;
         }
         process.stdout_tail.lock().unwrap().trim().to_string()
+    }
+
+    async fn process_log_tail(&self) -> Option<String> {
+        let guard = self.process.lock().await;
+        guard.as_ref().and_then(|process| {
+            let tail = self.process_logs_from_guard(process);
+            if tail.is_empty() {
+                None
+            } else {
+                Some(tail)
+            }
+        })
     }
 
     async fn probe_readiness(&self) -> ReadinessProbe {

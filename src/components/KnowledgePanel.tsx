@@ -22,6 +22,7 @@ import {
 } from "@ant-design/icons";
 import { open } from "@tauri-apps/plugin-dialog";
 import type {
+  KnowledgeIngestProgress,
   KnowledgeSource,
   KnowledgeStats,
   KnowledgeStatus,
@@ -33,6 +34,7 @@ interface KnowledgePanelProps {
   status: KnowledgeStatus | null;
   sources: KnowledgeSource[];
   stats: KnowledgeStats | null;
+  ingestProgress: KnowledgeIngestProgress[];
   onRefresh: () => Promise<void> | void;
   onIngestFile: (filePath: string) => Promise<void> | void;
   onIngestUrl: (url: string) => Promise<void> | void;
@@ -84,6 +86,7 @@ export default function KnowledgePanel({
   status,
   sources,
   stats,
+  ingestProgress = [],
   onRefresh,
   onIngestFile,
   onIngestUrl,
@@ -120,9 +123,7 @@ export default function KnowledgePanel({
     try {
       await onRefresh();
     } catch (error) {
-      setActionError(
-        error instanceof Error ? error.message : String(error),
-      );
+      setActionError(error instanceof Error ? error.message : String(error));
     } finally {
       setIsRefreshing(false);
     }
@@ -143,9 +144,7 @@ export default function KnowledgePanel({
       const filePaths = Array.isArray(selected) ? selected : [selected];
       await Promise.all(filePaths.map((filePath) => onIngestFile(filePath)));
     } catch (error) {
-      setActionError(
-        error instanceof Error ? error.message : String(error),
-      );
+      setActionError(error instanceof Error ? error.message : String(error));
     } finally {
       setIsPickingFiles(false);
     }
@@ -163,9 +162,7 @@ export default function KnowledgePanel({
       await onIngestUrl(trimmedUrl);
       setUrl("");
     } catch (error) {
-      setActionError(
-        error instanceof Error ? error.message : String(error),
-      );
+      setActionError(error instanceof Error ? error.message : String(error));
     } finally {
       setIsSubmittingUrl(false);
     }
@@ -181,9 +178,7 @@ export default function KnowledgePanel({
     try {
       await onDeleteSource(sourceId);
     } catch (error) {
-      setActionError(
-        error instanceof Error ? error.message : String(error),
-      );
+      setActionError(error instanceof Error ? error.message : String(error));
     } finally {
       setDeletingSourceId(null);
     }
@@ -198,8 +193,8 @@ export default function KnowledgePanel({
               Knowledge
             </Title>
             <Paragraph className="settings-header__body">
-              Build a local library that Friday can use to ground replies against
-              your files and explicitly added URLs.
+              Build a local library that Friday can use to ground replies
+              against your files and explicitly added URLs.
             </Paragraph>
           </div>
 
@@ -274,14 +269,21 @@ export default function KnowledgePanel({
                             <Space size={8} wrap>
                               <Tag>{labelForModality(source.modality)}</Tag>
                               <Tag
-                                color={source.status === "ready" ? "success" : "default"}
+                                color={
+                                  source.status === "ready"
+                                    ? "success"
+                                    : "default"
+                                }
                               >
                                 {source.status}
                               </Tag>
                             </Space>
                           </div>
                           {source.error ? (
-                            <Text type="danger" className="knowledge-source-error">
+                            <Text
+                              type="danger"
+                              className="knowledge-source-error"
+                            >
                               {source.error}
                             </Text>
                           ) : null}
@@ -306,6 +308,55 @@ export default function KnowledgePanel({
               />
             )}
           </section>
+
+          {ingestProgress.length > 0 ? (
+            <section className="settings-section surface-card">
+              <div className="section-heading">
+                <div>
+                  <span className="section-heading__eyebrow">Progress</span>
+                  <h3 className="section-heading__title">
+                    Recent ingest activity
+                  </h3>
+                  <p className="section-heading__body">
+                    Friday streams ingest state per source so long-running
+                    indexing work stays visible.
+                  </p>
+                </div>
+              </div>
+
+              <List
+                dataSource={ingestProgress}
+                renderItem={(item) => (
+                  <List.Item>
+                    <div className="knowledge-source-row__body">
+                      <div className="knowledge-source-copy">
+                        <div className="knowledge-source-title">
+                          <span>{item.sourceId ?? item.locator}</span>
+                          <Space size={8} wrap>
+                            <Tag>{item.stage}</Tag>
+                            {typeof item.chunkCount === "number" ? (
+                              <Tag color="blue">{item.chunkCount} chunks</Tag>
+                            ) : null}
+                          </Space>
+                        </div>
+                        {item.message ? (
+                          <Text type="secondary">{item.message}</Text>
+                        ) : null}
+                        {item.error ? (
+                          <Text
+                            type="danger"
+                            className="knowledge-source-error"
+                          >
+                            {item.error}
+                          </Text>
+                        ) : null}
+                      </div>
+                    </div>
+                  </List.Item>
+                )}
+              />
+            </section>
+          ) : null}
         </div>
 
         <div className="knowledge-stack knowledge-stack--side">
@@ -334,7 +385,8 @@ export default function KnowledgePanel({
               <div className="knowledge-url-card">
                 <Text className="settings-field__label">Add a URL</Text>
                 <Text className="settings-field__body">
-                  Friday fetches content only for the explicit link you add here.
+                  Friday fetches content only for the explicit link you add
+                  here.
                 </Text>
                 <div className="knowledge-url-row">
                   <Input

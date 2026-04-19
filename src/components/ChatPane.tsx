@@ -16,6 +16,10 @@ import {
 } from "@ant-design/icons";
 import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
+import {
+  REPLY_LANGUAGE_OPTIONS,
+  REPLY_LANGUAGE_SELECT_PROPS,
+} from "../lib/reply-languages";
 import MessageBubble from "./MessageBubble";
 import AppLogo from "./AppLogo";
 import type {
@@ -128,7 +132,7 @@ function userFacingKnowledgeStatusMessage(
 
   switch (knowledgeStatus?.state) {
     case "needs_models":
-      return "Knowledge models will download on first use.";
+      return null;
     case "downloading_models":
       return knowledgeStatus.message || "Preparing Knowledge models…";
     case "indexing":
@@ -167,20 +171,10 @@ interface ChatPaneProps {
   knowledgeAvailable?: boolean;
   knowledgeStatus?: KnowledgeStatus | null;
   thinkingAvailable?: boolean;
-  audioInputAvailable?: boolean;
   onToggleWebSearch?: () => void;
   onToggleKnowledge?: () => void;
   onToggleThinking?: () => void;
 }
-
-const REPLY_LANGUAGE_OPTIONS: { label: string; value: ReplyLanguage }[] = [
-  { label: "English", value: "english" },
-  { label: "Hindi", value: "hindi" },
-  { label: "Bengali", value: "bengali" },
-  { label: "Marathi", value: "marathi" },
-  { label: "Tamil", value: "tamil" },
-  { label: "Punjabi", value: "punjabi" },
-];
 
 function formatFileSize(bytes: number): string {
   if (bytes === 0) return "0 B";
@@ -280,7 +274,6 @@ export default function ChatPane({
   knowledgeAvailable = false,
   knowledgeStatus = null,
   thinkingAvailable = false,
-  audioInputAvailable = false,
   onToggleWebSearch,
   onToggleKnowledge,
   onToggleThinking,
@@ -288,26 +281,12 @@ export default function ChatPane({
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<FileAttachment[]>([]);
   const [isDragOver, setIsDragOver] = useState(false);
-  const [isRecordingAudio, setIsRecordingAudio] = useState(false);
-  const [audioError, setAudioError] = useState<string | null>(null);
-  const [microphonePermission, setMicrophonePermission] = useState<
-    "granted" | "prompt" | "denied" | "unknown"
-  >("unknown");
   const chatEndRef = useRef<HTMLDivElement>(null);
   const dropZoneRef = useRef<HTMLDivElement>(null);
   const messagesViewportRef = useRef<HTMLDivElement>(null);
   const attachmentsRef = useRef<FileAttachment[]>([]);
   const shouldAutoScrollRef = useRef(true);
   const previousMessageCountRef = useRef(0);
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const recordingStreamRef = useRef<MediaStream | null>(null);
-  const recordingChunksRef = useRef<Blob[]>([]);
-  const isUnmountingRef = useRef(false);
-  const audioRecordingSupported =
-    audioInputAvailable &&
-    typeof navigator !== "undefined" &&
-    typeof MediaRecorder !== "undefined" &&
-    !!navigator.mediaDevices?.getUserMedia;
   const imageInputAvailable = backendStatus?.supports_image_input ?? false;
 
   const cleanupTempAttachments = useCallback(async (items: FileAttachment[]) => {
@@ -343,57 +322,9 @@ export default function ChatPane({
 
   useEffect(() => {
     return () => {
-      isUnmountingRef.current = true;
-      mediaRecorderRef.current?.stop();
-      recordingStreamRef.current?.getTracks().forEach((track) => track.stop());
       void cleanupTempAttachments(attachmentsRef.current);
     };
   }, [cleanupTempAttachments]);
-
-  useEffect(() => {
-    let cancelled = false;
-    let permissionStatus: PermissionStatus | null = null;
-
-    const syncPermissionState = async () => {
-      if (
-        typeof navigator === "undefined" ||
-        !("permissions" in navigator) ||
-        typeof navigator.permissions?.query !== "function"
-      ) {
-        return;
-      }
-
-      try {
-        const status = await navigator.permissions.query({
-          name: "microphone" as PermissionName,
-        });
-        permissionStatus = status;
-        if (!cancelled) {
-          setMicrophonePermission(
-            status.state as "granted" | "prompt" | "denied",
-          );
-        }
-        status.onchange = () => {
-          if (!cancelled) {
-            setMicrophonePermission(
-              status.state as "granted" | "prompt" | "denied",
-            );
-          }
-        };
-      } catch {
-        // Permissions API support is inconsistent; rely on getUserMedia fallback.
-      }
-    };
-
-    void syncPermissionState();
-
-    return () => {
-      cancelled = true;
-      if (permissionStatus) {
-        permissionStatus.onchange = null;
-      }
-    };
-  }, []);
 
   const handleSend = async () => {
     const text = input.trim();
@@ -767,118 +698,6 @@ export default function ChatPane({
     [loadBrowserFile],
   );
 
-  const bestRecordingMimeType = () => {
-    const candidates = [
-      "audio/webm;codecs=opus",
-      "audio/webm",
-      "audio/ogg;codecs=opus",
-      "audio/mp4",
-    ];
-    return (
-      candidates.find((candidate) => MediaRecorder.isTypeSupported(candidate)) ??
-      ""
-    );
-  };
-
-  const startRecording = (stream: MediaStream) => {
-    recordingStreamRef.current = stream;
-
-    const mimeType = bestRecordingMimeType();
-    const recorder = mimeType
-      ? new MediaRecorder(stream, { mimeType })
-      : new MediaRecorder(stream);
-
-    recordingChunksRef.current = [];
-    recorder.ondataavailable = (event) => {
-      if (event.data.size > 0) {
-        recordingChunksRef.current.push(event.data);
-      }
-    };
-    recorder.onerror = () => {
-      const activeStream = recordingStreamRef.current;
-      mediaRecorderRef.current = null;
-      recordingStreamRef.current = null;
-      recordingChunksRef.current = [];
-      activeStream?.getTracks().forEach((track) => track.stop());
-      if (!isUnmountingRef.current) {
-        setAudioError("Audio recording failed.");
-        setIsRecordingAudio(false);
-      }
-    };
-    recorder.onstop = () => {
-      const blob = new Blob(recordingChunksRef.current, {
-        type: recorder.mimeType || "audio/webm",
-      });
-      const streamToStop = recordingStreamRef.current;
-      mediaRecorderRef.current = null;
-      recordingStreamRef.current = null;
-      recordingChunksRef.current = [];
-      streamToStop?.getTracks().forEach((track) => track.stop());
-      if (!isUnmountingRef.current) {
-        setIsRecordingAudio(false);
-      }
-
-      if (isUnmountingRef.current || blob.size === 0) {
-        return;
-      }
-
-      const extension = blob.type.includes("mp4")
-        ? "m4a"
-        : blob.type.includes("ogg")
-          ? "ogg"
-          : "webm";
-      const file = new File([blob], `recording-${Date.now()}.${extension}`, {
-        type: blob.type || `audio/${extension}`,
-      });
-      void loadBrowserFile(file);
-    };
-
-    mediaRecorderRef.current = recorder;
-    recorder.start();
-    setIsRecordingAudio(true);
-  };
-
-  const handleToggleRecording = async () => {
-    if (isRecordingAudio) {
-      mediaRecorderRef.current?.stop();
-      return;
-    }
-
-    if (!audioRecordingSupported) {
-      setAudioError("Audio recording is not available in this environment.");
-      return;
-    }
-
-    try {
-      setAudioError(null);
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      setMicrophonePermission("granted");
-      startRecording(stream);
-    } catch (error) {
-      const errorName =
-        typeof error === "object" && error && "name" in error
-          ? String(error.name)
-          : "";
-
-      if (errorName === "NotAllowedError" || errorName === "PermissionDeniedError") {
-        setMicrophonePermission("denied");
-        setAudioError(
-          "Microphone access was denied. Enable Friday in System Settings > Privacy & Security > Microphone, then try again.",
-        );
-      } else if (errorName === "NotFoundError") {
-        setAudioError("No microphone was found on this device.");
-      } else {
-        setAudioError(
-          error instanceof Error ? error.message : "Audio recording failed.",
-        );
-      }
-      recordingStreamRef.current?.getTracks().forEach((track) => track.stop());
-      recordingStreamRef.current = null;
-      mediaRecorderRef.current = null;
-      setIsRecordingAudio(false);
-    }
-  };
-
   const handleMessagesScroll = useCallback(() => {
     const viewport = messagesViewportRef.current;
     if (!viewport) return;
@@ -972,6 +791,7 @@ export default function ChatPane({
             value={replyLanguage}
             onChange={onLanguageChange}
             options={REPLY_LANGUAGE_OPTIONS}
+            {...REPLY_LANGUAGE_SELECT_PROPS}
             className="friday-compact-select"
             aria-label="Reply language"
           />
@@ -1130,15 +950,6 @@ export default function ChatPane({
               >
                 Think
               </Button>
-              <Button
-                icon={<AudioOutlined />}
-                onClick={() => void handleToggleRecording()}
-                disabled={!audioRecordingSupported}
-                aria-pressed={isRecordingAudio}
-                className={`composer-toggle${isRecordingAudio ? " is-recording" : ""}`}
-              >
-                {isRecordingAudio ? "Recording" : "Voice"}
-              </Button>
             </div>
 
             <div className="chat-composer__hint">
@@ -1211,9 +1022,8 @@ export default function ChatPane({
             {capabilityStatus ? (
               <span className="is-danger">{capabilityStatus}</span>
             ) : null}
-            {audioError ? <span className="is-danger">{audioError}</span> : null}
             <span className="chat-composer__footnote-hint">
-              {isRecordingAudio ? "Recording…" : "Enter to send"}
+              Enter to send
             </span>
           </div>
         </div>

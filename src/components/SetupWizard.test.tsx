@@ -19,6 +19,7 @@ const listenMock = vi.mocked(listen);
 
 const settings: AppSettings = {
   auto_start_backend: true,
+  auto_download_updates: true,
   user_display_name: "Asha",
   theme_mode: "light",
   chat: {
@@ -85,6 +86,7 @@ describe("SetupWizard", () => {
         settings={settings}
         onSaveSettings={vi.fn(async (input) => ({
           auto_start_backend: input.auto_start_backend,
+          auto_download_updates: input.auto_download_updates,
           user_display_name: input.user_display_name,
           theme_mode: input.theme_mode,
           chat: input.chat,
@@ -129,6 +131,7 @@ describe("SetupWizard", () => {
         settings={settings}
         onSaveSettings={vi.fn(async (input) => ({
           auto_start_backend: input.auto_start_backend,
+          auto_download_updates: input.auto_download_updates,
           user_display_name: input.user_display_name,
           theme_mode: input.theme_mode,
           chat: input.chat,
@@ -168,6 +171,7 @@ describe("SetupWizard", () => {
         settings={settings}
         onSaveSettings={vi.fn(async (input) => ({
           auto_start_backend: input.auto_start_backend,
+          auto_download_updates: input.auto_download_updates,
           user_display_name: input.user_display_name,
           theme_mode: input.theme_mode,
           chat: input.chat,

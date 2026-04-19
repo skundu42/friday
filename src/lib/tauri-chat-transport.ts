@@ -70,8 +70,8 @@ function getDoneContentParts(
       ? ((value as { thinking?: string }).thinking ?? "")
       : "";
   const sources = Array.isArray((value as { sources?: unknown }).sources)
-    ? ((value as { sources?: FridayAssistantContentParts["sources"] }).sources ??
-      [])
+    ? ((value as { sources?: FridayAssistantContentParts["sources"] })
+        .sources ?? [])
     : [];
 
   if (!thinking && sources.length === 0) {
@@ -84,7 +84,10 @@ function getDoneContentParts(
   };
 }
 
-function appendDonePayloadDelta(current: string, authoritative: string): string {
+function appendDonePayloadDelta(
+  current: string,
+  authoritative: string,
+): string {
   if (!authoritative || authoritative === current) {
     return "";
   }
@@ -126,7 +129,8 @@ function getRequestMessage(
 function getRequestMessageText(message: FridayChatMessage): string {
   const text = getMessageText(message);
   const attachmentsSummary =
-    message.metadata?.attachmentsSummary ?? extractInlineAttachmentSummary(text);
+    message.metadata?.attachmentsSummary ??
+    extractInlineAttachmentSummary(text);
 
   if (attachmentsSummary.length === 0) {
     return text;
@@ -135,13 +139,13 @@ function getRequestMessageText(message: FridayChatMessage): string {
   return text.replace(/^📎\s+.+?(?:\n|$)/, "").trimStart();
 }
 
-function isFridayTransportBody(body: object | undefined): body is FridayTransportBody {
+function isFridayTransportBody(
+  body: object | undefined,
+): body is FridayTransportBody {
   return typeof body === "object" && body !== null;
 }
 
-export class TauriChatTransport
-  implements ChatTransport<FridayChatMessage>
-{
+export class TauriChatTransport implements ChatTransport<FridayChatMessage> {
   private readonly invokeFn: TauriInvoke;
   private readonly listenFn: TauriListen;
   private readonly generateId: () => string;
@@ -200,6 +204,7 @@ export class TauriChatTransport
         let textEnded = false;
         let reasoningStarted = false;
         let reasoningEnded = false;
+        let currentRequestId: string | null = null;
         let streamedText = "";
         let streamedReasoning = "";
         let currentMetadata: FridayMessageMetadata = {
@@ -317,7 +322,10 @@ export class TauriChatTransport
           }
 
           reasoningEnded = true;
-          streamController.enqueue({ type: "reasoning-end", id: reasoningPartId });
+          streamController.enqueue({
+            type: "reasoning-end",
+            id: reasoningPartId,
+          });
         };
 
         const finishStream = (payload?: ChatDonePayload) => {
@@ -378,8 +386,27 @@ export class TauriChatTransport
           closeStream();
         };
 
-        const isCurrentSessionEvent = (eventSessionId?: string | null) =>
-          typeof eventSessionId === "string" && eventSessionId === sessionId;
+        const matchesActiveRequest = (
+          eventSessionId?: string | null,
+          eventRequestId?: string | null,
+        ) => {
+          if (currentRequestId) {
+            return eventRequestId === currentRequestId;
+          }
+
+          if (
+            typeof eventSessionId !== "string" ||
+            eventSessionId !== sessionId
+          ) {
+            return false;
+          }
+
+          if (typeof eventRequestId === "string" && eventRequestId) {
+            currentRequestId = eventRequestId;
+          }
+
+          return true;
+        };
 
         const handleAbort = () => {
           closeStream();
@@ -387,16 +414,20 @@ export class TauriChatTransport
 
         if (abortSignal) {
           abortSignal.addEventListener("abort", handleAbort);
-          cleanupFns.push(() => abortSignal.removeEventListener("abort", handleAbort));
+          cleanupFns.push(() =>
+            abortSignal.removeEventListener("abort", handleAbort),
+          );
         }
 
-        const [
-          unlistenToken,
-          unlistenDone,
-          unlistenError,
-        ] = await Promise.all([
+        const [unlistenToken, unlistenDone, unlistenError] = await Promise.all([
           this.listenFn<ChatTokenPayload>("chat-token", (event) => {
-            if (!isCurrentSessionEvent(event.payload.sessionId) || isClosed) {
+            if (
+              !matchesActiveRequest(
+                event.payload.sessionId,
+                event.payload.requestId,
+              ) ||
+              isClosed
+            ) {
               return;
             }
 
@@ -407,7 +438,13 @@ export class TauriChatTransport
             }
           }),
           this.listenFn<ChatDonePayload>("chat-done", (event) => {
-            if (!isCurrentSessionEvent(event.payload.sessionId) || isClosed) {
+            if (
+              !matchesActiveRequest(
+                event.payload.sessionId,
+                event.payload.requestId,
+              ) ||
+              isClosed
+            ) {
               return;
             }
 
@@ -415,7 +452,10 @@ export class TauriChatTransport
           }),
           this.listenFn<string | ChatErrorPayload>("chat-error", (event) => {
             const payload = normalizeChatErrorPayload(event.payload);
-            if (!isCurrentSessionEvent(payload.sessionId) || isClosed) {
+            if (
+              !matchesActiveRequest(payload.sessionId, payload.requestId) ||
+              isClosed
+            ) {
               return;
             }
 

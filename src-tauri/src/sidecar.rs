@@ -8,8 +8,9 @@ use crate::runtime_manifest::{
     embedded_runtime_manifest, PlatformRuntimeSpec, RuntimeManifest, RuntimeModelSpec,
     RuntimePolicy,
 };
+use crate::service_diagnostics::{DiagnosticsTracker, ServiceDiagnostics, ServiceName};
 use crate::settings::GenerationRequestConfig;
-use crate::{persist_active_model_id, AppState};
+use crate::AppState;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -243,6 +244,7 @@ pub struct SidecarManager {
     selected_backend: Mutex<String>,
     downloaded_model_ids_cache: Mutex<Option<Vec<String>>>,
     web_search_base_url: Mutex<Option<String>>,
+    diagnostics: DiagnosticsTracker,
 }
 
 struct DaemonActivity {
@@ -301,6 +303,10 @@ impl SidecarManager {
             selected_backend: Mutex::new(default_backend().to_string()),
             downloaded_model_ids_cache: Mutex::new(None),
             web_search_base_url: Mutex::new(None),
+            diagnostics: DiagnosticsTracker::new(
+                ServiceName::Sidecar,
+                "LiteRT runtime is not ready yet.",
+            ),
         }
     }
 
@@ -335,6 +341,14 @@ impl SidecarManager {
     pub fn active_model(&self) -> &'static RuntimeModelSpec {
         let id = self.active_model_id.lock().unwrap().clone();
         find_model(&id).unwrap_or(default_model())
+    }
+
+    pub fn active_model_info(&self) -> ModelInfo {
+        model_info(self.active_model())
+    }
+
+    pub fn diagnostics(&self) -> ServiceDiagnostics {
+        self.diagnostics.current()
     }
 
     pub fn set_active_model_id(&self, model_id: &str) {
@@ -393,10 +407,7 @@ impl SidecarManager {
             .output()
             .map_err(|error| format!("Failed to probe downloaded models: {}", error))?;
         if !output.status.success() {
-            return Err(format!(
-                "Model probe failed with status {}",
-                output.status
-            ));
+            return Err(format!("Model probe failed with status {}", output.status));
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -614,6 +625,7 @@ impl SidecarManager {
     }
 
     pub async fn ensure_daemon(&self) -> Result<(), String> {
+        self.diagnostics.can_attempt(false)?;
         let _startup_guard = self.daemon_startup.lock().await;
 
         {
@@ -633,7 +645,14 @@ impl SidecarManager {
             }
         }
 
-        self.start_daemon_inner().await
+        match self.start_daemon_inner().await {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.diagnostics
+                    .record_failure("start_daemon", error.clone(), Some(error.clone()));
+                Err(error)
+            }
+        }
     }
 
     async fn spawn_daemon_worker(
@@ -719,6 +738,10 @@ impl SidecarManager {
         *guard = Some(client);
         self.daemon_activity.touch();
         *self.selected_backend.lock().unwrap() = selected_backend.to_string();
+        self.diagnostics.mark_ready(format!(
+            "LiteRT runtime is ready on {}.",
+            backend_label(selected_backend)
+        ));
         tracing::info!(
             "Friday LiteRT Python worker started on {}",
             backend_label(selected_backend)
@@ -801,6 +824,10 @@ impl SidecarManager {
     }
 
     pub fn set_status(&self, status: BackendStatus) {
+        match status.state.as_str() {
+            "connected" | "ready" => self.diagnostics.mark_ready(status.message.clone()),
+            _ => self.diagnostics.mark_unavailable(status.message.clone()),
+        }
         *self.status.lock().unwrap() = status;
     }
 
@@ -1745,7 +1772,10 @@ fn install_python_worker_launcher(
     Ok(())
 }
 
-fn validate_python_worker_launcher(python_binary: &Path, launcher_path: &Path) -> Result<(), String> {
+fn validate_python_worker_launcher(
+    python_binary: &Path,
+    launcher_path: &Path,
+) -> Result<(), String> {
     if !launcher_path.exists() {
         return Err(format!(
             "Friday Python worker launcher is missing at {}.",
@@ -1889,11 +1919,13 @@ pub async fn select_model(
 
     manager.cancel_inference().await?;
 
-    {
-        let guard = state.db.lock().unwrap();
-        let conn = guard.as_ref().ok_or("Database not initialized")?;
-        persist_active_model_id(conn, &model_id)?;
-    }
+    let database = state
+        .database
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| "Database not initialized".to_string())?;
+    database.save_active_model_id(&model_id)?;
 
     manager.set_active_model_id(&model_id);
     manager.invalidate_downloaded_model_ids_cache();

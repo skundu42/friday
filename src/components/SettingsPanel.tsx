@@ -6,6 +6,7 @@ import {
   Select,
   Slider,
   Space,
+  Switch,
   Tag,
   Typography,
 } from "antd";
@@ -16,6 +17,10 @@ import {
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { APP_VERSION_LABEL } from "../lib/app-version";
+import {
+  REPLY_LANGUAGE_OPTIONS,
+  REPLY_LANGUAGE_SELECT_PROPS,
+} from "../lib/reply-languages";
 import type {
   AppSettings,
   AppSettingsInput,
@@ -36,14 +41,6 @@ const TOKEN_PRESET_LABELS = [
   "64K",
   "128K",
 ] as const;
-const REPLY_LANGUAGE_OPTIONS: { label: string; value: ReplyLanguage }[] = [
-  { label: "English", value: "english" },
-  { label: "Hindi", value: "hindi" },
-  { label: "Bengali", value: "bengali" },
-  { label: "Marathi", value: "marathi" },
-  { label: "Tamil", value: "tamil" },
-  { label: "Punjabi", value: "punjabi" },
-];
 function coerceMaxTokens(value: unknown) {
   if (typeof value !== "number" || !Number.isFinite(value)) {
     return 16384;
@@ -86,6 +83,7 @@ interface SettingsPanelProps {
   isSwitchingModel: boolean;
   onModelChange: (modelId: string) => Promise<void>;
   isSaving: boolean;
+  isInstallingAppUpdate: boolean;
   onSaveSettings: (input: AppSettingsInput) => Promise<AppSettings>;
 }
 
@@ -310,9 +308,13 @@ export default function SettingsPanel({
   isSwitchingModel,
   onModelChange,
   isSaving,
+  isInstallingAppUpdate,
   onSaveSettings,
 }: SettingsPanelProps) {
   const [themeMode, setThemeMode] = useState(settings.theme_mode);
+  const [autoDownloadUpdates, setAutoDownloadUpdates] = useState(
+    settings.auto_download_updates,
+  );
   const [replyLanguage, setReplyLanguage] = useState(
     settings.chat.reply_language,
   );
@@ -328,10 +330,42 @@ export default function SettingsPanel({
 
   useEffect(() => {
     setThemeMode(settings.theme_mode);
+    setAutoDownloadUpdates(settings.auto_download_updates);
     setReplyLanguage(settings.chat.reply_language);
     setMaxTokens(settings.chat.max_tokens);
     setMaxTokenSliderIndex(findPresetIndex(settings.chat.max_tokens));
   }, [settings]);
+
+  const persistAutoDownloadUpdates = async (nextAutoDownloadUpdates: boolean) => {
+    if (nextAutoDownloadUpdates === settings.auto_download_updates) {
+      return;
+    }
+
+    const previousAutoDownloadUpdates = autoDownloadUpdates;
+    setAutoDownloadUpdates(nextAutoDownloadUpdates);
+    setError(null);
+
+    try {
+      await onSaveSettings({
+        auto_start_backend: settings.auto_start_backend,
+        auto_download_updates: nextAutoDownloadUpdates,
+        user_display_name: settings.user_display_name,
+        theme_mode: themeMode,
+        chat: {
+          reply_language: replyLanguage,
+          max_tokens: settings.chat.max_tokens,
+          web_assist_enabled: settings.chat.web_assist_enabled,
+          knowledge_enabled: settings.chat.knowledge_enabled,
+          generation: settings.chat.generation,
+        },
+      });
+    } catch (saveError) {
+      setAutoDownloadUpdates(previousAutoDownloadUpdates);
+      setError(
+        saveError instanceof Error ? saveError.message : String(saveError),
+      );
+    }
+  };
 
   const persistReplyLanguage = async (nextReplyLanguage: ReplyLanguage) => {
     if (nextReplyLanguage === settings.chat.reply_language) {
@@ -345,6 +379,7 @@ export default function SettingsPanel({
     try {
       await onSaveSettings({
         auto_start_backend: settings.auto_start_backend,
+        auto_download_updates: autoDownloadUpdates,
         user_display_name: settings.user_display_name,
         theme_mode: themeMode,
         chat: {
@@ -375,6 +410,7 @@ export default function SettingsPanel({
     try {
       await onSaveSettings({
         auto_start_backend: settings.auto_start_backend,
+        auto_download_updates: autoDownloadUpdates,
         user_display_name: settings.user_display_name,
         theme_mode: themeMode,
         chat: {
@@ -408,6 +444,7 @@ export default function SettingsPanel({
     try {
       await onSaveSettings({
         auto_start_backend: settings.auto_start_backend,
+        auto_download_updates: autoDownloadUpdates,
         user_display_name: settings.user_display_name,
         theme_mode: nextThemeMode,
         chat: {
@@ -471,6 +508,7 @@ export default function SettingsPanel({
                   className="friday-compact-select"
                   style={{ width: 220, maxWidth: "100%" }}
                   options={REPLY_LANGUAGE_OPTIONS}
+                  {...REPLY_LANGUAGE_SELECT_PROPS}
                   loading={isSaving}
                 />
               </div>
@@ -562,6 +600,26 @@ export default function SettingsPanel({
                 <div>
                   <h3 className="section-heading__title">System</h3>
                 </div>
+              </div>
+
+              <div className="settings-field">
+                <Text className="settings-field__label">Autodownload</Text>
+                <Text className="settings-field__body">
+                  Friday downloads new releases in the background and only asks
+                  you to restart when the update is ready.
+                  {isInstallingAppUpdate
+                    ? " Downloading the latest update now."
+                    : ""}
+                </Text>
+                <Switch
+                  aria-label="Autodownload"
+                  checked={autoDownloadUpdates}
+                  onChange={(checked) =>
+                    void persistAutoDownloadUpdates(checked)
+                  }
+                  loading={isSaving}
+                  disabled={isSaving || isInstallingAppUpdate}
+                />
               </div>
 
               <div className="settings-meta-grid">

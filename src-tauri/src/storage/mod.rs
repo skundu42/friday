@@ -1,30 +1,45 @@
+use crate::knowledge;
+use crate::session::{Message, Session};
+use crate::settings;
+use crate::{ACTIVE_MODEL_KEY, CURRENT_SESSION_KEY};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use std::any::Any;
 use std::path::Path;
+use std::sync::{mpsc, Arc};
+use std::time::Duration;
 
 const MIGRATION_001_ID: &str = "001_initial";
 const MIGRATION_003_ID: &str = "003_message_content_parts";
 const MIGRATION_004_ID: &str = "004_knowledge";
 const MIGRATION_005_ID: &str = "005_migration_ledger";
+const MIGRATION_006_ID: &str = "006_audit_log_v2";
 
 const MIGRATION_001_SQL: &str = include_str!("../../migrations/001_initial.sql");
 const MIGRATION_003_SQL: &str = include_str!("../../migrations/003_message_content_parts.sql");
 const MIGRATION_004_SQL: &str = include_str!("../../migrations/004_knowledge.sql");
 const MIGRATION_005_SQL: &str = include_str!("../../migrations/005_migration_ledger.sql");
+const MIGRATION_006_SQL: &str = include_str!("../../migrations/006_audit_log_v2.sql");
+const DB_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 type MigrationHook = fn(&Connection) -> Result<(), String>;
 
 /// Initialize SQLite database with migrations.
 pub fn init_db(db_path: &Path) -> Result<Connection, String> {
-    let conn = Connection::open(db_path).map_err(|e| format!("Failed to open database: {}", e))?;
-
-    // Enable WAL mode for better concurrent performance
-    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
-        .map_err(|e| format!("Failed to set pragmas: {}", e))?;
+    let conn = open_db_connection(db_path)?;
 
     // Run migrations
     run_migrations(&conn)?;
 
+    Ok(conn)
+}
+
+fn open_db_connection(db_path: &Path) -> Result<Connection, String> {
+    let conn = Connection::open(db_path).map_err(|e| format!("Failed to open database: {}", e))?;
+    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
+        .map_err(|e| format!("Failed to set pragmas: {}", e))?;
+    conn.busy_timeout(DB_BUSY_TIMEOUT)
+        .map_err(|e| format!("Failed to set busy timeout: {}", e))?;
     Ok(conn)
 }
 
@@ -45,6 +60,7 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
         MIGRATION_004_SQL,
         Some(archive_legacy_rag_tables),
     )?;
+    apply_migration(conn, MIGRATION_006_ID, MIGRATION_006_SQL, None)?;
 
     tracing::info!("Database migrations applied successfully");
     Ok(())
@@ -160,6 +176,21 @@ fn backfill_legacy_migration_ledger(conn: &Connection) -> Result<(), String> {
             conn,
             MIGRATION_004_ID,
             migration_checksum(MIGRATION_004_SQL),
+        )?;
+    }
+
+    if has_column(conn, "audit_log", "request_id")?
+        && has_column(conn, "audit_log", "failure_stage")?
+        && has_column(conn, "audit_log", "attachment_count")?
+        && has_column(conn, "audit_log", "cancelled")?
+        && has_column(conn, "audit_log", "web_assist_enabled")?
+        && has_column(conn, "audit_log", "knowledge_enabled")?
+        && has_column(conn, "audit_log", "thinking_enabled")?
+    {
+        record_migration_if_missing(
+            conn,
+            MIGRATION_006_ID,
+            migration_checksum(MIGRATION_006_SQL),
         )?;
     }
 
@@ -284,6 +315,483 @@ where
     save_string_setting(conn, key, &payload)
 }
 
+type WriteResponse = Result<Box<dyn Any + Send>, String>;
+type WriteOperation = Box<dyn FnOnce(&Connection) -> WriteResponse + Send + 'static>;
+
+struct WriteRequest {
+    operation: WriteOperation,
+    reply: mpsc::Sender<WriteResponse>,
+}
+
+#[derive(Clone)]
+pub struct DatabaseHandle {
+    db_path: Arc<std::path::PathBuf>,
+    write_tx: mpsc::Sender<WriteRequest>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PersistMessageJson {
+    pub session_id: String,
+    pub role: String,
+    pub content: String,
+    pub content_parts: Option<serde_json::Value>,
+    pub model_used: Option<String>,
+    pub latency_ms: Option<i64>,
+    pub title_source: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AuditLogStart {
+    pub request_id: String,
+    pub session_id: String,
+    pub user_message: String,
+    pub model_used: Option<String>,
+    pub attachment_count: usize,
+    pub web_assist_enabled: bool,
+    pub knowledge_enabled: bool,
+    pub thinking_enabled: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AuditLogFinish {
+    pub request_id: String,
+    pub model_used: Option<String>,
+    pub failure_stage: Option<String>,
+    pub tools_called: Option<String>,
+    pub web_urls_fetched: Option<String>,
+    pub rag_sources: Option<String>,
+    pub rag_chunks_retrieved: Option<i64>,
+    pub response_latency_ms: Option<i64>,
+    pub error: Option<String>,
+    pub cancelled: bool,
+}
+
+impl DatabaseHandle {
+    pub fn new(db_path: &Path) -> Result<Self, String> {
+        let writer_connection = init_db(db_path)?;
+        let (write_tx, write_rx) = mpsc::channel::<WriteRequest>();
+        std::thread::Builder::new()
+            .name("friday-db-writer".to_string())
+            .spawn(move || {
+                while let Ok(request) = write_rx.recv() {
+                    let result = (request.operation)(&writer_connection);
+                    let _ = request.reply.send(result);
+                }
+            })
+            .map_err(|error| format!("Failed to start database writer thread: {}", error))?;
+
+        Ok(Self {
+            db_path: Arc::new(db_path.to_path_buf()),
+            write_tx,
+        })
+    }
+
+    pub fn path(&self) -> &Path {
+        self.db_path.as_ref()
+    }
+
+    pub fn read<T, F>(&self, operation: F) -> Result<T, String>
+    where
+        F: FnOnce(&Connection) -> Result<T, String>,
+    {
+        let connection = open_db_connection(self.path())?;
+        operation(&connection)
+    }
+
+    pub fn write<T, F>(&self, operation: F) -> Result<T, String>
+    where
+        T: Send + 'static,
+        F: FnOnce(&Connection) -> Result<T, String> + Send + 'static,
+    {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.write_tx
+            .send(WriteRequest {
+                operation: Box::new(move |conn| {
+                    operation(conn).map(|value| Box::new(value) as Box<dyn Any + Send>)
+                }),
+                reply: reply_tx,
+            })
+            .map_err(|_| "Database writer is unavailable.".to_string())?;
+
+        match reply_rx
+            .recv()
+            .map_err(|_| "Database writer stopped unexpectedly.".to_string())?
+        {
+            Ok(value) => value
+                .downcast::<T>()
+                .map(|boxed| *boxed)
+                .map_err(|_| "Database writer returned an unexpected response type.".to_string()),
+            Err(error) => Err(error),
+        }
+    }
+
+    pub fn load_app_settings(&self) -> Result<settings::AppSettings, String> {
+        self.read(settings::load_settings)
+    }
+
+    pub fn save_app_settings(
+        &self,
+        input: settings::AppSettingsInput,
+    ) -> Result<settings::AppSettings, String> {
+        self.write(move |conn| settings::save_settings(conn, &input))
+    }
+
+    pub fn load_string_setting(&self, key: &str) -> Result<Option<String>, String> {
+        let key = key.to_string();
+        self.read(move |conn| load_string_setting(conn, &key))
+    }
+
+    pub fn save_string_setting(&self, key: &str, value: &str) -> Result<(), String> {
+        let key = key.to_string();
+        let value = value.to_string();
+        self.write(move |conn| save_string_setting(conn, &key, &value))
+    }
+
+    pub fn list_sessions(&self) -> Result<Vec<Session>, String> {
+        self.read(|conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, title, created_at, updated_at FROM sessions ORDER BY updated_at DESC",
+                )
+                .map_err(|e| e.to_string())?;
+            let sessions = stmt
+                .query_map([], session_from_row)
+                .map_err(|e| e.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?;
+            Ok(sessions)
+        })
+    }
+
+    pub fn load_session(&self, session_id: &str) -> Result<Session, String> {
+        let session_id = session_id.to_string();
+        self.read(move |conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, title, created_at, updated_at FROM sessions WHERE id = ?1 LIMIT 1",
+                )
+                .map_err(|e| e.to_string())?;
+
+            stmt.query_row([session_id], session_from_row)
+                .map_err(|error| match error {
+                    rusqlite::Error::QueryReturnedNoRows => "Session not found".to_string(),
+                    other => format!("Failed to load session: {}", other),
+                })
+        })
+    }
+
+    pub fn load_messages(&self, session_id: &str) -> Result<Vec<Message>, String> {
+        let session_id = session_id.to_string();
+        self.read(move |conn| {
+            let mut stmt = conn
+                .prepare("SELECT id, session_id, role, content, content_parts, model_used, tokens_used, latency_ms, created_at FROM messages WHERE session_id = ?1 ORDER BY created_at ASC")
+                .map_err(|e| e.to_string())?;
+            let messages = stmt
+                .query_map([session_id], message_from_row)
+                .map_err(|e| e.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?;
+            Ok(messages)
+        })
+    }
+
+    pub fn load_recent_messages(
+        &self,
+        session_id: &str,
+        limit: usize,
+    ) -> Result<Vec<Message>, String> {
+        let session_id = session_id.to_string();
+        self.read(move |conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, session_id, role, content, content_parts, model_used, tokens_used, latency_ms, created_at
+                     FROM messages
+                     WHERE session_id = ?1
+                     ORDER BY created_at DESC
+                     LIMIT ?2",
+                )
+                .map_err(|e| e.to_string())?;
+            let mut messages = stmt
+                .query_map(params![session_id, limit as i64], message_from_row)
+                .map_err(|e| e.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?;
+            messages.reverse();
+            Ok(messages)
+        })
+    }
+
+    pub fn create_session(&self, title: &str) -> Result<Session, String> {
+        let title = title.to_string();
+        self.write(move |conn| {
+            let id = uuid::Uuid::new_v4().to_string();
+            let now = chrono::Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT INTO sessions (id, title, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)",
+                params![id, title, now, now],
+            )
+            .map_err(|e| e.to_string())?;
+
+            Ok(Session {
+                id,
+                title,
+                created_at: now.clone(),
+                updated_at: now,
+            })
+        })
+    }
+
+    pub fn delete_session(&self, session_id: &str) -> Result<(), String> {
+        let session_id = session_id.to_string();
+        self.write(move |conn| {
+            conn.execute_batch("BEGIN IMMEDIATE TRANSACTION;")
+                .map_err(|e| e.to_string())?;
+
+            let result = (|| {
+                conn.execute(
+                    "DELETE FROM messages WHERE session_id = ?1",
+                    params![session_id],
+                )?;
+                conn.execute("DELETE FROM sessions WHERE id = ?1", params![session_id])?;
+                Ok::<(), rusqlite::Error>(())
+            })();
+
+            match result {
+                Ok(()) => conn.execute_batch("COMMIT;").map_err(|e| {
+                    let _ = conn.execute_batch("ROLLBACK;");
+                    e.to_string()
+                }),
+                Err(error) => {
+                    let _ = conn.execute_batch("ROLLBACK;");
+                    Err(error.to_string())
+                }
+            }
+        })
+    }
+
+    pub fn list_knowledge_sources(&self) -> Result<Vec<knowledge::KnowledgeSource>, String> {
+        self.read(knowledge::list_sources)
+    }
+
+    pub fn load_active_model_id(&self) -> Result<Option<String>, String> {
+        self.load_string_setting(ACTIVE_MODEL_KEY)
+    }
+
+    pub fn save_active_model_id(&self, model_id: &str) -> Result<(), String> {
+        self.save_string_setting(ACTIVE_MODEL_KEY, model_id)
+    }
+
+    pub fn load_current_session_id(&self) -> Result<Option<String>, String> {
+        self.load_string_setting(CURRENT_SESSION_KEY)
+    }
+
+    pub fn save_current_session_id(&self, session_id: &str) -> Result<(), String> {
+        self.save_string_setting(CURRENT_SESSION_KEY, session_id)
+    }
+
+    pub fn save_message_json(&self, params: PersistMessageJson) -> Result<(), String> {
+        self.write(move |conn| save_message_json_conn(conn, params))
+    }
+
+    pub fn insert_audit_log(&self, start: AuditLogStart) -> Result<(), String> {
+        self.write(move |conn| {
+            conn.execute(
+                "INSERT INTO audit_log (
+                    request_id,
+                    session_id,
+                    user_message,
+                    model_used,
+                    attachment_count,
+                    cancelled,
+                    web_assist_enabled,
+                    knowledge_enabled,
+                    thinking_enabled
+                ) VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?7, ?8)",
+                params![
+                    start.request_id,
+                    start.session_id,
+                    start.user_message,
+                    start.model_used,
+                    start.attachment_count as i64,
+                    bool_to_sqlite(start.web_assist_enabled),
+                    bool_to_sqlite(start.knowledge_enabled),
+                    bool_to_sqlite(start.thinking_enabled),
+                ],
+            )
+            .map_err(|e| format!("Failed to insert audit log row: {}", e))?;
+            Ok(())
+        })
+    }
+
+    pub fn finish_audit_log(&self, finish: AuditLogFinish) -> Result<(), String> {
+        self.write(move |conn| {
+            let updated_rows = conn
+                .execute(
+                    "UPDATE audit_log
+                     SET model_used = COALESCE(?2, model_used),
+                         failure_stage = ?3,
+                         tools_called = ?4,
+                         web_urls_fetched = ?5,
+                         rag_sources = ?6,
+                         rag_chunks_retrieved = ?7,
+                         response_latency_ms = ?8,
+                         error = ?9,
+                         cancelled = ?10
+                     WHERE request_id = ?1",
+                    params![
+                        finish.request_id,
+                        finish.model_used,
+                        finish.failure_stage,
+                        finish.tools_called,
+                        finish.web_urls_fetched,
+                        finish.rag_sources,
+                        finish.rag_chunks_retrieved,
+                        finish.response_latency_ms,
+                        finish.error,
+                        bool_to_sqlite(finish.cancelled),
+                    ],
+                )
+                .map_err(|e| format!("Failed to update audit log row: {}", e))?;
+
+            if updated_rows == 0 {
+                return Err("Audit log row not found for request.".to_string());
+            }
+
+            Ok(())
+        })
+    }
+}
+
+fn bool_to_sqlite(value: bool) -> i64 {
+    if value {
+        1
+    } else {
+        0
+    }
+}
+
+fn session_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
+    Ok(Session {
+        id: row.get(0)?,
+        title: row.get(1)?,
+        created_at: row.get(2)?,
+        updated_at: row.get(3)?,
+    })
+}
+
+fn parse_message_content_parts(raw: Option<String>) -> Option<serde_json::Value> {
+    match raw {
+        Some(payload) if !payload.trim().is_empty() => serde_json::from_str(&payload).ok(),
+        _ => None,
+    }
+}
+
+fn message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
+    let raw_parts: Option<String> = row.get(4)?;
+    Ok(Message {
+        id: row.get(0)?,
+        session_id: row.get(1)?,
+        role: row.get(2)?,
+        content: row.get(3)?,
+        content_parts: parse_message_content_parts(raw_parts),
+        model_used: row.get(5)?,
+        tokens_used: row.get(6)?,
+        latency_ms: row.get(7)?,
+        created_at: row.get(8)?,
+    })
+}
+
+fn session_title_candidate(input: &str) -> Option<String> {
+    let first_line = input.lines().map(str::trim).find(|line| !line.is_empty())?;
+    let collapsed = first_line.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        return None;
+    }
+
+    const SESSION_TITLE_PREVIEW_CHARS: usize = 48;
+    let title: String = collapsed
+        .chars()
+        .take(SESSION_TITLE_PREVIEW_CHARS)
+        .collect();
+    if collapsed.chars().count() > SESSION_TITLE_PREVIEW_CHARS {
+        Some(format!("{}…", title))
+    } else {
+        Some(title)
+    }
+}
+
+fn save_message_json_conn(conn: &Connection, params: PersistMessageJson) -> Result<(), String> {
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    let serialized_parts = params
+        .content_parts
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|e| format!("Failed to serialize message content parts: {}", e))?;
+    let title_candidate = if params.role == "user" {
+        session_title_candidate(
+            params
+                .title_source
+                .as_deref()
+                .unwrap_or(params.content.as_str()),
+        )
+    } else {
+        None
+    };
+
+    conn.execute_batch("BEGIN IMMEDIATE TRANSACTION;")
+        .map_err(|e| e.to_string())?;
+
+    let result = (|| {
+        conn.execute(
+            "INSERT INTO messages (id, session_id, role, content, content_parts, model_used, latency_ms, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                id,
+                params.session_id,
+                params.role,
+                params.content,
+                serialized_parts,
+                params.model_used,
+                params.latency_ms,
+                now
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+
+        if let Some(title) = title_candidate {
+            conn.execute(
+                "UPDATE sessions
+                 SET title = CASE WHEN title = ?1 THEN ?2 ELSE title END,
+                     updated_at = ?3
+                 WHERE id = ?4",
+                params!["New chat", title, now, params.session_id],
+            )
+            .map_err(|e| e.to_string())?;
+        } else {
+            conn.execute(
+                "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
+                params![now, params.session_id],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+
+        Ok::<(), String>(())
+    })();
+
+    match result {
+        Ok(()) => conn.execute_batch("COMMIT;").map_err(|e| {
+            let _ = conn.execute_batch("ROLLBACK;");
+            e.to_string()
+        }),
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK;");
+            Err(error)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -338,6 +846,7 @@ mod tests {
                 MIGRATION_003_ID.to_string(),
                 MIGRATION_004_ID.to_string(),
                 MIGRATION_005_ID.to_string(),
+                MIGRATION_006_ID.to_string(),
             ]
         );
     }
@@ -417,5 +926,45 @@ mod tests {
         let loaded: Option<TestSettings> = load_json_setting(&conn, "app_settings").unwrap();
 
         assert_eq!(loaded, Some(input));
+    }
+
+    #[test]
+    fn audit_log_v2_columns_are_available_after_migration() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        for column in [
+            "request_id",
+            "failure_stage",
+            "attachment_count",
+            "cancelled",
+            "web_assist_enabled",
+            "knowledge_enabled",
+            "thinking_enabled",
+        ] {
+            assert!(has_column(&conn, "audit_log", column).unwrap());
+        }
+    }
+
+    #[test]
+    fn database_handle_serializes_writes_and_supports_reads() {
+        let temp_root =
+            std::env::temp_dir().join(format!("friday-db-handle-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_root).unwrap();
+        let db_path = temp_root.join("friday.db");
+        let handle = DatabaseHandle::new(&db_path).unwrap();
+
+        handle
+            .save_string_setting("current_session", "session-a")
+            .unwrap();
+        let loaded = handle.load_string_setting("current_session").unwrap();
+        assert_eq!(loaded.as_deref(), Some("session-a"));
+
+        let created = handle.create_session("New chat").unwrap();
+        let sessions = handle.list_sessions().unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, created.id);
+
+        let _ = std::fs::remove_dir_all(temp_root);
     }
 }

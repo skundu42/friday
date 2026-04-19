@@ -65,6 +65,7 @@ function makeController() {
     messages: [],
     settings: {
       auto_start_backend: true,
+      auto_download_updates: true,
       user_display_name: "Asha",
       theme_mode: "light",
       chat: {
@@ -109,16 +110,16 @@ function makeController() {
       totalImageAssets: 1,
       storageDir: "/Users/sk/Library/Application Support/com.friday.app/rag",
     },
+    knowledgeIngestProgress: [],
     thinkingEnabled: true,
     availableAppUpdate: null as AppUpdateInfo | null,
-    installedAppUpdateVersion: null,
+    installedAppUpdateVersion: null as string | null,
     appUpdateError: null,
     isInstallingAppUpdate: false,
     nativeToolSupportAvailable: true,
     webSearchToggleAvailable: true,
     knowledgeToggleAvailable: true,
     thinkingAvailable: true,
-    audioInputAvailable: false,
     createSession: vi.fn(async () => undefined),
     selectSession: vi.fn(async () => undefined),
     deleteSession: vi.fn(async () => undefined),
@@ -127,6 +128,7 @@ function makeController() {
     refreshBackendStatus: vi.fn(async () => backendStatus),
     saveAppSettings: vi.fn(async (_input) => ({
       auto_start_backend: true,
+      auto_download_updates: true,
       user_display_name: "Asha",
       theme_mode: "light",
       chat: {
@@ -172,15 +174,17 @@ describe("App", () => {
     invokeMock.mockReset();
     listenMock.mockReset();
     listenMock.mockResolvedValue(() => {});
-    vi.spyOn(window, "getComputedStyle").mockImplementation((element, pseudoElt) => {
-      if (pseudoElt) {
-        return {
-          getPropertyValue: () => "",
-          overflow: "auto",
-        } as unknown as CSSStyleDeclaration;
-      }
-      return nativeGetComputedStyle(element);
-    });
+    vi.spyOn(window, "getComputedStyle").mockImplementation(
+      (element, pseudoElt) => {
+        if (pseudoElt) {
+          return {
+            getPropertyValue: () => "",
+            overflow: "auto",
+          } as unknown as CSSStyleDeclaration;
+        }
+        return nativeGetComputedStyle(element);
+      },
+    );
     invokeMock.mockImplementation((command: string) => {
       if (command === "get_setup_status") {
         return Promise.resolve({
@@ -232,7 +236,9 @@ describe("App", () => {
     render(<App />);
 
     await waitFor(() =>
-      expect(screen.getByPlaceholderText("Ask Friday anything...")).not.toBeNull(),
+      expect(
+        screen.getByPlaceholderText("Ask Friday anything..."),
+      ).not.toBeNull(),
     );
 
     fireEvent.click(screen.getByRole("button", { name: /open settings/i }));
@@ -246,14 +252,13 @@ describe("App", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /back to chat/i }));
 
-    await waitFor(() =>
-      expect(queryChatInput()).not.toBeNull(),
-    );
+    await waitFor(() => expect(queryChatInput()).not.toBeNull());
     expect(controller.refreshBackendStatus).toHaveBeenCalledTimes(1);
   });
 
   it("shows update banner and triggers install action", async () => {
     const controller = makeController();
+    controller.settings.auto_download_updates = false;
     controller.availableAppUpdate = {
       version: "0.2.0",
       currentVersion: "0.1.0",
@@ -267,8 +272,48 @@ describe("App", () => {
       expect(screen.getByText("Update available: v0.2.0")).not.toBeNull(),
     );
 
-    fireEvent.click(screen.getByRole("button", { name: /download & install/i }));
+    fireEvent.click(
+      screen.getByRole("button", { name: /download & install/i }),
+    );
     expect(controller.installAppUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  it("hides the manual update banner when autodownload is enabled", async () => {
+    const controller = makeController();
+    controller.availableAppUpdate = {
+      version: "0.2.0",
+      currentVersion: "0.1.0",
+      notes: "Stable improvements",
+    };
+    controllerState.mockReturnValue(controller);
+
+    render(<App />);
+
+    await waitFor(() =>
+      expect(
+        screen.getByPlaceholderText("Ask Friday anything..."),
+      ).not.toBeNull(),
+    );
+
+    expect(screen.queryByText("Update available: v0.2.0")).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: /download & install/i }),
+    ).toBeNull();
+  });
+
+  it("shows the restart banner with the updated CTA copy", async () => {
+    const controller = makeController();
+    controller.installedAppUpdateVersion = "0.2.0";
+    controllerState.mockReturnValue(controller);
+
+    render(<App />);
+
+    await waitFor(() =>
+      expect(screen.getByText("Update installed: v0.2.0")).not.toBeNull(),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /restart to update/i }));
+    expect(controller.restartApp).toHaveBeenCalledTimes(1);
   });
 
   it("shows setup wizard when setup status load fails", async () => {
@@ -287,7 +332,9 @@ describe("App", () => {
 
     render(<App />);
 
-    await waitFor(() => expect(screen.getByText("Welcome to Friday")).not.toBeNull());
+    await waitFor(() =>
+      expect(screen.getByText("Welcome to Friday")).not.toBeNull(),
+    );
   });
 
   it("opens the Knowledge page from the sidebar", async () => {
@@ -297,13 +344,17 @@ describe("App", () => {
     render(<App />);
 
     await waitFor(() =>
-      expect(screen.getByPlaceholderText("Ask Friday anything...")).not.toBeNull(),
+      expect(
+        screen.getByPlaceholderText("Ask Friday anything..."),
+      ).not.toBeNull(),
     );
 
     fireEvent.click(screen.getByRole("button", { name: /open knowledge/i }));
 
     await waitFor(() =>
-      expect(screen.getByRole("heading", { level: 3, name: "Knowledge" })).not.toBeNull(),
+      expect(
+        screen.getByRole("heading", { level: 3, name: "Knowledge" }),
+      ).not.toBeNull(),
     );
     expect(controller.refreshKnowledge).toHaveBeenCalledTimes(1);
     expect(queryChatInput()).toBeNull();
@@ -319,7 +370,9 @@ describe("App", () => {
     render(<App />);
 
     await waitFor(() =>
-      expect(screen.getByPlaceholderText("Ask Friday anything...")).not.toBeNull(),
+      expect(
+        screen.getByPlaceholderText("Ask Friday anything..."),
+      ).not.toBeNull(),
     );
 
     fireEvent.click(screen.getByRole("button", { name: /open settings/i }));
@@ -333,9 +386,7 @@ describe("App", () => {
 
     fireEvent.click(screen.getAllByRole("button", { name: /new chat/i })[0]!);
 
-    await waitFor(() =>
-      expect(queryChatInput()).not.toBeNull(),
-    );
+    await waitFor(() => expect(queryChatInput()).not.toBeNull());
     expect(controller.createSession).toHaveBeenCalledTimes(1);
     expect(controller.refreshBackendStatus).toHaveBeenCalledTimes(1);
   });
@@ -345,14 +396,18 @@ describe("App", () => {
     render(<App />);
 
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: /show sidebar/i })).not.toBeNull(),
+      expect(
+        screen.getByRole("button", { name: /show sidebar/i }),
+      ).not.toBeNull(),
     );
 
     expect(screen.queryByText("Recent Chats")).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: /show sidebar/i }));
 
-    await waitFor(() => expect(screen.getByText("Recent Chats")).not.toBeNull());
+    await waitFor(() =>
+      expect(screen.getByText("Recent Chats")).not.toBeNull(),
+    );
   });
 
   it("renders a blocking error panel when bootstrap fails", async () => {
@@ -378,7 +433,9 @@ describe("App", () => {
     const { unmount } = render(<App />);
 
     await waitFor(() =>
-      expect(screen.getByPlaceholderText("Ask Friday anything...")).not.toBeNull(),
+      expect(
+        screen.getByPlaceholderText("Ask Friday anything..."),
+      ).not.toBeNull(),
     );
 
     expect(document.body.dataset.theme).toBe("dark");

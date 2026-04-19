@@ -49,7 +49,7 @@ export default function Sidebar({
             Friday
           </Title>
           <Text className="sidebar-brand__subtitle">
-            Local-first desktop assistant
+            Your Personal AI Assistant
           </Text>
         </div>
       </div>
