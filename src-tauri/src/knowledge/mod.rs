@@ -74,7 +74,7 @@ impl KnowledgeStatus {
     fn needs_models() -> Self {
         Self {
             state: KnowledgeStatusState::NeedsModels,
-            message: "Knowledge models will download on first use.".to_string(),
+            message: "Knowledge is available.".to_string(),
         }
     }
 

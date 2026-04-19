@@ -79,7 +79,6 @@ describe("ChatPane", () => {
     expect(screen.getByText("New chat")).not.toBeNull();
     expect(screen.getByText("Friday · Connected")).not.toBeNull();
     expect(screen.getByRole("button", { name: "Attach files" })).not.toBeNull();
-    expect(screen.getByRole("button", { name: /Voice/ })).not.toBeNull();
     expect(screen.getByRole("button", { name: /Web/ })).not.toBeNull();
     expect(screen.getByRole("button", { name: /Knowledge/ })).not.toBeNull();
     expect(screen.getByRole("button", { name: /Think/ })).not.toBeNull();
@@ -156,6 +155,18 @@ describe("ChatPane", () => {
     });
 
     expect(screen.getByText("Preparing Knowledge text runtime.")).not.toBeNull();
+  });
+
+  it("does not surface the first-use Knowledge models hint", () => {
+    renderChatPane({
+      knowledgeEnabled: true,
+      knowledgeStatus: {
+        state: "needs_models",
+        message: "Knowledge is available.",
+      },
+    });
+
+    expect(screen.queryByText("Knowledge is available.")).toBeNull();
   });
 
   it("surfaces broken web search configuration directly in the composer", () => {

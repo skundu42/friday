@@ -1382,7 +1382,6 @@ export function useAppController() {
     nativeToolSupportAvailable: backendStatus?.supports_native_tools ?? false,
     webSearchToggleAvailable,
     knowledgeToggleAvailable,
-    audioInputAvailable: backendStatus?.supports_audio_input ?? false,
     thinkingAvailable: backendStatus?.supports_thinking ?? false,
     toggleWebSearch,
     toggleKnowledge,

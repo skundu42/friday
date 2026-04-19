@@ -378,7 +378,6 @@ export default function App() {
                       knowledgeStatus={controller.knowledgeStatus}
                       thinkingAvailable={controller.thinkingAvailable}
                       knowledgeAvailable={controller.knowledgeToggleAvailable}
-                      audioInputAvailable={controller.audioInputAvailable}
                       onToggleWebSearch={() => controller.toggleWebSearch()}
                       onToggleKnowledge={() => controller.toggleKnowledge()}
                       onToggleThinking={() => controller.toggleThinking()}

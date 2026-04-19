@@ -120,7 +120,6 @@ function makeController() {
     webSearchToggleAvailable: true,
     knowledgeToggleAvailable: true,
     thinkingAvailable: true,
-    audioInputAvailable: false,
     createSession: vi.fn(async () => undefined),
     selectSession: vi.fn(async () => undefined),
     deleteSession: vi.fn(async () => undefined),
