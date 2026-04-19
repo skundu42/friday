@@ -22,6 +22,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 
 const settings: AppSettings = {
   auto_start_backend: true,
+  auto_download_updates: true,
   user_display_name: "Asha",
   theme_mode: "light",
   chat: {
@@ -108,8 +109,10 @@ describe("SettingsPanel", () => {
         isSwitchingModel={false}
         onModelChange={vi.fn(async () => undefined)}
         isSaving={false}
+        isInstallingAppUpdate={false}
         onSaveSettings={async (input) => ({
           auto_start_backend: input.auto_start_backend,
+          auto_download_updates: input.auto_download_updates,
           user_display_name: input.user_display_name,
           theme_mode: input.theme_mode,
           chat: input.chat,
@@ -155,8 +158,10 @@ describe("SettingsPanel", () => {
         isSwitchingModel={false}
         onModelChange={vi.fn(async () => undefined)}
         isSaving={false}
+        isInstallingAppUpdate={false}
         onSaveSettings={async (input) => ({
           auto_start_backend: input.auto_start_backend,
+          auto_download_updates: input.auto_download_updates,
           user_display_name: input.user_display_name,
           theme_mode: input.theme_mode,
           chat: input.chat,
@@ -212,8 +217,10 @@ describe("SettingsPanel", () => {
         isSwitchingModel={false}
         onModelChange={vi.fn(async () => undefined)}
         isSaving={false}
+        isInstallingAppUpdate={false}
         onSaveSettings={async (input) => ({
           auto_start_backend: input.auto_start_backend,
+          auto_download_updates: input.auto_download_updates,
           user_display_name: input.user_display_name,
           theme_mode: input.theme_mode,
           chat: input.chat,
@@ -255,6 +262,7 @@ describe("SettingsPanel", () => {
   it("preserves a custom max token value when only the reply language changes", async () => {
     const customSettings: AppSettings = {
       auto_start_backend: true,
+      auto_download_updates: true,
       user_display_name: "Asha",
       theme_mode: "light",
       chat: {
@@ -267,6 +275,7 @@ describe("SettingsPanel", () => {
     };
     const onSaveSettings = vi.fn(async (input: AppSettingsInput) => ({
       auto_start_backend: input.auto_start_backend,
+      auto_download_updates: input.auto_download_updates,
       user_display_name: input.user_display_name,
       theme_mode: input.theme_mode,
       chat: input.chat,
@@ -280,6 +289,7 @@ describe("SettingsPanel", () => {
         isSwitchingModel={false}
         onModelChange={vi.fn(async () => undefined)}
         isSaving={false}
+        isInstallingAppUpdate={false}
         onSaveSettings={onSaveSettings}
       />,
     );
@@ -295,6 +305,7 @@ describe("SettingsPanel", () => {
     await waitFor(() => expect(onSaveSettings).toHaveBeenCalledTimes(1));
     expect(onSaveSettings.mock.calls[0]?.[0]).toEqual({
       auto_start_backend: true,
+      auto_download_updates: true,
       user_display_name: "Asha",
       theme_mode: "light",
       chat: {
@@ -310,6 +321,7 @@ describe("SettingsPanel", () => {
   it("persists the selected appearance mode", async () => {
     const onSaveSettings = vi.fn(async (input: AppSettingsInput) => ({
       auto_start_backend: input.auto_start_backend,
+      auto_download_updates: input.auto_download_updates,
       user_display_name: input.user_display_name,
       theme_mode: input.theme_mode,
       chat: input.chat,
@@ -323,6 +335,7 @@ describe("SettingsPanel", () => {
         isSwitchingModel={false}
         onModelChange={vi.fn(async () => undefined)}
         isSaving={false}
+        isInstallingAppUpdate={false}
         onSaveSettings={onSaveSettings}
       />,
     );
@@ -332,6 +345,7 @@ describe("SettingsPanel", () => {
     await waitFor(() => expect(onSaveSettings).toHaveBeenCalledTimes(1));
     expect(onSaveSettings.mock.calls[0]?.[0]).toEqual({
       auto_start_backend: true,
+      auto_download_updates: true,
       user_display_name: "Asha",
       theme_mode: "dark",
       chat: {
@@ -365,8 +379,10 @@ describe("SettingsPanel", () => {
         isSwitchingModel={false}
         onModelChange={onModelChange}
         isSaving={false}
+        isInstallingAppUpdate={false}
         onSaveSettings={async (input) => ({
           auto_start_backend: input.auto_start_backend,
+          auto_download_updates: input.auto_download_updates,
           user_display_name: input.user_display_name,
           theme_mode: input.theme_mode,
           chat: input.chat,
@@ -386,5 +402,78 @@ describe("SettingsPanel", () => {
     expect(
       invokeMock.mock.calls.some(([command]) => command === "select_model"),
     ).toBe(false);
+  });
+
+  it("persists the autodownload toggle", async () => {
+    const onSaveSettings = vi.fn(async (input: AppSettingsInput) => ({
+      auto_start_backend: input.auto_start_backend,
+      auto_download_updates: input.auto_download_updates,
+      user_display_name: input.user_display_name,
+      theme_mode: input.theme_mode,
+      chat: input.chat,
+    }));
+
+    render(
+      <SettingsPanel
+        settings={settings}
+        backendStatus={backendStatus}
+        activeModelId={activeModel.id}
+        isSwitchingModel={false}
+        onModelChange={vi.fn(async () => undefined)}
+        isSaving={false}
+        isInstallingAppUpdate={false}
+        onSaveSettings={onSaveSettings}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("switch", { name: "Autodownload" }));
+
+    await waitFor(() => expect(onSaveSettings).toHaveBeenCalledTimes(1));
+    expect(onSaveSettings.mock.calls[0]?.[0]).toEqual({
+      auto_start_backend: true,
+      auto_download_updates: false,
+      user_display_name: "Asha",
+      theme_mode: "light",
+      chat: {
+        reply_language: "english",
+        max_tokens: 4096,
+        web_assist_enabled: false,
+        knowledge_enabled: false,
+        generation: {},
+      },
+    });
+  });
+
+  it("disables autodownload while an update is being installed", async () => {
+    render(
+      <SettingsPanel
+        settings={settings}
+        backendStatus={backendStatus}
+        activeModelId={activeModel.id}
+        isSwitchingModel={false}
+        onModelChange={vi.fn(async () => undefined)}
+        isSaving={false}
+        isInstallingAppUpdate
+        onSaveSettings={vi.fn(async (input) => ({
+          auto_start_backend: input.auto_start_backend,
+          auto_download_updates: input.auto_download_updates,
+          user_display_name: input.user_display_name,
+          theme_mode: input.theme_mode,
+          chat: input.chat,
+        }))}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByText("Gemma 4 E2B")).not.toBeNull(),
+    );
+    expect(
+      screen.getByText(/downloading the latest update now/i),
+    ).not.toBeNull();
+    expect(
+      (
+        screen.getByRole("switch", { name: "Autodownload" }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(true);
   });
 });

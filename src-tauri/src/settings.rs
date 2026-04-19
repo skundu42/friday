@@ -14,6 +14,7 @@ const DEFAULT_THEME_MODE: &str = "light";
 #[serde(default)]
 pub struct AppSettings {
     pub auto_start_backend: bool,
+    pub auto_download_updates: bool,
     pub user_display_name: String,
     pub theme_mode: String,
     pub chat: ChatSettings,
@@ -33,6 +34,7 @@ pub struct ChatSettings {
 #[serde(default)]
 pub struct AppSettingsInput {
     pub auto_start_backend: bool,
+    pub auto_download_updates: bool,
     pub user_display_name: String,
     pub theme_mode: String,
     pub chat: ChatSettingsInput,
@@ -76,6 +78,7 @@ pub struct GenerationRequestConfig {
 #[serde(default)]
 struct StoredAppSettings {
     auto_start_backend: bool,
+    auto_download_updates: bool,
     user_display_name: String,
     theme_mode: String,
     chat: StoredChatSettings,
@@ -103,6 +106,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             auto_start_backend: true,
+            auto_download_updates: true,
             user_display_name: String::new(),
             theme_mode: DEFAULT_THEME_MODE.to_string(),
             chat: ChatSettings::default(),
@@ -126,6 +130,7 @@ impl Default for AppSettingsInput {
     fn default() -> Self {
         Self {
             auto_start_backend: true,
+            auto_download_updates: true,
             user_display_name: String::new(),
             theme_mode: DEFAULT_THEME_MODE.to_string(),
             chat: ChatSettingsInput::default(),
@@ -149,6 +154,7 @@ impl Default for StoredAppSettings {
     fn default() -> Self {
         Self {
             auto_start_backend: true,
+            auto_download_updates: true,
             user_display_name: String::new(),
             theme_mode: DEFAULT_THEME_MODE.to_string(),
             chat: StoredChatSettings::default(),
@@ -172,6 +178,7 @@ impl From<StoredAppSettings> for AppSettings {
     fn from(value: StoredAppSettings) -> Self {
         Self {
             auto_start_backend: true,
+            auto_download_updates: value.auto_download_updates,
             user_display_name: value.user_display_name,
             theme_mode: value.theme_mode,
             chat: ChatSettings {
@@ -193,6 +200,7 @@ impl From<&AppSettingsInput> for StoredAppSettings {
     fn from(value: &AppSettingsInput) -> Self {
         Self {
             auto_start_backend: true,
+            auto_download_updates: value.auto_download_updates,
             user_display_name: value.user_display_name.clone(),
             theme_mode: value.theme_mode.clone(),
             chat: StoredChatSettings {
@@ -227,7 +235,8 @@ pub fn load_settings(conn: &Connection) -> Result<AppSettings, String> {
         Some(raw) => match serde_json::from_str::<StoredAppSettings>(&raw) {
             Ok(parsed) => {
                 let normalized = normalize_stored_settings(parsed.clone(), &defaults);
-                let needs_rewrite = normalized != parsed;
+                let needs_rewrite =
+                    normalized != parsed || missing_auto_download_updates_field(&raw);
                 (normalized, needs_rewrite)
             }
             Err(error) => {
@@ -340,6 +349,17 @@ fn default_stored_app_settings_for_current_system() -> StoredAppSettings {
     settings
 }
 
+fn missing_auto_download_updates_field(raw: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(raw)
+        .ok()
+        .and_then(|value| {
+            value
+                .as_object()
+                .map(|object| !object.contains_key("auto_download_updates"))
+        })
+        .unwrap_or(false)
+}
+
 fn default_max_tokens_for_ram_gb(total_ram_gb: f64) -> u32 {
     if total_ram_gb > 8.0 {
         HIGH_RAM_DEFAULT_MAX_TOKENS
@@ -373,6 +393,7 @@ mod tests {
             &conn,
             &AppSettingsInput {
                 auto_start_backend: false,
+                auto_download_updates: false,
                 user_display_name: "Asha".to_string(),
                 theme_mode: "dark".to_string(),
                 chat: ChatSettingsInput {
@@ -391,6 +412,7 @@ mod tests {
         .unwrap();
 
         assert!(saved.auto_start_backend);
+        assert!(!saved.auto_download_updates);
         assert_eq!(saved.user_display_name, "Asha");
         assert_eq!(saved.theme_mode, "dark");
         assert_eq!(saved.chat.reply_language, "hindi");
@@ -412,6 +434,7 @@ mod tests {
             &conn,
             &AppSettingsInput {
                 auto_start_backend: true,
+                auto_download_updates: true,
                 user_display_name: String::new(),
                 theme_mode: DEFAULT_THEME_MODE.to_string(),
                 chat: ChatSettingsInput {
@@ -433,6 +456,7 @@ mod tests {
             &conn,
             &AppSettingsInput {
                 auto_start_backend: true,
+                auto_download_updates: true,
                 user_display_name: String::new(),
                 theme_mode: DEFAULT_THEME_MODE.to_string(),
                 chat: ChatSettingsInput {
@@ -494,6 +518,7 @@ mod tests {
             &conn,
             &AppSettingsInput {
                 auto_start_backend: true,
+                auto_download_updates: true,
                 user_display_name: String::new(),
                 theme_mode: DEFAULT_THEME_MODE.to_string(),
                 chat: ChatSettingsInput {
@@ -511,6 +536,7 @@ mod tests {
             &conn,
             &AppSettingsInput {
                 auto_start_backend: true,
+                auto_download_updates: true,
                 user_display_name: String::new(),
                 theme_mode: DEFAULT_THEME_MODE.to_string(),
                 chat: ChatSettingsInput {
@@ -536,6 +562,7 @@ mod tests {
             &conn,
             &AppSettingsInput {
                 auto_start_backend: true,
+                auto_download_updates: true,
                 user_display_name: "a".repeat(61),
                 theme_mode: DEFAULT_THEME_MODE.to_string(),
                 chat: ChatSettingsInput::default(),
@@ -556,6 +583,7 @@ mod tests {
             &conn,
             &AppSettingsInput {
                 auto_start_backend: true,
+                auto_download_updates: true,
                 user_display_name: valid_name.clone(),
                 theme_mode: DEFAULT_THEME_MODE.to_string(),
                 chat: ChatSettingsInput::default(),
@@ -568,6 +596,7 @@ mod tests {
             &conn,
             &AppSettingsInput {
                 auto_start_backend: true,
+                auto_download_updates: true,
                 user_display_name: too_long_name,
                 theme_mode: DEFAULT_THEME_MODE.to_string(),
                 chat: ChatSettingsInput::default(),
@@ -585,6 +614,7 @@ mod tests {
             &conn,
             &AppSettingsInput {
                 auto_start_backend: true,
+                auto_download_updates: true,
                 user_display_name: String::new(),
                 theme_mode: "system".to_string(),
                 chat: ChatSettingsInput::default(),
@@ -604,6 +634,7 @@ mod tests {
 
         let loaded = load_settings(&conn).expect("load settings");
         assert!(loaded.auto_start_backend);
+        assert!(loaded.auto_download_updates);
 
         let rewritten = storage::load_string_setting(&conn, APP_SETTINGS_KEY)
             .expect("load rewritten payload")
@@ -641,6 +672,7 @@ mod tests {
 
         let loaded = load_settings(&conn).expect("load normalized settings");
         assert!(loaded.auto_start_backend);
+        assert!(loaded.auto_download_updates);
         assert_eq!(loaded.theme_mode, DEFAULT_THEME_MODE);
         assert_eq!(loaded.chat.reply_language, "english");
         assert_eq!(loaded.chat.max_tokens, MIN_MAX_TOKENS);
@@ -654,8 +686,52 @@ mod tests {
         let persisted: StoredAppSettings =
             serde_json::from_str(&rewritten).expect("valid rewritten settings JSON");
         assert_eq!(persisted.auto_start_backend, true);
+        assert!(persisted.auto_download_updates);
         assert_eq!(persisted.chat.max_tokens, MIN_MAX_TOKENS);
         assert_eq!(persisted.chat.generation.temperature, Some(0.0));
         assert_eq!(persisted.chat.generation.top_p, Some(1.0));
+    }
+
+    #[test]
+    fn default_settings_enable_auto_download_updates() {
+        assert!(AppSettings::default().auto_download_updates);
+        assert!(AppSettingsInput::default().auto_download_updates);
+        assert!(StoredAppSettings::default().auto_download_updates);
+    }
+
+    #[test]
+    fn load_settings_rewrites_legacy_payload_without_auto_download_updates() {
+        let conn = test_conn();
+
+        let raw = serde_json::json!({
+            "auto_start_backend": true,
+            "user_display_name": "Asha",
+            "theme_mode": "light",
+            "chat": {
+                "reply_language": "english",
+                "max_tokens": 4096,
+                "web_assist_enabled": false,
+                "knowledge_enabled": false,
+                "generation": {
+                    "thinking_enabled": true
+                }
+            }
+        })
+        .to_string();
+
+        storage::save_string_setting(&conn, APP_SETTINGS_KEY, &raw).expect("save legacy payload");
+
+        let loaded = load_settings(&conn).expect("load legacy settings");
+        assert!(loaded.auto_download_updates);
+
+        let rewritten = storage::load_string_setting(&conn, APP_SETTINGS_KEY)
+            .expect("load rewritten payload")
+            .expect("payload exists");
+        let persisted: serde_json::Value =
+            serde_json::from_str(&rewritten).expect("valid rewritten settings JSON");
+        assert_eq!(
+            persisted.get("auto_download_updates"),
+            Some(&serde_json::Value::Bool(true))
+        );
     }
 }

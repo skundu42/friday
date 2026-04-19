@@ -113,6 +113,7 @@ export interface ChatSettings {
 
 export interface AppSettings {
   auto_start_backend: boolean;
+  auto_download_updates: boolean;
   user_display_name: string;
   theme_mode: ThemeMode;
   chat: ChatSettings;
@@ -126,6 +127,7 @@ export interface GenerationSettings {
 
 export interface AppSettingsInput {
   auto_start_backend: boolean;
+  auto_download_updates: boolean;
   user_display_name: string;
   theme_mode: ThemeMode;
   chat: {

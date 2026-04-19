@@ -65,6 +65,7 @@ function makeController() {
     messages: [],
     settings: {
       auto_start_backend: true,
+      auto_download_updates: true,
       user_display_name: "Asha",
       theme_mode: "light",
       chat: {
@@ -112,7 +113,7 @@ function makeController() {
     knowledgeIngestProgress: [],
     thinkingEnabled: true,
     availableAppUpdate: null as AppUpdateInfo | null,
-    installedAppUpdateVersion: null,
+    installedAppUpdateVersion: null as string | null,
     appUpdateError: null,
     isInstallingAppUpdate: false,
     nativeToolSupportAvailable: true,
@@ -128,6 +129,7 @@ function makeController() {
     refreshBackendStatus: vi.fn(async () => backendStatus),
     saveAppSettings: vi.fn(async (_input) => ({
       auto_start_backend: true,
+      auto_download_updates: true,
       user_display_name: "Asha",
       theme_mode: "light",
       chat: {
@@ -257,6 +259,7 @@ describe("App", () => {
 
   it("shows update banner and triggers install action", async () => {
     const controller = makeController();
+    controller.settings.auto_download_updates = false;
     controller.availableAppUpdate = {
       version: "0.2.0",
       currentVersion: "0.1.0",
@@ -274,6 +277,44 @@ describe("App", () => {
       screen.getByRole("button", { name: /download & install/i }),
     );
     expect(controller.installAppUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  it("hides the manual update banner when autodownload is enabled", async () => {
+    const controller = makeController();
+    controller.availableAppUpdate = {
+      version: "0.2.0",
+      currentVersion: "0.1.0",
+      notes: "Stable improvements",
+    };
+    controllerState.mockReturnValue(controller);
+
+    render(<App />);
+
+    await waitFor(() =>
+      expect(
+        screen.getByPlaceholderText("Ask Friday anything..."),
+      ).not.toBeNull(),
+    );
+
+    expect(screen.queryByText("Update available: v0.2.0")).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: /download & install/i }),
+    ).toBeNull();
+  });
+
+  it("shows the restart banner with the updated CTA copy", async () => {
+    const controller = makeController();
+    controller.installedAppUpdateVersion = "0.2.0";
+    controllerState.mockReturnValue(controller);
+
+    render(<App />);
+
+    await waitFor(() =>
+      expect(screen.getByText("Update installed: v0.2.0")).not.toBeNull(),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /restart to update/i }));
+    expect(controller.restartApp).toHaveBeenCalledTimes(1);
   });
 
   it("shows setup wizard when setup status load fails", async () => {

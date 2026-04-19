@@ -305,6 +305,7 @@ export default function SetupWizard({
     try {
       await onSaveSettings({
         auto_start_backend: settings.auto_start_backend,
+        auto_download_updates: settings.auto_download_updates,
         user_display_name: normalizedName,
         theme_mode: settings.theme_mode,
         chat: settings.chat,

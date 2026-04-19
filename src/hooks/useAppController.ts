@@ -145,6 +145,7 @@ function generationStatusForToolResult(name: string): string | null {
 function settingsToInput(settings: AppSettings): AppSettingsInput {
   return {
     auto_start_backend: settings.auto_start_backend,
+    auto_download_updates: settings.auto_download_updates,
     user_display_name: settings.user_display_name,
     theme_mode: settings.theme_mode,
     chat: {
@@ -181,6 +182,11 @@ function mergeQueuedSettingsInput(
       committed.auto_start_backend,
       desired.auto_start_backend,
       requested.auto_start_backend,
+    ),
+    auto_download_updates: resolveQueuedSettingValue(
+      committed.auto_download_updates,
+      desired.auto_download_updates,
+      requested.auto_download_updates,
     ),
     user_display_name: resolveQueuedSettingValue(
       committed.user_display_name,
@@ -371,6 +377,7 @@ export function useAppController() {
   const pendingSettingsSaveCountRef = useRef(0);
   const committedSettingsRef = useRef<AppSettingsInput | null>(null);
   const desiredSettingsRef = useRef<AppSettingsInput | null>(null);
+  const autoInstallAttemptedVersionRef = useRef<string | null>(null);
 
   const transport = useMemo(() => new TauriChatTransport(), []);
   const initialChatMessages = useMemo(
@@ -689,7 +696,7 @@ export function useAppController() {
     }
   };
 
-  const installAppUpdate = async () => {
+  const installAppUpdate = useCallback(async () => {
     if (isInstallingAppUpdate) {
       return;
     }
@@ -710,7 +717,7 @@ export function useAppController() {
     } finally {
       setIsInstallingAppUpdate(false);
     }
-  };
+  }, [isInstallingAppUpdate]);
 
   const restartApp = async () => {
     await invoke("restart_app");
@@ -727,6 +734,31 @@ export function useAppController() {
   const clearInstalledAppUpdateVersion = () => {
     setInstalledAppUpdateVersion(null);
   };
+
+  useEffect(() => {
+    if (!settings?.auto_download_updates) {
+      autoInstallAttemptedVersionRef.current = null;
+      return;
+    }
+
+    if (
+      !availableAppUpdate ||
+      isInstallingAppUpdate ||
+      installedAppUpdateVersion === availableAppUpdate.version ||
+      autoInstallAttemptedVersionRef.current === availableAppUpdate.version
+    ) {
+      return;
+    }
+
+    autoInstallAttemptedVersionRef.current = availableAppUpdate.version;
+    void installAppUpdate().catch(() => undefined);
+  }, [
+    availableAppUpdate,
+    installAppUpdate,
+    installedAppUpdateVersion,
+    isInstallingAppUpdate,
+    settings?.auto_download_updates,
+  ]);
 
   const bootstrap = async () => {
     setIsBootstrapping(true);
@@ -1164,6 +1196,7 @@ export function useAppController() {
     try {
       await saveAppSettings({
         auto_start_backend: settings.auto_start_backend,
+        auto_download_updates: settings.auto_download_updates,
         user_display_name: settings.user_display_name,
         theme_mode: settings.theme_mode,
         chat: {
@@ -1188,6 +1221,7 @@ export function useAppController() {
     try {
       await saveAppSettings({
         auto_start_backend: settings.auto_start_backend,
+        auto_download_updates: settings.auto_download_updates,
         user_display_name: settings.user_display_name,
         theme_mode: settings.theme_mode,
         chat: {
@@ -1213,6 +1247,7 @@ export function useAppController() {
     try {
       await saveAppSettings({
         auto_start_backend: settings.auto_start_backend,
+        auto_download_updates: settings.auto_download_updates,
         user_display_name: settings.user_display_name,
         theme_mode: settings.theme_mode,
         chat: {
@@ -1241,6 +1276,7 @@ export function useAppController() {
     try {
       await saveAppSettings({
         auto_start_backend: settings.auto_start_backend,
+        auto_download_updates: settings.auto_download_updates,
         user_display_name: settings.user_display_name,
         theme_mode: settings.theme_mode,
         chat: {

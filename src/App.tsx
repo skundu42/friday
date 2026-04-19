@@ -239,6 +239,16 @@ export default function App() {
     );
   }
 
+  const showManualUpdateBanner = Boolean(
+    controller.availableAppUpdate &&
+      !controller.installedAppUpdateVersion &&
+      (!controller.settings?.auto_download_updates ||
+        Boolean(controller.appUpdateError)),
+  );
+  const manualUpdate = showManualUpdateBanner
+    ? controller.availableAppUpdate
+    : null;
+
   return (
     <ConfigProvider {...buildIllustrationTheme(themeMode)}>
       <Layout className="app-layout">
@@ -273,14 +283,14 @@ export default function App() {
               <PanelFallback label="Starting Friday..." />
             ) : (
               <>
-                {controller.availableAppUpdate ? (
+                {manualUpdate ? (
                   <div className="app-update-banner">
                     <Alert
                       type="info"
                       showIcon
-                      message={`Update available: v${controller.availableAppUpdate.version}`}
+                      message={`Update available: v${manualUpdate.version}`}
                       description={
-                        controller.availableAppUpdate.notes ??
+                        manualUpdate.notes ??
                         "A new stable Friday release is ready to install."
                       }
                       action={
@@ -312,7 +322,7 @@ export default function App() {
                           size="small"
                           onClick={handleRestartForUpdate}
                         >
-                          Restart now
+                          Restart to Update
                         </Button>
                       }
                       closable
@@ -445,6 +455,9 @@ export default function App() {
                             controller.saveAppSettings(input)
                           }
                           isSaving={controller.isSavingSettings}
+                          isInstallingAppUpdate={
+                            controller.isInstallingAppUpdate
+                          }
                         />
                       </Suspense>
                     ) : (

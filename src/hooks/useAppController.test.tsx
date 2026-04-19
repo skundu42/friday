@@ -86,6 +86,7 @@ function makeSettings(
 ): AppSettings {
   return {
     auto_start_backend: true,
+    auto_download_updates: true,
     user_display_name: "Asha",
     theme_mode: "light",
     chat: {
@@ -262,6 +263,8 @@ describe("useAppController", () => {
           case "save_settings":
             bootstrapSettings = {
               auto_start_backend: args?.input?.auto_start_backend ?? true,
+              auto_download_updates:
+                args?.input?.auto_download_updates ?? true,
               user_display_name: args?.input?.user_display_name ?? "Asha",
               theme_mode: args?.input?.theme_mode ?? "light",
               chat: {
@@ -281,6 +284,12 @@ describe("useAppController", () => {
             return Promise.resolve(bootstrapSettings);
           case "check_for_app_update":
             return Promise.resolve(availableAppUpdate);
+          case "install_app_update":
+            return Promise.resolve({
+              installed: true,
+              version: availableAppUpdate?.version ?? "0.0.0",
+              restartRequired: true,
+            });
           default:
             return Promise.resolve(undefined);
         }
@@ -333,7 +342,33 @@ describe("useAppController", () => {
     });
   });
 
-  it("checks for stable app updates during bootstrap", async () => {
+  it("auto-installs updates during bootstrap when autodownload is enabled", async () => {
+    availableAppUpdate = {
+      version: "0.2.0",
+      currentVersion: "0.1.0",
+      notes: "Stable improvements",
+      publishedAt: "2026-04-16T10:00:00Z",
+    };
+
+    const { result } = renderHook(() => useAppController());
+    await waitForBootstrap(result);
+
+    await waitFor(() =>
+      expect(result.current.installedAppUpdateVersion).toBe("0.2.0"),
+    );
+    expect(result.current.availableAppUpdate).toBeNull();
+    expect(
+      invokeMock.mock.calls.some(
+        ([command]) => command === "install_app_update",
+      ),
+    ).toBe(true);
+  });
+
+  it("keeps updates manual during bootstrap when autodownload is disabled", async () => {
+    bootstrapSettings = {
+      ...makeSettings(),
+      auto_download_updates: false,
+    };
     availableAppUpdate = {
       version: "0.2.0",
       currentVersion: "0.1.0",
@@ -347,6 +382,70 @@ describe("useAppController", () => {
     await waitFor(() =>
       expect(result.current.availableAppUpdate?.version).toBe("0.2.0"),
     );
+    expect(result.current.installedAppUpdateVersion).toBeNull();
+    expect(
+      invokeMock.mock.calls.some(
+        ([command]) => command === "install_app_update",
+      ),
+    ).toBe(false);
+  });
+
+  it("auto-installs a known update when autodownload is enabled later", async () => {
+    bootstrapSettings = {
+      ...makeSettings(),
+      auto_download_updates: false,
+    };
+    availableAppUpdate = {
+      version: "0.2.0",
+      currentVersion: "0.1.0",
+      notes: "Stable improvements",
+      publishedAt: "2026-04-16T10:00:00Z",
+    };
+
+    const { result } = renderHook(() => useAppController());
+    await waitForBootstrap(result);
+    await waitFor(() =>
+      expect(result.current.availableAppUpdate?.version).toBe("0.2.0"),
+    );
+
+    await act(async () => {
+      await result.current.saveAppSettings({
+        auto_start_backend: true,
+        auto_download_updates: true,
+        user_display_name: "Asha",
+        theme_mode: "light",
+        chat: {
+          reply_language: "english",
+          max_tokens: 4096,
+          web_assist_enabled: false,
+          knowledge_enabled: false,
+          generation: {
+            thinking_enabled: true,
+          },
+        },
+      });
+    });
+
+    await waitFor(() =>
+      expect(result.current.installedAppUpdateVersion).toBe("0.2.0"),
+    );
+  });
+
+  it("checks for app updates only once during bootstrap", async () => {
+    const { result } = renderHook(() => useAppController());
+    await waitForBootstrap(result);
+
+    expect(
+      invokeMock.mock.calls.filter(([command]) => command === "check_for_app_update"),
+    ).toHaveLength(1);
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+
+    expect(
+      invokeMock.mock.calls.filter(([command]) => command === "check_for_app_update"),
+    ).toHaveLength(1);
   });
 
   it("refreshes the persisted session transcript after a streamed turn completes", async () => {
