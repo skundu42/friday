@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  workflow_call:
+  pull_request:
+  push:
+    branches:
+      - main
+      - dev
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validate
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    env:
+      CI: true
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.0
+          targets: aarch64-apple-darwin
+
+      - name: Install protobuf compiler
+        run: brew install protobuf
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Frontend tests
+        run: npm run test:run
+
+      - name: Frontend build
+        run: npm run build
+
+      - name: Cargo check
+        run: npm run cargo:check
+
+      - name: Cargo test
+        run: npm run cargo:test
+
+      - name: Cargo clippy
+        run: npm run cargo:clippy

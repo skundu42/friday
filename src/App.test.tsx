@@ -109,6 +109,7 @@ function makeController() {
       totalImageAssets: 1,
       storageDir: "/Users/sk/Library/Application Support/com.friday.app/rag",
     },
+    knowledgeIngestProgress: [],
     thinkingEnabled: true,
     availableAppUpdate: null as AppUpdateInfo | null,
     installedAppUpdateVersion: null,
@@ -172,15 +173,17 @@ describe("App", () => {
     invokeMock.mockReset();
     listenMock.mockReset();
     listenMock.mockResolvedValue(() => {});
-    vi.spyOn(window, "getComputedStyle").mockImplementation((element, pseudoElt) => {
-      if (pseudoElt) {
-        return {
-          getPropertyValue: () => "",
-          overflow: "auto",
-        } as unknown as CSSStyleDeclaration;
-      }
-      return nativeGetComputedStyle(element);
-    });
+    vi.spyOn(window, "getComputedStyle").mockImplementation(
+      (element, pseudoElt) => {
+        if (pseudoElt) {
+          return {
+            getPropertyValue: () => "",
+            overflow: "auto",
+          } as unknown as CSSStyleDeclaration;
+        }
+        return nativeGetComputedStyle(element);
+      },
+    );
     invokeMock.mockImplementation((command: string) => {
       if (command === "get_setup_status") {
         return Promise.resolve({
@@ -232,7 +235,9 @@ describe("App", () => {
     render(<App />);
 
     await waitFor(() =>
-      expect(screen.getByPlaceholderText("Ask Friday anything...")).not.toBeNull(),
+      expect(
+        screen.getByPlaceholderText("Ask Friday anything..."),
+      ).not.toBeNull(),
     );
 
     fireEvent.click(screen.getByRole("button", { name: /open settings/i }));
@@ -246,9 +251,7 @@ describe("App", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /back to chat/i }));
 
-    await waitFor(() =>
-      expect(queryChatInput()).not.toBeNull(),
-    );
+    await waitFor(() => expect(queryChatInput()).not.toBeNull());
     expect(controller.refreshBackendStatus).toHaveBeenCalledTimes(1);
   });
 
@@ -267,7 +270,9 @@ describe("App", () => {
       expect(screen.getByText("Update available: v0.2.0")).not.toBeNull(),
     );
 
-    fireEvent.click(screen.getByRole("button", { name: /download & install/i }));
+    fireEvent.click(
+      screen.getByRole("button", { name: /download & install/i }),
+    );
     expect(controller.installAppUpdate).toHaveBeenCalledTimes(1);
   });
 
@@ -287,7 +292,9 @@ describe("App", () => {
 
     render(<App />);
 
-    await waitFor(() => expect(screen.getByText("Welcome to Friday")).not.toBeNull());
+    await waitFor(() =>
+      expect(screen.getByText("Welcome to Friday")).not.toBeNull(),
+    );
   });
 
   it("opens the Knowledge page from the sidebar", async () => {
@@ -297,13 +304,17 @@ describe("App", () => {
     render(<App />);
 
     await waitFor(() =>
-      expect(screen.getByPlaceholderText("Ask Friday anything...")).not.toBeNull(),
+      expect(
+        screen.getByPlaceholderText("Ask Friday anything..."),
+      ).not.toBeNull(),
     );
 
     fireEvent.click(screen.getByRole("button", { name: /open knowledge/i }));
 
     await waitFor(() =>
-      expect(screen.getByRole("heading", { level: 3, name: "Knowledge" })).not.toBeNull(),
+      expect(
+        screen.getByRole("heading", { level: 3, name: "Knowledge" }),
+      ).not.toBeNull(),
     );
     expect(controller.refreshKnowledge).toHaveBeenCalledTimes(1);
     expect(queryChatInput()).toBeNull();
@@ -319,7 +330,9 @@ describe("App", () => {
     render(<App />);
 
     await waitFor(() =>
-      expect(screen.getByPlaceholderText("Ask Friday anything...")).not.toBeNull(),
+      expect(
+        screen.getByPlaceholderText("Ask Friday anything..."),
+      ).not.toBeNull(),
     );
 
     fireEvent.click(screen.getByRole("button", { name: /open settings/i }));
@@ -333,9 +346,7 @@ describe("App", () => {
 
     fireEvent.click(screen.getAllByRole("button", { name: /new chat/i })[0]!);
 
-    await waitFor(() =>
-      expect(queryChatInput()).not.toBeNull(),
-    );
+    await waitFor(() => expect(queryChatInput()).not.toBeNull());
     expect(controller.createSession).toHaveBeenCalledTimes(1);
     expect(controller.refreshBackendStatus).toHaveBeenCalledTimes(1);
   });
@@ -345,14 +356,18 @@ describe("App", () => {
     render(<App />);
 
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: /show sidebar/i })).not.toBeNull(),
+      expect(
+        screen.getByRole("button", { name: /show sidebar/i }),
+      ).not.toBeNull(),
     );
 
     expect(screen.queryByText("Recent Chats")).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: /show sidebar/i }));
 
-    await waitFor(() => expect(screen.getByText("Recent Chats")).not.toBeNull());
+    await waitFor(() =>
+      expect(screen.getByText("Recent Chats")).not.toBeNull(),
+    );
   });
 
   it("renders a blocking error panel when bootstrap fails", async () => {
@@ -378,7 +393,9 @@ describe("App", () => {
     const { unmount } = render(<App />);
 
     await waitFor(() =>
-      expect(screen.getByPlaceholderText("Ask Friday anything...")).not.toBeNull(),
+      expect(
+        screen.getByPlaceholderText("Ask Friday anything..."),
+      ).not.toBeNull(),
     );
 
     expect(document.body.dataset.theme).toBe("dark");

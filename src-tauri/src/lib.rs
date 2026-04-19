@@ -3,6 +3,7 @@ mod models;
 mod python_runtime;
 mod runtime_manifest;
 mod searxng;
+mod service_diagnostics;
 mod session;
 mod settings;
 mod sidecar;
@@ -12,6 +13,7 @@ use knowledge::KnowledgeManager;
 use models::python_worker::StreamEvent;
 use searxng::SearXNGManager;
 use serde::{Deserialize, Serialize};
+use service_diagnostics::ServiceDiagnostics;
 use session::{Message, Session};
 use sidecar::SidecarManager;
 use std::collections::{BTreeSet, HashSet};
@@ -27,17 +29,21 @@ use tauri::State;
 use tauri_plugin_updater::Error as UpdaterError;
 use tauri_plugin_updater::UpdaterExt;
 
-const CURRENT_SESSION_KEY: &str = "current_session";
+pub(crate) const CURRENT_SESSION_KEY: &str = "current_session";
 pub(crate) const ACTIVE_MODEL_KEY: &str = "active_model_id";
 const MAX_PROMPT_HISTORY_MESSAGES: usize = 12;
-const MAX_PROMPT_HISTORY_CHARS: usize = 120_000;
 const MAX_PROMPT_HISTORY_QUERY_LIMIT: usize = 24;
 const MAX_ATTACHMENT_TEXT_CHARS_PER_FILE: usize = 40_000;
 const MAX_ATTACHMENT_TEXT_CHARS_TOTAL: usize = 80_000;
 const MAX_KNOWLEDGE_PROMPT_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
 const MAX_KNOWLEDGE_TEXT_CITATIONS: usize = 4;
+#[cfg(test)]
+const DEFAULT_PROMPT_HISTORY_TOKEN_BUDGET: usize = 30_000;
+const PROMPT_TOKEN_HEADROOM: usize = 512;
+const APPROX_CHARS_PER_TOKEN: usize = 4;
 const KNOWLEDGE_SEARCH_TIMEOUT: Duration = Duration::from_secs(8);
 const DEFAULT_SESSION_TITLE: &str = "New chat";
+#[cfg(test)]
 const SESSION_TITLE_PREVIEW_CHARS: usize = 48;
 const MAIN_WINDOW_LABEL: &str = "main";
 const UPDATER_CHECK_TIMEOUT: Duration = Duration::from_secs(4);
@@ -45,12 +51,10 @@ const UPDATER_CHECK_TIMEOUT: Duration = Duration::from_secs(4);
 static OBSERVABILITY_INIT: OnceLock<Result<(), String>> = OnceLock::new();
 
 pub struct AppState {
-    pub db: Mutex<Option<rusqlite::Connection>>,
-    pub db_path: Mutex<Option<std::path::PathBuf>>,
+    pub database: Mutex<Option<storage::DatabaseHandle>>,
     pub current_session: Mutex<Option<String>>,
     pub active_generation_session: Mutex<Option<String>>,
     pub cancel_flag: AtomicBool,
-    pub tools_enabled: AtomicBool,
 }
 
 #[derive(Clone)]
@@ -92,6 +96,20 @@ struct BootstrapPayload {
     backend_status: sidecar::BackendStatus,
     web_search_status: searxng::WebSearchStatus,
     knowledge_status: knowledge::KnowledgeStatus,
+    knowledge_stats: Option<knowledge::KnowledgeStats>,
+    knowledge_sources: Vec<knowledge::KnowledgeSource>,
+    available_models: Vec<sidecar::ModelInfo>,
+    downloaded_model_ids: Vec<String>,
+    active_model: sidecar::ModelInfo,
+    service_diagnostics: ServiceDiagnosticsBundle,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ServiceDiagnosticsBundle {
+    sidecar: ServiceDiagnostics,
+    searxng: ServiceDiagnostics,
+    knowledge: ServiceDiagnostics,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -242,6 +260,17 @@ impl WebAssistTrace {
 
     fn has_tracked_activity(&self) -> bool {
         !self.tools.is_empty()
+    }
+
+    fn tool_order_json(&self) -> Result<String, String> {
+        serde_json::to_string(
+            &self
+                .tools
+                .iter()
+                .map(|tool| tool.name.clone())
+                .collect::<Vec<_>>(),
+        )
+        .map_err(|error| format!("Failed to serialize tool order: {}", error))
     }
 }
 
@@ -447,23 +476,17 @@ fn log_web_assist_turn(
     }
 }
 
-// Helper to run DB operations with a callback (avoids cloning Connection)
-fn with_db<F, R>(state: &AppState, f: F) -> Result<R, String>
-where
-    F: FnOnce(&rusqlite::Connection) -> Result<R, String>,
-{
-    let guard = state.db.lock().unwrap();
-    let conn = guard.as_ref().ok_or("Database not initialized")?;
-    f(conn)
-}
-
-fn current_db_path(state: &AppState) -> Result<std::path::PathBuf, String> {
+fn database_handle(state: &AppState) -> Result<storage::DatabaseHandle, String> {
     state
-        .db_path
+        .database
         .lock()
         .unwrap()
         .clone()
-        .ok_or_else(|| "Database path not initialized".to_string())
+        .ok_or_else(|| "Database not initialized".to_string())
+}
+
+fn current_db_path(state: &AppState) -> Result<std::path::PathBuf, String> {
+    Ok(database_handle(state)?.path().to_path_buf())
 }
 
 struct ActiveGenerationGuard<'a> {
@@ -513,11 +536,17 @@ fn prepare_session_for_generation<'a>(
     Ok(guard)
 }
 
-fn emit_chat_error(app: &tauri::AppHandle, session_id: Option<&str>, message: &str) {
+fn emit_chat_error(
+    app: &tauri::AppHandle,
+    session_id: Option<&str>,
+    request_id: Option<&str>,
+    message: &str,
+) {
     let _ = app.emit(
         "chat-error",
         serde_json::json!({
             "sessionId": session_id,
+            "requestId": request_id,
             "message": message,
         }),
     );
@@ -527,18 +556,25 @@ fn persist_and_emit_assistant_error(
     app: &tauri::AppHandle,
     state: &State<'_, AppState>,
     session_id: &str,
+    request_id: Option<&str>,
     message: &str,
     model_used: Option<&str>,
 ) {
     persist_assistant_error_message(state, session_id, message, model_used);
-    emit_chat_error(app, Some(session_id), message);
+    emit_chat_error(app, Some(session_id), request_id, message);
 }
 
-fn emit_cancelled_chat_done(app: &tauri::AppHandle, session_id: &str, model_name: &str) {
+fn emit_cancelled_chat_done(
+    app: &tauri::AppHandle,
+    session_id: &str,
+    request_id: &str,
+    model_name: &str,
+) {
     let _ = app.emit(
         "chat-done",
         serde_json::json!({
             "sessionId": session_id,
+            "requestId": request_id,
             "model": model_name,
             "cancelled": true,
             "hasContent": false,
@@ -671,6 +707,7 @@ fn validate_requested_session_id(session_id: &str) -> Result<&str, String> {
     }
 }
 
+#[cfg(test)]
 fn session_title_candidate(input: &str) -> Option<String> {
     let first_line = input.lines().map(str::trim).find(|line| !line.is_empty())?;
     let collapsed = first_line.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -808,12 +845,10 @@ pub fn run() {
         .manage(SearXNGManager::new())
         .manage(KnowledgeManager::new())
         .manage(AppState {
-            db: Mutex::new(None),
-            db_path: Mutex::new(None),
+            database: Mutex::new(None),
             current_session: Mutex::new(None),
             active_generation_session: Mutex::new(None),
             cancel_flag: AtomicBool::new(false),
-            tools_enabled: AtomicBool::new(false),
         })
         .invoke_handler(tauri::generate_handler![
             sidecar::detect_backend,
@@ -840,7 +875,7 @@ pub fn run() {
             knowledge_delete_source,
             knowledge_stats,
             get_knowledge_status,
-            set_tools_enabled,
+            get_service_diagnostics,
             sidecar::list_models,
             sidecar::list_downloaded_model_ids,
             sidecar::get_active_model,
@@ -907,13 +942,12 @@ pub fn run() {
 
             // Init DB
             let db_path = data_dir.join("friday.db");
-            let conn = storage::init_db(&db_path).map_err(io_error)?;
-            if let Ok(Some(active_model_id)) = load_persisted_active_model_id(&conn) {
+            let db_handle = storage::DatabaseHandle::new(&db_path).map_err(io_error)?;
+            if let Ok(Some(active_model_id)) = db_handle.load_active_model_id() {
                 sidecar.set_active_model_id(&active_model_id);
             }
             let state: tauri::State<AppState> = app.state();
-            *state.db.lock().unwrap() = Some(conn);
-            *state.db_path.lock().unwrap() = Some(db_path.clone());
+            *state.database.lock().unwrap() = Some(db_handle);
             tracing::info!("Database initialized at {:?}", db_path);
 
             if let Err(error) =
@@ -952,11 +986,11 @@ fn updater_pubkey_is_configured(pubkey: Option<&str>) -> bool {
 fn updater_pubkey_configured(app: &tauri::AppHandle) -> bool {
     updater_pubkey_is_configured(
         app.config()
-        .plugins
-        .0
-        .get("updater")
-        .and_then(|updater| updater.get("pubkey"))
-        .and_then(|pubkey| pubkey.as_str())
+            .plugins
+            .0
+            .get("updater")
+            .and_then(|updater| updater.get("pubkey"))
+            .and_then(|pubkey| pubkey.as_str()),
     )
 }
 
@@ -1051,11 +1085,9 @@ async fn bootstrap_payload_inner(
     searxng: &SearXNGManager,
     knowledge: &KnowledgeManager,
 ) -> Result<BootstrapPayload, String> {
-    let settings = with_db(state, settings::load_settings)?;
+    let database = database_handle(state)?;
+    let settings = database.load_app_settings()?;
     sidecar.set_max_tokens(settings.chat.max_tokens);
-    state
-        .tools_enabled
-        .store(settings.chat.web_assist_enabled, Ordering::SeqCst);
     let mut backend_status = sidecar.auto_detect().await;
     if !backend_status.connected && backend_status.state == "ready" {
         match sidecar.ensure_daemon().await {
@@ -1069,9 +1101,11 @@ async fn bootstrap_payload_inner(
     }
 
     let current_session = ensure_active_session(state)?;
-    let sessions = list_sessions_inner(state)?;
-    let messages = load_messages_inner(state, &current_session.id)?;
+    let sessions = database.list_sessions()?;
+    let messages = database.load_messages(&current_session.id)?;
     let web_search_status = searxng.status().await;
+    let knowledge_stats = knowledge::stats(knowledge, database.path()).await.ok();
+    let knowledge_sources = database.list_knowledge_sources().unwrap_or_default();
 
     Ok(BootstrapPayload {
         sessions,
@@ -1081,6 +1115,16 @@ async fn bootstrap_payload_inner(
         backend_status,
         web_search_status,
         knowledge_status: knowledge.status(),
+        knowledge_stats,
+        knowledge_sources,
+        available_models: sidecar::list_models(),
+        downloaded_model_ids: sidecar.downloaded_model_ids(),
+        active_model: sidecar.active_model_info(),
+        service_diagnostics: ServiceDiagnosticsBundle {
+            sidecar: sidecar.diagnostics(),
+            searxng: searxng.diagnostics(),
+            knowledge: knowledge.diagnostics(),
+        },
     })
 }
 
@@ -1518,6 +1562,8 @@ async fn send_message(
     knowledge: State<'_, KnowledgeManager>,
     request: SendMessageRequest,
 ) -> Result<(), String> {
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let request_started_at = std::time::Instant::now();
     let SendMessageRequest {
         session_id: requested_session_id,
         message,
@@ -1530,7 +1576,7 @@ async fn send_message(
     let session_id = match validate_requested_session_id(&requested_session_id) {
         Ok(value) => value.to_string(),
         Err(error) => {
-            emit_chat_error(&app, None, &error);
+            emit_chat_error(&app, None, Some(&request_id), &error);
             return Err(error);
         }
     };
@@ -1538,10 +1584,35 @@ async fn send_message(
     let _generation_guard = prepare_session_for_generation(state.inner(), &session_id)?;
     let _daemon_use = sidecar.begin_daemon_use();
 
-    let app_settings = with_db(&state, settings::load_settings)?;
+    let database = database_handle(&state)?;
+    let app_settings = database.load_app_settings()?;
     let db_path = current_db_path(&state)?;
     sidecar.set_max_tokens(app_settings.chat.max_tokens);
     let attachment_count = attachments.as_ref().map(Vec::len).unwrap_or(0);
+    let effective_thinking_enabled = thinking_enabled
+        .or(app_settings.chat.generation.thinking_enabled)
+        .unwrap_or(false);
+    let tools_enabled = web_assist_enabled.unwrap_or(app_settings.chat.web_assist_enabled);
+    let effective_knowledge_enabled =
+        knowledge_enabled.unwrap_or(app_settings.chat.knowledge_enabled);
+    let model_name = sidecar.active_model().id.clone();
+
+    if let Err(error) = database.insert_audit_log(storage::AuditLogStart {
+        request_id: request_id.clone(),
+        session_id: session_id.clone(),
+        user_message: message.clone(),
+        model_used: Some(model_name.clone()),
+        attachment_count,
+        web_assist_enabled: tools_enabled,
+        knowledge_enabled: effective_knowledge_enabled,
+        thinking_enabled: effective_thinking_enabled,
+    }) {
+        tracing::warn!(
+            "Failed to create audit log row for {}: {}",
+            request_id,
+            error
+        );
+    }
 
     let prepared_prompt = build_user_prompt_message(&message, attachments.as_deref());
     let prompt_message = prepared_prompt.prompt_message;
@@ -1561,14 +1632,21 @@ async fn send_message(
             title_source: Some(&message),
         },
     ) {
-        emit_chat_error(&app, Some(&session_id), &error);
+        let _ = database.finish_audit_log(storage::AuditLogFinish {
+            request_id: request_id.clone(),
+            failure_stage: Some("persist_user_message".to_string()),
+            error: Some(error.clone()),
+            response_latency_ms: Some(request_started_at.elapsed().as_millis() as i64),
+            ..Default::default()
+        });
+        emit_chat_error(&app, Some(&session_id), Some(&request_id), &error);
         return Err(error);
     }
 
-    let model_name = sidecar.active_model().id.clone();
     tracing::info!(
-        "Message queued in session {} (chars={}, attachments={}, model={})",
+        "Message queued in session {} (request_id={}, chars={}, attachments={}, model={})",
         session_id,
+        request_id,
         message.chars().count(),
         attachment_count,
         model_name
@@ -1579,43 +1657,27 @@ async fn send_message(
             session_id = %session_id,
             "Generation cancelled before prompt assembly completed"
         );
-        emit_cancelled_chat_done(&app, &session_id, &model_name);
+        let _ = database.finish_audit_log(storage::AuditLogFinish {
+            request_id: request_id.clone(),
+            failure_stage: Some("prompt_assembly".to_string()),
+            cancelled: true,
+            response_latency_ms: Some(request_started_at.elapsed().as_millis() as i64),
+            ..Default::default()
+        });
+        emit_cancelled_chat_done(&app, &session_id, &request_id, &model_name);
         return Ok(());
     }
 
     // Build message history
     let history =
         load_recent_messages_for_prompt_inner(&state, &session_id, MAX_PROMPT_HISTORY_QUERY_LIMIT)?;
-    let mut trimmed_history = trim_history_for_prompt(&history)?;
-    let effective_thinking_enabled = thinking_enabled
-        .or(app_settings.chat.generation.thinking_enabled)
-        .unwrap_or(false);
-    let tools_enabled = web_assist_enabled.unwrap_or(app_settings.chat.web_assist_enabled);
     let mut web_assist_trace = tools_enabled.then(WebAssistTrace::default);
-    let effective_knowledge_enabled =
-        knowledge_enabled.unwrap_or(app_settings.chat.knowledge_enabled);
     let system_prompt = system_prompt_for_preferences(
         &app_settings.chat.reply_language,
         effective_thinking_enabled,
         tools_enabled,
     );
-    if matches!(trimmed_history.last(), Some(msg) if msg.role == "user") {
-        trimmed_history.pop();
-    }
-    tracing::info!(
-        "Preparing prompt for session {} (lang={}, thinking={}, web={}, knowledge={}, history_messages={})",
-        session_id,
-        app_settings.chat.reply_language,
-        effective_thinking_enabled,
-        tools_enabled,
-        effective_knowledge_enabled,
-        trimmed_history.len()
-    );
-    let mut chat_messages: Vec<models::ChatMessage> =
-        vec![models::ChatMessage::text("system", system_prompt)];
-    for msg in &trimmed_history {
-        chat_messages.push(message_to_history_chat_message(msg)?);
-    }
+    let system_message = models::ChatMessage::text("system", system_prompt);
 
     if state.cancel_flag.load(Ordering::SeqCst) {
         tracing::info!(
@@ -1631,7 +1693,14 @@ async fn send_message(
                 None,
             );
         }
-        emit_cancelled_chat_done(&app, &session_id, &model_name);
+        let _ = database.finish_audit_log(storage::AuditLogFinish {
+            request_id: request_id.clone(),
+            failure_stage: Some("knowledge_search".to_string()),
+            cancelled: true,
+            response_latency_ms: Some(request_started_at.elapsed().as_millis() as i64),
+            ..Default::default()
+        });
+        emit_cancelled_chat_done(&app, &session_id, &request_id, &model_name);
         return Ok(());
     }
 
@@ -1662,6 +1731,30 @@ async fn send_message(
         prompt_message,
         used_citations: used_knowledge_citations,
     } = augment_prompt_with_knowledge(prompt_message, &knowledge_results)?;
+    let history_budget = history_prompt_budget_tokens(
+        sidecar.active_model().max_context_tokens,
+        app_settings.chat.max_tokens,
+        estimate_chat_message_prompt_tokens(&system_message)
+            + estimate_chat_message_prompt_tokens(&prompt_message),
+    );
+    let mut trimmed_history = trim_history_for_prompt_with_budget(&history, history_budget)?;
+    if matches!(trimmed_history.last(), Some(msg) if msg.role == "user") {
+        trimmed_history.pop();
+    }
+    tracing::info!(
+        "Preparing prompt for session {} (lang={}, thinking={}, web={}, knowledge={}, history_messages={}, prompt_budget_tokens={})",
+        session_id,
+        app_settings.chat.reply_language,
+        effective_thinking_enabled,
+        tools_enabled,
+        effective_knowledge_enabled,
+        trimmed_history.len(),
+        history_budget
+    );
+    let mut chat_messages: Vec<models::ChatMessage> = vec![system_message];
+    for msg in &trimmed_history {
+        chat_messages.push(message_to_history_chat_message(msg)?);
+    }
     chat_messages.push(prompt_message);
 
     if state.cancel_flag.load(Ordering::SeqCst) {
@@ -1672,7 +1765,14 @@ async fn send_message(
         if let Some(trace) = web_assist_trace.as_ref() {
             log_web_assist_turn(&session_id, "cancelled", trace, Some("pre_inference"), None);
         }
-        emit_cancelled_chat_done(&app, &session_id, &model_name);
+        let _ = database.finish_audit_log(storage::AuditLogFinish {
+            request_id: request_id.clone(),
+            failure_stage: Some("pre_inference".to_string()),
+            cancelled: true,
+            response_latency_ms: Some(request_started_at.elapsed().as_millis() as i64),
+            ..Default::default()
+        });
+        emit_cancelled_chat_done(&app, &session_id, &request_id, &model_name);
         return Ok(());
     }
 
@@ -1691,9 +1791,18 @@ async fn send_message(
                 &app,
                 &state,
                 &session_id,
+                Some(&request_id),
                 &error,
                 Some(model_name.as_str()),
             );
+            let _ = database.finish_audit_log(storage::AuditLogFinish {
+                request_id: request_id.clone(),
+                model_used: Some(model_name.clone()),
+                failure_stage: Some("ensure_ready".to_string()),
+                error: Some(error.clone()),
+                response_latency_ms: Some(request_started_at.elapsed().as_millis() as i64),
+                ..Default::default()
+            });
             return Err(error);
         }
     }
@@ -1712,7 +1821,14 @@ async fn send_message(
                 None,
             );
         }
-        emit_cancelled_chat_done(&app, &session_id, &model_name);
+        let _ = database.finish_audit_log(storage::AuditLogFinish {
+            request_id: request_id.clone(),
+            failure_stage: Some("start_inference".to_string()),
+            cancelled: true,
+            response_latency_ms: Some(request_started_at.elapsed().as_millis() as i64),
+            ..Default::default()
+        });
+        emit_cancelled_chat_done(&app, &session_id, &request_id, &model_name);
         return Ok(());
     }
 
@@ -1743,9 +1859,18 @@ async fn send_message(
                 &app,
                 &state,
                 &session_id,
+                Some(&request_id),
                 &error,
                 Some(model_name.as_str()),
             );
+            let _ = database.finish_audit_log(storage::AuditLogFinish {
+                request_id: request_id.clone(),
+                model_used: Some(model_name.clone()),
+                failure_stage: Some("start_inference".to_string()),
+                error: Some(error.clone()),
+                response_latency_ms: Some(request_started_at.elapsed().as_millis() as i64),
+                ..Default::default()
+            });
             return Err(error);
         }
     };
@@ -1764,6 +1889,7 @@ async fn send_message(
                             "chat-token",
                             serde_json::json!({
                                 "sessionId": &session_id,
+                                "requestId": &request_id,
                                 "token": token,
                                 "kind": "answer",
                             }),
@@ -1775,6 +1901,7 @@ async fn send_message(
                             "chat-token",
                             serde_json::json!({
                                 "sessionId": &session_id,
+                                "requestId": &request_id,
                                 "token": token,
                                 "kind": "thought",
                             }),
@@ -1786,6 +1913,7 @@ async fn send_message(
                         }
                         let _ = app.emit("tool-call-start", serde_json::json!({
                             "sessionId": &session_id,
+                            "requestId": &request_id,
                             "name": name,
                             "args": args,
                         }));
@@ -1796,6 +1924,7 @@ async fn send_message(
                         }
                         let _ = app.emit("tool-call-result", serde_json::json!({
                             "sessionId": &session_id,
+                            "requestId": &request_id,
                             "name": name,
                             "result": result,
                         }));
@@ -1867,9 +1996,31 @@ async fn send_message(
             &app,
             &state,
             &session_id,
+            Some(&request_id),
             &error,
             Some(model_name.as_str()),
         );
+        let tools_called = web_assist_trace
+            .as_ref()
+            .map(|trace| trace.tool_order_json().unwrap_or_else(|_| "[]".to_string()));
+        let _ = database.finish_audit_log(storage::AuditLogFinish {
+            request_id: request_id.clone(),
+            model_used: Some(model_name.clone()),
+            failure_stage: Some(
+                if web_assist_trace
+                    .as_ref()
+                    .is_some_and(WebAssistTrace::has_tracked_activity)
+                {
+                    "tool_phase".to_string()
+                } else {
+                    "stream".to_string()
+                },
+            ),
+            tools_called,
+            error: Some(error.clone()),
+            response_latency_ms: Some(request_started_at.elapsed().as_millis() as i64),
+            ..Default::default()
+        });
         return Err(error);
     }
 
@@ -1898,17 +2049,48 @@ async fn send_message(
                 &app,
                 &state,
                 &session_id,
+                Some(&request_id),
                 &persisted_error,
                 Some(model_name.as_str()),
             );
+            let _ = database.finish_audit_log(storage::AuditLogFinish {
+                request_id: request_id.clone(),
+                model_used: Some(model_name.clone()),
+                failure_stage: Some("persist_assistant_message".to_string()),
+                error: Some(persisted_error.clone()),
+                response_latency_ms: Some(request_started_at.elapsed().as_millis() as i64),
+                ..Default::default()
+            });
             return Err(persisted_error);
         }
     }
+
+    let tools_called = web_assist_trace
+        .as_ref()
+        .map(|trace| trace.tool_order_json().unwrap_or_else(|_| "[]".to_string()));
+    let _ = database.finish_audit_log(storage::AuditLogFinish {
+        request_id: request_id.clone(),
+        model_used: Some(model_name.clone()),
+        tools_called,
+        rag_sources: assistant_parts
+            .as_ref()
+            .and_then(|value| value.get("sources"))
+            .map(|sources| sources.to_string()),
+        rag_chunks_retrieved: assistant_parts
+            .as_ref()
+            .and_then(|value| value.get("sources"))
+            .and_then(|sources| sources.as_array())
+            .map(|sources| sources.len() as i64),
+        response_latency_ms: Some(request_started_at.elapsed().as_millis() as i64),
+        cancelled,
+        ..Default::default()
+    });
 
     let _ = app.emit(
         "chat-done",
         serde_json::json!({
             "sessionId": &session_id,
+            "requestId": &request_id,
             "model": &model_name,
             "cancelled": cancelled,
             "hasContent": !full_response.trim().is_empty() || !full_thinking.trim().is_empty(),
@@ -1978,9 +2160,7 @@ fn augment_prompt_with_knowledge(
             knowledge_results
                 .citations
                 .iter()
-                .filter(|citation| {
-                    matches!(citation.modality, knowledge::KnowledgeModality::Audio)
-                })
+                .filter(|citation| matches!(citation.modality, knowledge::KnowledgeModality::Audio))
                 .cloned(),
         );
     }
@@ -2105,8 +2285,9 @@ fn list_sessions(state: State<'_, AppState>) -> Result<Vec<Session>, String> {
 
 #[tauri::command]
 fn load_messages(state: State<'_, AppState>, session_id: String) -> Result<Vec<Message>, String> {
-    let _ = load_session_inner(&state, &session_id)?;
-    load_messages_inner(&state, &session_id)
+    let database = database_handle(&state)?;
+    let _ = database.load_session(&session_id)?;
+    database.load_messages(&session_id)
 }
 
 #[tauri::command]
@@ -2114,16 +2295,17 @@ fn select_session(
     state: State<'_, AppState>,
     session_id: String,
 ) -> Result<SessionSelectionResult, String> {
-    let session = load_session_inner(&state, &session_id)?;
+    let database = database_handle(&state)?;
+    let session = database.load_session(&session_id)?;
     set_current_session(&state, Some(session.id.clone()))?;
-    let messages = load_messages_inner(&state, &session.id)?;
+    let messages = database.load_messages(&session.id)?;
 
     Ok(SessionSelectionResult { session, messages })
 }
 
 #[tauri::command]
 fn load_settings(state: State<'_, AppState>) -> Result<settings::AppSettings, String> {
-    with_db(&state, settings::load_settings)
+    database_handle(&state)?.load_app_settings()
 }
 
 #[tauri::command]
@@ -2132,11 +2314,8 @@ async fn save_settings(
     sidecar: State<'_, SidecarManager>,
     input: settings::AppSettingsInput,
 ) -> Result<settings::AppSettings, String> {
-    let saved = with_db(&state, |conn| settings::save_settings(conn, &input))?;
+    let saved = database_handle(&state)?.save_app_settings(input)?;
     sidecar.set_max_tokens(saved.chat.max_tokens);
-    state
-        .tools_enabled
-        .store(saved.chat.web_assist_enabled, Ordering::SeqCst);
     Ok(saved)
 }
 
@@ -2178,34 +2357,7 @@ fn open_external_link(url: String) -> Result<(), String> {
 fn delete_session(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
     let active_generation_session = state.active_generation_session.lock().unwrap().clone();
     ensure_session_deletable(active_generation_session.as_deref(), &session_id)?;
-
-    with_db(&state, |conn| {
-        conn.execute_batch("BEGIN IMMEDIATE TRANSACTION;")
-            .map_err(|e| e.to_string())?;
-
-        conn.execute(
-            "DELETE FROM messages WHERE session_id = ?1",
-            rusqlite::params![&session_id],
-        )
-        .map_err(|e| {
-            let _ = conn.execute_batch("ROLLBACK;");
-            e.to_string()
-        })?;
-        conn.execute(
-            "DELETE FROM sessions WHERE id = ?1",
-            rusqlite::params![&session_id],
-        )
-        .map_err(|e| {
-            let _ = conn.execute_batch("ROLLBACK;");
-            e.to_string()
-        })?;
-
-        conn.execute_batch("COMMIT;").map_err(|e| {
-            let _ = conn.execute_batch("ROLLBACK;");
-            e.to_string()
-        })?;
-        Ok(())
-    })?;
+    database_handle(&state)?.delete_session(&session_id)?;
 
     let _ = ensure_active_session(&state)?;
     Ok(())
@@ -2241,12 +2393,9 @@ async fn knowledge_ingest_url(
 
 #[tauri::command]
 fn knowledge_list_sources(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
-    with_db(&state, |conn| {
-        knowledge::list_sources(conn).and_then(|result| {
-            serde_json::to_value(result)
-                .map_err(|e| format!("Failed to serialize Knowledge source list: {}", e))
-        })
-    })
+    let result = database_handle(&state)?.list_knowledge_sources()?;
+    serde_json::to_value(result)
+        .map_err(|e| format!("Failed to serialize Knowledge source list: {}", e))
 }
 
 #[tauri::command]
@@ -2279,9 +2428,18 @@ fn get_knowledge_status(
 }
 
 #[tauri::command]
-async fn set_tools_enabled(state: State<'_, AppState>, enabled: bool) -> Result<(), String> {
-    state.tools_enabled.store(enabled, Ordering::SeqCst);
-    Ok(())
+fn get_service_diagnostics(
+    service: String,
+    sidecar: State<'_, SidecarManager>,
+    searxng: State<'_, SearXNGManager>,
+    knowledge: State<'_, KnowledgeManager>,
+) -> Result<ServiceDiagnostics, String> {
+    match service.as_str() {
+        "sidecar" => Ok(sidecar.diagnostics()),
+        "searxng" => Ok(searxng.diagnostics()),
+        "knowledge" => Ok(knowledge.diagnostics()),
+        _ => Err(format!("Unknown service: {}", service)),
+    }
 }
 
 // --- Internal helpers ---
@@ -2291,37 +2449,11 @@ fn create_session_inner(state: &State<'_, AppState>, title: &str) -> Result<Sess
 }
 
 fn create_session_inner_for_state(state: &AppState, title: &str) -> Result<Session, String> {
-    with_db(state, |conn| {
-        let id = uuid::Uuid::new_v4().to_string();
-        let now = chrono::Utc::now().to_rfc3339();
-        conn.execute(
-            "INSERT INTO sessions (id, title, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![id, title, now, now],
-        )
-        .map_err(|e| e.to_string())?;
-
-        Ok(Session {
-            id,
-            title: title.to_string(),
-            created_at: now.clone(),
-            updated_at: now,
-        })
-    })
+    database_handle(state)?.create_session(title)
 }
 
-pub(crate) fn load_persisted_active_model_id(
-    conn: &rusqlite::Connection,
-) -> Result<Option<String>, String> {
-    storage::load_string_setting(conn, ACTIVE_MODEL_KEY)
-}
-
-pub(crate) fn persist_active_model_id(
-    conn: &rusqlite::Connection,
-    model_id: &str,
-) -> Result<(), String> {
-    storage::save_string_setting(conn, ACTIVE_MODEL_KEY, model_id)
-}
-
+#[cfg(test)]
+#[allow(dead_code)]
 fn parse_message_content_parts(raw: Option<String>) -> Option<serde_json::Value> {
     match raw {
         Some(payload) if !payload.trim().is_empty() => match serde_json::from_str(&payload) {
@@ -2408,6 +2540,8 @@ fn validate_loaded_message(message: &Message) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 fn message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
     let raw_parts: Option<String> = row.get(4)?;
     let content_parts = parse_message_content_parts(raw_parts);
@@ -2466,64 +2600,28 @@ fn serialize_chat_content(content: Option<&models::ChatContent>) -> Result<Optio
 }
 
 fn list_sessions_inner(state: &AppState) -> Result<Vec<Session>, String> {
-    with_db(state, |conn| {
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, title, created_at, updated_at FROM sessions ORDER BY updated_at DESC",
-            )
-            .map_err(|e| e.to_string())?;
-        let sessions = stmt
-            .query_map([], |row| {
-                Ok(Session {
-                    id: row.get(0)?,
-                    title: row.get(1)?,
-                    created_at: row.get(2)?,
-                    updated_at: row.get(3)?,
-                })
-            })
-            .map_err(|e| e.to_string())?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| e.to_string())?;
-        Ok(sessions)
-    })
+    database_handle(state)?.list_sessions()
 }
 
 fn load_session_inner(state: &AppState, session_id: &str) -> Result<Session, String> {
-    with_db(state, |conn| {
-        let mut stmt = conn
-            .prepare("SELECT id, title, created_at, updated_at FROM sessions WHERE id = ?1 LIMIT 1")
-            .map_err(|e| e.to_string())?;
-
-        stmt.query_row([session_id], |row| {
-            Ok(Session {
-                id: row.get(0)?,
-                title: row.get(1)?,
-                created_at: row.get(2)?,
-                updated_at: row.get(3)?,
-            })
+    database_handle(state)?
+        .load_session(session_id)
+        .map_err(|error| {
+            if error == "Session not found" {
+                format!("Session {} not found", session_id)
+            } else {
+                error
+            }
         })
-        .map_err(|error| match error {
-            rusqlite::Error::QueryReturnedNoRows => format!("Session {} not found", session_id),
-            other => format!("Failed to load session {}: {}", session_id, other),
-        })
-    })
 }
 
+#[cfg(test)]
 fn load_messages_inner(state: &AppState, session_id: &str) -> Result<Vec<Message>, String> {
-    with_db(state, |conn| {
-        let mut stmt = conn
-            .prepare("SELECT id, session_id, role, content, content_parts, model_used, tokens_used, latency_ms, created_at FROM messages WHERE session_id = ?1 ORDER BY created_at ASC")
-            .map_err(|e| e.to_string())?;
-        let messages = stmt
-            .query_map([session_id], message_from_row)
-            .map_err(|e| e.to_string())?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| e.to_string())?;
-        for message in &messages {
-            validate_loaded_message(message)?;
-        }
-        Ok(messages)
-    })
+    let messages = database_handle(state)?.load_messages(session_id)?;
+    for message in &messages {
+        validate_loaded_message(message)?;
+    }
+    Ok(messages)
 }
 
 fn load_recent_messages_for_prompt_inner(
@@ -2531,30 +2629,11 @@ fn load_recent_messages_for_prompt_inner(
     session_id: &str,
     limit: usize,
 ) -> Result<Vec<Message>, String> {
-    with_db(state, |conn| {
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, session_id, role, content, content_parts, model_used, tokens_used, latency_ms, created_at
-                 FROM messages
-                 WHERE session_id = ?1
-                 ORDER BY created_at DESC
-                 LIMIT ?2",
-            )
-            .map_err(|e| e.to_string())?;
-        let mut messages: Vec<Message> = stmt
-            .query_map(
-                rusqlite::params![session_id, limit as i64],
-                message_from_row,
-            )
-            .map_err(|e| e.to_string())?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| e.to_string())?;
-        for message in &messages {
-            validate_loaded_message(message)?;
-        }
-        messages.reverse();
-        Ok(messages)
-    })
+    let messages = database_handle(state)?.load_recent_messages(session_id, limit)?;
+    for message in &messages {
+        validate_loaded_message(message)?;
+    }
+    Ok(messages)
 }
 
 struct PersistMessage<'a> {
@@ -2598,6 +2677,7 @@ fn save_message_inner(state: &AppState, params: PersistMessage<'_>) -> Result<()
     )
 }
 
+#[cfg(test)]
 fn save_message_json_conn(
     conn: &rusqlite::Connection,
     params: PersistMessageJson<'_>,
@@ -2658,7 +2738,15 @@ fn save_message_json_conn(
 }
 
 fn save_message_json_inner(state: &AppState, params: PersistMessageJson<'_>) -> Result<(), String> {
-    with_db(state, |conn| save_message_json_conn(conn, params))
+    database_handle(state)?.save_message_json(storage::PersistMessageJson {
+        session_id: params.session_id.to_string(),
+        role: params.role.to_string(),
+        content: params.content.to_string(),
+        content_parts: params.content_parts.cloned(),
+        model_used: params.model_used.map(ToString::to_string),
+        latency_ms: params.latency_ms,
+        title_source: params.title_source.map(ToString::to_string),
+    })
 }
 
 fn persist_assistant_error_message(
@@ -2703,16 +2791,12 @@ fn preferred_session_id(state: &AppState) -> Result<Option<String>, String> {
         return Ok(Some(session_id));
     }
 
-    with_db(state, |conn| {
-        storage::load_string_setting(conn, CURRENT_SESSION_KEY)
-    })
+    database_handle(state)?.load_current_session_id()
 }
 
 fn set_current_session(state: &AppState, session_id: Option<String>) -> Result<(), String> {
     if let Some(session_id) = session_id.as_deref() {
-        with_db(state, |conn| {
-            storage::save_string_setting(conn, CURRENT_SESSION_KEY, &session_id)
-        })?;
+        database_handle(state)?.save_current_session_id(session_id)?;
     }
 
     *state.current_session.lock().unwrap() = session_id;
@@ -2774,7 +2858,39 @@ fn system_prompt_for_preferences(
     )
 }
 
-fn estimate_message_prompt_cost(message: &Message) -> usize {
+fn estimate_chars_to_tokens(char_count: usize) -> usize {
+    if char_count == 0 {
+        0
+    } else {
+        char_count.div_ceil(APPROX_CHARS_PER_TOKEN)
+    }
+}
+
+fn estimate_chat_content_prompt_tokens(content: &models::ChatContent) -> usize {
+    match content {
+        models::ChatContent::Text(text) => estimate_chars_to_tokens(text.chars().count()),
+        models::ChatContent::Parts(parts) => parts
+            .iter()
+            .map(|part| match part {
+                models::ChatContentPart::Text { text } => {
+                    estimate_chars_to_tokens(text.chars().count())
+                }
+                models::ChatContentPart::Image { blob } => {
+                    estimate_chars_to_tokens(blob.chars().count())
+                }
+                models::ChatContentPart::Audio { path } => {
+                    estimate_chars_to_tokens(path.chars().count())
+                }
+            })
+            .sum(),
+    }
+}
+
+fn estimate_chat_message_prompt_tokens(message: &models::ChatMessage) -> usize {
+    estimate_chat_content_prompt_tokens(&message.content)
+}
+
+fn estimate_message_prompt_tokens(message: &Message) -> usize {
     let content = if message.role == "user" {
         normalized_user_chat_content(message)
             .ok()
@@ -2784,34 +2900,49 @@ fn estimate_message_prompt_cost(message: &Message) -> usize {
         models::ChatContent::Text(message.content.clone())
     };
 
-    match content {
-        models::ChatContent::Text(text) => text.chars().count(),
-        models::ChatContent::Parts(parts) => parts
-            .iter()
-            .map(|part| match part {
-                models::ChatContentPart::Text { text } => text.chars().count(),
-                models::ChatContentPart::Image { blob } => blob.chars().count(),
-                models::ChatContentPart::Audio { path } => path.chars().count(),
-            })
-            .sum(),
-    }
+    estimate_chat_content_prompt_tokens(&content)
 }
 
+fn history_prompt_budget_tokens(
+    model_context_tokens: u32,
+    requested_output_tokens: u32,
+    reserved_prompt_tokens: usize,
+) -> usize {
+    let context_window = model_context_tokens as usize;
+    let reserved_output_tokens = usize::try_from(requested_output_tokens)
+        .unwrap_or(usize::MAX)
+        .min(context_window);
+
+    context_window
+        .saturating_sub(reserved_output_tokens)
+        .saturating_sub(PROMPT_TOKEN_HEADROOM)
+        .saturating_sub(reserved_prompt_tokens)
+        .max(1)
+}
+
+#[cfg(test)]
 fn trim_history_for_prompt(history: &[Message]) -> Result<Vec<Message>, String> {
+    trim_history_for_prompt_with_budget(history, DEFAULT_PROMPT_HISTORY_TOKEN_BUDGET)
+}
+
+fn trim_history_for_prompt_with_budget(
+    history: &[Message],
+    budget_tokens: usize,
+) -> Result<Vec<Message>, String> {
     let mut selected = Vec::new();
-    let mut total_chars = 0usize;
+    let mut total_tokens = 0usize;
 
     for message in history.iter().rev() {
-        let message_chars = estimate_message_prompt_cost(message);
+        let message_tokens = estimate_message_prompt_tokens(message);
         let would_exceed_budget = !selected.is_empty()
             && (selected.len() >= MAX_PROMPT_HISTORY_MESSAGES
-                || total_chars + message_chars > MAX_PROMPT_HISTORY_CHARS);
+                || total_tokens + message_tokens > budget_tokens);
 
         if would_exceed_budget {
             break;
         }
 
-        total_chars += message_chars;
+        total_tokens += message_tokens;
         selected.push(message.clone());
     }
 
@@ -2946,24 +3077,23 @@ mod tests {
     }
 
     fn test_conn() -> Connection {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(include_str!("../migrations/001_initial.sql"))
-            .unwrap();
-        conn.execute_batch(include_str!("../migrations/003_message_content_parts.sql"))
-            .unwrap();
-        conn.execute_batch(include_str!("../migrations/004_knowledge.sql"))
-            .unwrap();
-        conn
+        let path = std::env::temp_dir().join(format!("friday-lib-test-{}.db", Uuid::new_v4()));
+        storage::init_db(&path).unwrap()
+    }
+
+    fn test_db_path(conn: &Connection) -> std::path::PathBuf {
+        conn.query_row("PRAGMA database_list", [], |row| row.get::<_, String>(2))
+            .map(std::path::PathBuf::from)
+            .unwrap()
     }
 
     fn test_app_state(conn: Connection) -> AppState {
+        let db_path = test_db_path(&conn);
         AppState {
-            db: Mutex::new(Some(conn)),
-            db_path: Mutex::new(None),
+            database: Mutex::new(Some(storage::DatabaseHandle::new(&db_path).unwrap())),
             current_session: Mutex::new(None),
             active_generation_session: Mutex::new(None),
             cancel_flag: AtomicBool::new(false),
-            tools_enabled: AtomicBool::new(false),
         }
     }
 
@@ -3582,9 +3712,9 @@ mod tests {
     fn active_model_id_round_trips_through_settings_storage() {
         let conn = test_conn();
 
-        persist_active_model_id(&conn, "gemma-4-e4b-it").unwrap();
+        storage::save_string_setting(&conn, ACTIVE_MODEL_KEY, "gemma-4-e4b-it").unwrap();
 
-        let loaded = load_persisted_active_model_id(&conn).unwrap();
+        let loaded = storage::load_string_setting(&conn, ACTIVE_MODEL_KEY).unwrap();
         assert_eq!(loaded.as_deref(), Some("gemma-4-e4b-it"));
     }
 
@@ -3612,10 +3742,10 @@ mod tests {
             state.current_session.lock().unwrap().as_deref(),
             Some("session-a")
         );
-        let persisted = with_db(&state, |conn| {
-            storage::load_string_setting(conn, CURRENT_SESSION_KEY)
-        })
-        .unwrap();
+        let persisted = database_handle(&state)
+            .unwrap()
+            .load_current_session_id()
+            .unwrap();
         assert_eq!(persisted.as_deref(), Some("session-a"));
     }
 

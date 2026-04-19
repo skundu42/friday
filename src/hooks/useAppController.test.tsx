@@ -121,7 +121,10 @@ describe("useAppController", () => {
     availableAppUpdate = null;
 
     invokeMock.mockImplementation(
-      (command: string, args?: { sessionId?: string; input?: AppSettingsInput }) => {
+      (
+        command: string,
+        args?: { sessionId?: string; input?: AppSettingsInput },
+      ) => {
         switch (command) {
           case "bootstrap_app":
             return Promise.resolve({
@@ -134,6 +137,67 @@ describe("useAppController", () => {
               knowledgeStatus: {
                 state: "ready",
                 message: "Knowledge is ready.",
+              },
+              knowledgeStats: {
+                totalSources: 0,
+                readySources: 0,
+                totalTextChunks: 0,
+                totalImageAssets: 0,
+                storageDir: "/tmp/knowledge",
+              },
+              knowledgeSources: [],
+              availableModels: [
+                {
+                  id: "gemma-4-e2b-it",
+                  repo: "",
+                  filename: "gemma-4-e2b-it.litertlm",
+                  display_name: "Gemma 4 E2B",
+                  size_bytes: 2_400_000_000,
+                  size_gb: 2.4,
+                  min_ram_gb: 4,
+                  supports_image_input: true,
+                  supports_audio_input: true,
+                  supports_video_input: false,
+                  supports_thinking: true,
+                  max_context_tokens: 131072,
+                  recommended_max_output_tokens: 4096,
+                },
+              ],
+              downloadedModelIds: ["gemma-4-e2b-it"],
+              activeModel: {
+                id: "gemma-4-e2b-it",
+                repo: "",
+                filename: "gemma-4-e2b-it.litertlm",
+                display_name: "Gemma 4 E2B",
+                size_bytes: 2_400_000_000,
+                size_gb: 2.4,
+                min_ram_gb: 4,
+                supports_image_input: true,
+                supports_audio_input: true,
+                supports_video_input: false,
+                supports_thinking: true,
+                max_context_tokens: 131072,
+                recommended_max_output_tokens: 4096,
+              },
+              serviceDiagnostics: {
+                sidecar: {
+                  service: "sidecar",
+                  state: "ready",
+                  message: "LiteRT runtime is ready.",
+                  consecutiveFailures: 0,
+                },
+                searxng: {
+                  service: "searxng",
+                  state: "ready",
+                  message: "Local web search is ready.",
+                  consecutiveFailures: 0,
+                },
+                knowledge: {
+                  service: "knowledge",
+                  state: "ready",
+                  message: "Knowledge is ready.",
+                  consecutiveFailures: 0,
+                },
               },
             } satisfies BootstrapPayload);
           case "detect_backend":
@@ -184,7 +248,8 @@ describe("useAppController", () => {
             return Promise.resolve(sessions);
           case "select_session": {
             const sessionId = args?.sessionId ?? sessionA.id;
-            const session = sessions.find((item) => item.id === sessionId) ?? sessionA;
+            const session =
+              sessions.find((item) => item.id === sessionId) ?? sessionA;
             return Promise.resolve({
               session,
               messages: sessionMessages[sessionId] ?? [],
@@ -204,8 +269,7 @@ describe("useAppController", () => {
                 max_tokens: args?.input?.chat.max_tokens ?? 4096,
                 web_assist_enabled:
                   args?.input?.chat.web_assist_enabled ?? false,
-                knowledge_enabled:
-                  args?.input?.chat.knowledge_enabled ?? false,
+                knowledge_enabled: args?.input?.chat.knowledge_enabled ?? false,
                 generation: {
                   temperature: args?.input?.chat.generation.temperature,
                   top_p: args?.input?.chat.generation.top_p,
@@ -227,7 +291,9 @@ describe("useAppController", () => {
   async function waitForBootstrap(result: {
     current: ReturnType<typeof useAppController>;
   }) {
-    await waitFor(() => expect(result.current.activeSession?.id).toBe("session-a"));
+    await waitFor(() =>
+      expect(result.current.activeSession?.id).toBe("session-a"),
+    );
   }
 
   it("bootstraps and normalizes persisted assistant messages into UI-message content", async () => {
@@ -347,7 +413,9 @@ describe("useAppController", () => {
     });
 
     await waitFor(() =>
-      expect(result.current.messages[result.current.messages.length - 1]).toMatchObject({
+      expect(
+        result.current.messages[result.current.messages.length - 1],
+      ).toMatchObject({
         content: "Persisted final answer",
         content_parts: { thinking: "Persisted reasoning" },
       }),
@@ -468,7 +536,8 @@ describe("useAppController", () => {
       invokeMock.mock.calls.some(
         ([command, args]) =>
           command === "select_session" &&
-          (args as { sessionId?: string } | undefined)?.sessionId === "session-b",
+          (args as { sessionId?: string } | undefined)?.sessionId ===
+            "session-b",
       ),
     ).toBe(false);
 

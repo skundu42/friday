@@ -166,10 +166,7 @@ export default function App() {
         if (cancelled) {
           return;
         }
-        if (
-          !status.readyToChat ||
-          !settings.user_display_name.trim()
-        ) {
+        if (!status.readyToChat || !settings.user_display_name.trim()) {
           setShowWizard(true);
         }
         setWizardChecked(true);
@@ -185,7 +182,12 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [controller.bootstrapError, controller.isBootstrapping, controller.settings, wizardChecked]);
+  }, [
+    controller.bootstrapError,
+    controller.isBootstrapping,
+    controller.settings,
+    wizardChecked,
+  ]);
 
   if (controller.bootstrapError) {
     return (
@@ -305,7 +307,11 @@ export default function App() {
                       message={`Update installed: v${controller.installedAppUpdateVersion}`}
                       description="Restart Friday to finish applying the update."
                       action={
-                        <Button type="primary" size="small" onClick={handleRestartForUpdate}>
+                        <Button
+                          type="primary"
+                          size="small"
+                          onClick={handleRestartForUpdate}
+                        >
                           Restart now
                         </Button>
                       }
@@ -366,8 +372,12 @@ export default function App() {
                       onToggleWebSearch={() => controller.toggleWebSearch()}
                       onToggleKnowledge={() => controller.toggleKnowledge()}
                       onToggleThinking={() => controller.toggleThinking()}
-                      activeSessionTitle={controller.activeSession?.title ?? "New chat"}
-                      userDisplayName={controller.settings?.user_display_name ?? ""}
+                      activeSessionTitle={
+                        controller.activeSession?.title ?? "New chat"
+                      }
+                      userDisplayName={
+                        controller.settings?.user_display_name ?? ""
+                      }
                       replyLanguage={
                         controller.settings?.chat.reply_language ?? "english"
                       }
@@ -389,16 +399,21 @@ export default function App() {
                     onBackToChat={handleShowChat}
                     onToggleSidebar={handleToggleSidebar}
                   >
-                    <Suspense fallback={<PanelFallback label="Loading knowledge..." />}>
+                    <Suspense
+                      fallback={<PanelFallback label="Loading knowledge..." />}
+                    >
                       <KnowledgePanel
                         status={controller.knowledgeStatus}
                         sources={controller.knowledgeSources}
                         stats={controller.knowledgeStats}
+                        ingestProgress={controller.knowledgeIngestProgress}
                         onRefresh={() => controller.refreshKnowledge()}
                         onIngestFile={(filePath) =>
                           controller.ingestKnowledgeFile(filePath)
                         }
-                        onIngestUrl={(url) => controller.ingestKnowledgeUrl(url)}
+                        onIngestUrl={(url) =>
+                          controller.ingestKnowledgeUrl(url)
+                        }
                         onDeleteSource={(sourceId) =>
                           controller.deleteKnowledgeSource(sourceId)
                         }
@@ -415,14 +430,20 @@ export default function App() {
                     onToggleSidebar={handleToggleSidebar}
                   >
                     {readyForSettings ? (
-                      <Suspense fallback={<PanelFallback label="Loading settings..." />}>
+                      <Suspense
+                        fallback={<PanelFallback label="Loading settings..." />}
+                      >
                         <SettingsPanel
                           settings={controller.settings!}
                           backendStatus={controller.backendStatus!}
                           activeModelId={controller.activeModelId}
                           isSwitchingModel={controller.isSwitchingModel}
-                          onModelChange={(modelId) => controller.selectModel(modelId)}
-                          onSaveSettings={(input) => controller.saveAppSettings(input)}
+                          onModelChange={(modelId) =>
+                            controller.selectModel(modelId)
+                          }
+                          onSaveSettings={(input) =>
+                            controller.saveAppSettings(input)
+                          }
                           isSaving={controller.isSavingSettings}
                         />
                       </Suspense>
@@ -457,7 +478,9 @@ export default function App() {
           isBusy={controller.isGenerating}
           onCreateSession={handleCreateSession}
           onSelectSession={handleSelectSession}
-          onDeleteSession={(sessionId) => void controller.deleteSession(sessionId)}
+          onDeleteSession={(sessionId) =>
+            void controller.deleteSession(sessionId)
+          }
           onShowKnowledge={handleShowKnowledge}
           onShowSettings={handleShowSettings}
         />

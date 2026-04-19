@@ -1,3 +1,4 @@
+use crate::service_diagnostics::{DiagnosticsTracker, ServiceDiagnostics, ServiceName};
 use anyhow::Context;
 use arrow_array::types::Float32Type;
 use arrow_array::{
@@ -40,7 +41,7 @@ const MAX_PROMPT_TEXT_TOTAL_CHARS: usize = 3000;
 const MAX_PROMPT_TEXT_SNIPPET_CHARS: usize = 600;
 const MIN_VECTOR_INDEX_ROWS: usize = 256;
 const KNOWLEDGE_WRITE_BATCH_SIZE: usize = 64;
-const KNOWLEDGE_RUNTIME_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+const KNOWLEDGE_RUNTIME_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 const KNOWLEDGE_RUNTIME_IDLE_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 const KNOWLEDGE_DB_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -252,6 +253,7 @@ pub struct KnowledgeManager {
     runtime_init_lock: AsyncMutex<()>,
     status: Mutex<KnowledgeStatus>,
     activity: Arc<KnowledgeActivity>,
+    diagnostics: DiagnosticsTracker,
 }
 
 impl Default for KnowledgeManager {
@@ -268,6 +270,10 @@ impl KnowledgeManager {
             runtime_init_lock: AsyncMutex::new(()),
             status: Mutex::new(KnowledgeStatus::unavailable()),
             activity: Arc::new(KnowledgeActivity::new()),
+            diagnostics: DiagnosticsTracker::new(
+                ServiceName::Knowledge,
+                "Knowledge storage is unavailable.",
+            ),
         }
     }
 
@@ -283,17 +289,22 @@ impl KnowledgeManager {
 
         let marker_exists = root_dir.join("models").join(".provisioned").exists();
         *self.root_dir.lock().unwrap() = Some(root_dir);
-        *self.status.lock().unwrap() = if marker_exists {
+        let status = if marker_exists {
             KnowledgeStatus::ready()
         } else {
             KnowledgeStatus::needs_models()
         };
+        self.set_status(None, status);
         self.ensure_idle_monitor();
         Ok(())
     }
 
     pub fn status(&self) -> KnowledgeStatus {
         self.status.lock().unwrap().clone()
+    }
+
+    pub fn diagnostics(&self) -> ServiceDiagnostics {
+        self.diagnostics.current()
     }
 
     pub fn storage_dir(&self) -> Result<PathBuf, String> {
@@ -305,6 +316,13 @@ impl KnowledgeManager {
     }
 
     fn set_status(&self, app: Option<&tauri::AppHandle>, status: KnowledgeStatus) {
+        match status.state {
+            KnowledgeStatusState::Ready => self.diagnostics.mark_ready(status.message.clone()),
+            KnowledgeStatusState::Unavailable | KnowledgeStatusState::NeedsModels => {
+                self.diagnostics.mark_unavailable(status.message.clone())
+            }
+            _ => {}
+        }
         *self.status.lock().unwrap() = status.clone();
         if let Some(app) = app {
             let _ = app.emit("knowledge-status", &status);
@@ -443,6 +461,8 @@ impl KnowledgeManager {
                 Ok(())
             }
             Err(error) => {
+                self.diagnostics
+                    .record_failure("runtime_load", error.to_string(), None);
                 if load_text || load_image {
                     self.set_status(
                         app,
@@ -580,6 +600,30 @@ fn open_db(db_path: &Path) -> Result<rusqlite::Connection, String> {
     Ok(conn)
 }
 
+fn emit_ingest_progress(
+    app: Option<&tauri::AppHandle>,
+    source_id: Option<&str>,
+    locator: &str,
+    stage: &str,
+    message: Option<String>,
+    chunk_count: Option<usize>,
+    error: Option<String>,
+) {
+    if let Some(app) = app {
+        let _ = app.emit(
+            "knowledge-ingest-progress",
+            serde_json::json!({
+                "sourceId": source_id,
+                "locator": locator,
+                "stage": stage,
+                "message": message,
+                "chunkCount": chunk_count,
+                "error": error,
+            }),
+        );
+    }
+}
+
 #[derive(Debug, Clone)]
 struct SourceRecord {
     id: String,
@@ -677,32 +721,30 @@ pub async fn ingest_file(
             message: format!("Indexing {}", path.display()),
         },
     );
+    emit_ingest_progress(
+        app,
+        None,
+        file_path,
+        "indexing",
+        Some(format!("Indexing {}", path.display())),
+        None,
+        None,
+    );
 
-    if let Some(app) = app {
-        let _ = app.emit(
-            "knowledge-ingest-progress",
-            serde_json::json!({
-                "stage": "indexing",
-                "locator": file_path,
-            }),
-        );
-    }
-
-    let result = ingest_file_inner(manager, db_path, &path).await;
+    let result = ingest_file_inner(manager, db_path, &path, app).await;
 
     match result {
         Ok(result) => {
             manager.set_status(app, KnowledgeStatus::ready());
-            if let Some(app) = app {
-                let _ = app.emit(
-                    "knowledge-ingest-progress",
-                    serde_json::json!({
-                        "stage": "complete",
-                        "locator": file_path,
-                        "chunkCount": result.chunk_count,
-                    }),
-                );
-            }
+            emit_ingest_progress(
+                app,
+                result.source_id.as_deref(),
+                file_path,
+                "complete",
+                Some(format!("Indexed {}", result.display_name)),
+                Some(result.chunk_count),
+                None,
+            );
             Ok(result)
         }
         Err(error) => {
@@ -713,16 +755,15 @@ pub async fn ingest_file(
                     message: error.clone(),
                 },
             );
-            if let Some(app) = app {
-                let _ = app.emit(
-                    "knowledge-ingest-progress",
-                    serde_json::json!({
-                        "stage": "error",
-                        "locator": file_path,
-                        "error": error,
-                    }),
-                );
-            }
+            emit_ingest_progress(
+                app,
+                None,
+                file_path,
+                "error",
+                Some(format!("Failed to index {}", path.display())),
+                None,
+                Some(error.clone()),
+            );
             Err(error)
         }
     }
@@ -742,6 +783,24 @@ pub async fn ingest_url(
             state: KnowledgeStatusState::Indexing,
             message: format!("Indexing {}", url),
         },
+    );
+    emit_ingest_progress(
+        app,
+        None,
+        url,
+        "indexing",
+        Some(format!("Indexing {}", url)),
+        None,
+        None,
+    );
+    emit_ingest_progress(
+        app,
+        None,
+        url,
+        "embedding",
+        Some(format!("Embedding content from {}", url)),
+        None,
+        None,
     );
 
     let result: Result<KnowledgeIngestResult, String> = async {
@@ -815,6 +874,15 @@ pub async fn ingest_url(
     match result {
         Ok(result) => {
             manager.set_status(app, KnowledgeStatus::ready());
+            emit_ingest_progress(
+                app,
+                result.source_id.as_deref(),
+                url,
+                "complete",
+                Some(format!("Indexed {}", result.display_name)),
+                Some(result.chunk_count),
+                None,
+            );
             Ok(result)
         }
         Err(error) => {
@@ -824,6 +892,15 @@ pub async fn ingest_url(
                     state: KnowledgeStatusState::Error,
                     message: error.clone(),
                 },
+            );
+            emit_ingest_progress(
+                app,
+                None,
+                url,
+                "error",
+                Some(format!("Failed to index {}", url)),
+                None,
+                Some(error.clone()),
             );
             Err(error)
         }
@@ -1220,6 +1297,7 @@ async fn ingest_file_inner(
     manager: &KnowledgeManager,
     db_path: &Path,
     path: &Path,
+    app: Option<&tauri::AppHandle>,
 ) -> Result<KnowledgeIngestResult, String> {
     let metadata = std::fs::metadata(path)
         .map_err(|e| format!("Failed to inspect {}: {}", path.display(), e))?;
@@ -1260,6 +1338,15 @@ async fn ingest_file_inner(
 
     match modality {
         KnowledgeModality::Image => {
+            emit_ingest_progress(
+                app,
+                Some(source.id.as_str()),
+                source.locator.as_str(),
+                "embedding",
+                Some(format!("Embedding image {}", source.display_name)),
+                None,
+                None,
+            );
             manager.ensure_runtime_components(None, false, true).await?;
             let image_embeddings = {
                 let runtime_guard = manager.runtime.lock().await;
@@ -1289,6 +1376,15 @@ async fn ingest_file_inner(
             })
         }
         KnowledgeModality::Audio => {
+            emit_ingest_progress(
+                app,
+                Some(source.id.as_str()),
+                source.locator.as_str(),
+                "embedding",
+                Some(format!("Embedding audio {}", source.display_name)),
+                None,
+                None,
+            );
             manager.ensure_runtime_components(None, true, false).await?;
             let audio_embeddings = {
                 let runtime_guard = manager.runtime.lock().await;
@@ -1333,6 +1429,15 @@ async fn ingest_file_inner(
             })
         }
         _ => {
+            emit_ingest_progress(
+                app,
+                Some(source.id.as_str()),
+                source.locator.as_str(),
+                "embedding",
+                Some(format!("Embedding text from {}", source.display_name)),
+                None,
+                None,
+            );
             manager.ensure_runtime_components(None, true, false).await?;
             let text_embeddings = {
                 let runtime_guard = manager.runtime.lock().await;

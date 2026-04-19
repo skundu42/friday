@@ -1,8 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useChat } from "@ai-sdk/react";
+import { notification } from "antd";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { makeFridayAssistantMessage, normalizeFridayMessage, normalizeFridayMessages, toFridayChatMessages } from "../lib/friday-chat";
+import {
+  makeFridayAssistantMessage,
+  normalizeFridayMessage,
+  normalizeFridayMessages,
+  toFridayChatMessages,
+} from "../lib/friday-chat";
 import { TauriChatTransport } from "../lib/tauri-chat-transport";
 import type {
   AppUpdateInfo,
@@ -15,12 +21,14 @@ import type {
   FileAttachment,
   FridayChatMessage,
   FridayUIMessage,
+  KnowledgeIngestProgress,
   KnowledgeSource,
   KnowledgeStats,
   KnowledgeStatus,
   Message,
   ModelInfo,
   ReplyLanguage,
+  ServiceDiagnosticsBundle,
   Session,
   SessionSelectionResult,
   ToolCallEvent,
@@ -249,10 +257,45 @@ function canUseWebSearch(
 
 function canUseKnowledge(status: KnowledgeStatus | null) {
   return Boolean(
-    status &&
-    status.state !== "unavailable" &&
-    status.state !== "error",
+    status && status.state !== "unavailable" && status.state !== "error",
   );
+}
+
+function planSettingsRefresh(
+  previous: AppSettingsInput,
+  next: AppSettingsInput,
+) {
+  return {
+    backend: previous.chat.max_tokens !== next.chat.max_tokens,
+    webSearch:
+      previous.chat.web_assist_enabled !== next.chat.web_assist_enabled,
+    knowledge: previous.chat.knowledge_enabled !== next.chat.knowledge_enabled,
+  };
+}
+
+function upsertIngestProgress(
+  current: KnowledgeIngestProgress[],
+  next: KnowledgeIngestProgress,
+) {
+  const key = next.sourceId ?? next.locator;
+  const remaining = current.filter(
+    (entry) => (entry.sourceId ?? entry.locator) !== key,
+  );
+  return [next, ...remaining].slice(0, 12);
+}
+
+function notifyError(title: string, error: unknown) {
+  notification.error({
+    message: title,
+    description: toErrorMessage(error),
+  });
+}
+
+function notifyWarning(title: string, error: unknown) {
+  notification.warning({
+    message: title,
+    description: toErrorMessage(error),
+  });
 }
 
 function serializeAttachments(attachments: FileAttachment[]) {
@@ -277,23 +320,28 @@ export function useAppController() {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [activeSession, setActiveSession] = useState<Session | null>(null);
   const [persistedMessages, setPersistedMessages] = useState<Message[]>([]);
-  const [fallbackMessages, setFallbackMessages] = useState<FridayUIMessage[]>([]);
+  const [fallbackMessages, setFallbackMessages] = useState<FridayUIMessage[]>(
+    [],
+  );
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [backendStatus, setBackendStatus] = useState<BackendStatus | null>(
     null,
   );
-  const [webSearchStatus, setWebSearchStatus] = useState<WebSearchStatus | null>(
-    null,
-  );
-  const [knowledgeStatus, setKnowledgeStatus] = useState<KnowledgeStatus | null>(
-    null,
-  );
+  const [webSearchStatus, setWebSearchStatus] =
+    useState<WebSearchStatus | null>(null);
+  const [knowledgeStatus, setKnowledgeStatus] =
+    useState<KnowledgeStatus | null>(null);
   const [knowledgeSources, setKnowledgeSources] = useState<KnowledgeSource[]>(
     [],
   );
   const [knowledgeStats, setKnowledgeStats] = useState<KnowledgeStats | null>(
     null,
   );
+  const [knowledgeIngestProgress, setKnowledgeIngestProgress] = useState<
+    KnowledgeIngestProgress[]
+  >([]);
+  const [serviceDiagnostics, setServiceDiagnostics] =
+    useState<ServiceDiagnosticsBundle | null>(null);
   const [currentModel, setCurrentModel] = useState("—");
   const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
   const [downloadedModelIds, setDownloadedModelIds] = useState<string[]>([]);
@@ -316,6 +364,7 @@ export function useAppController() {
 
   const activeSessionRef = useRef<Session | null>(null);
   const activeRequestSessionIdRef = useRef<string | null>(null);
+  const activeRequestIdRef = useRef<string | null>(null);
   const lastChatErrorRef = useRef<string | null>(null);
   const requestFailedRef = useRef(false);
   const settingsSaveChainRef = useRef<Promise<void>>(Promise.resolve());
@@ -349,6 +398,7 @@ export function useAppController() {
     },
     onFinish: ({ message }) => {
       activeRequestSessionIdRef.current = null;
+      activeRequestIdRef.current = null;
       setGenerationStatus(null);
       if (message.metadata?.modelUsed) {
         setCurrentModel(formatModelLabel(message.metadata.modelUsed));
@@ -360,8 +410,7 @@ export function useAppController() {
     () => normalizeFridayMessages(chatMessages),
     [chatMessages],
   );
-  const isGenerating =
-    chatStatus === "submitted" || chatStatus === "streaming";
+  const isGenerating = chatStatus === "submitted" || chatStatus === "streaming";
 
   useEffect(() => {
     activeSessionRef.current = activeSession;
@@ -403,17 +452,20 @@ export function useAppController() {
     setThinkingEnabled(Boolean(nextSettings.chat.generation.thinking_enabled));
   };
 
-  const appendAssistantError = useCallback((sessionId: string, message: string) => {
-    setChatMessages((previous) => [
-      ...previous,
-      makeFridayAssistantMessage({
-        id: makeId(),
-        sessionId,
-        content: `⚠️ ${message}`,
-      }),
-    ]);
-    clearChatError();
-  }, [clearChatError, setChatMessages]);
+  const appendAssistantError = useCallback(
+    (sessionId: string, message: string) => {
+      setChatMessages((previous) => [
+        ...previous,
+        makeFridayAssistantMessage({
+          id: makeId(),
+          sessionId,
+          content: `⚠️ ${message}`,
+        }),
+      ]);
+      clearChatError();
+    },
+    [clearChatError, setChatMessages],
+  );
 
   useEffect(() => {
     if (!chatError || !requestFailedRef.current) {
@@ -429,15 +481,41 @@ export function useAppController() {
     }
 
     activeRequestSessionIdRef.current = null;
+    activeRequestIdRef.current = null;
     lastChatErrorRef.current = null;
   }, [appendAssistantError, chatError]);
 
   const resetGenerationUiState = () => {
     activeRequestSessionIdRef.current = null;
+    activeRequestIdRef.current = null;
     lastChatErrorRef.current = null;
     setGenerationStatus(null);
     clearChatError();
   };
+
+  const matchesActiveRequest = useCallback(
+    (payload: { sessionId?: string | null; requestId?: string | null }) => {
+      const activeSessionId = activeRequestSessionIdRef.current;
+      if (!activeSessionId) {
+        return false;
+      }
+
+      if (activeRequestIdRef.current) {
+        return payload.requestId === activeRequestIdRef.current;
+      }
+
+      if (payload.sessionId !== activeSessionId) {
+        return false;
+      }
+
+      if (typeof payload.requestId === "string" && payload.requestId) {
+        activeRequestIdRef.current = payload.requestId;
+      }
+
+      return true;
+    },
+    [],
+  );
 
   const refreshModelInventory = async () => {
     const [modelsResponse, activeModel, downloadedIdsResponse] =
@@ -504,11 +582,15 @@ export function useAppController() {
   }: {
     includeStatus?: boolean;
   } = {}) => {
-    const [statusResult, sourcesResult, statsResult] = await Promise.allSettled([
-      includeStatus ? detectKnowledgeStatus() : Promise.resolve(knowledgeStatus),
-      invoke<KnowledgeSource[]>("knowledge_list_sources"),
-      invoke<KnowledgeStats>("knowledge_stats"),
-    ]);
+    const [statusResult, sourcesResult, statsResult] = await Promise.allSettled(
+      [
+        includeStatus
+          ? detectKnowledgeStatus()
+          : Promise.resolve(knowledgeStatus),
+        invoke<KnowledgeSource[]>("knowledge_list_sources"),
+        invoke<KnowledgeStats>("knowledge_stats"),
+      ],
+    );
 
     if (statusResult.status === "fulfilled" && statusResult.value) {
       setKnowledgeStatus(statusResult.value);
@@ -522,7 +604,10 @@ export function useAppController() {
       );
     }
 
-    if (sourcesResult.status === "fulfilled" && Array.isArray(sourcesResult.value)) {
+    if (
+      sourcesResult.status === "fulfilled" &&
+      Array.isArray(sourcesResult.value)
+    ) {
       setKnowledgeSources(sourcesResult.value);
     } else if (sourcesResult.status === "rejected") {
       setKnowledgeSources([]);
@@ -542,7 +627,11 @@ export function useAppController() {
   const warmBackendIfNeeded = async (
     statusValue: BackendStatus | null | undefined,
   ) => {
-    if (!statusValue || statusValue.connected || statusValue.state !== "ready") {
+    if (
+      !statusValue ||
+      statusValue.connected ||
+      statusValue.state !== "ready"
+    ) {
       return statusValue;
     }
 
@@ -659,32 +748,22 @@ export function useAppController() {
       setKnowledgeStatus(
         payload.knowledgeStatus ?? unavailableKnowledgeStatus(),
       );
-
-      const [inventoryResult, knowledgeResult] = await Promise.allSettled([
-        refreshModelInventory(),
-        refreshKnowledge({ includeStatus: false }),
-      ]);
-
-      if (inventoryResult.status === "rejected") {
-        console.warn(
-          "refreshModelInventory during bootstrap failed:",
-          inventoryResult.reason,
-        );
-      }
-
-      if (knowledgeResult.status === "rejected") {
-        console.warn(
-          "refreshKnowledge during bootstrap failed:",
-          knowledgeResult.reason,
-        );
-      }
+      setKnowledgeStats(payload.knowledgeStats ?? null);
+      setKnowledgeSources(payload.knowledgeSources ?? []);
+      setAvailableModels(payload.availableModels ?? []);
+      setDownloadedModelIds(payload.downloadedModelIds ?? []);
+      setActiveModelId(payload.activeModel?.id ?? "");
+      setServiceDiagnostics(payload.serviceDiagnostics ?? null);
+      setKnowledgeIngestProgress([]);
 
       // Keep startup resilient offline: update check runs in the background and
       // must not delay chat readiness.
       void checkForAppUpdate();
 
       void warmBackendIfNeeded(payload.backendStatus);
-      if (
+      if (payload.activeModel?.display_name) {
+        setCurrentModel(payload.activeModel.display_name);
+      } else if (
         payload.backendStatus.connected &&
         payload.backendStatus.models[0] &&
         !payload.backendStatus.models[0].includes("undefined")
@@ -725,6 +804,17 @@ export function useAppController() {
         "web-search-status",
         (event) => {
           setWebSearchStatus(event.payload);
+          setServiceDiagnostics((previous) =>
+            previous
+              ? {
+                  ...previous,
+                  searxng: {
+                    ...previous.searxng,
+                    message: event.payload.message,
+                  },
+                }
+              : previous,
+          );
           if (!activeRequestSessionIdRef.current) {
             return;
           }
@@ -742,13 +832,34 @@ export function useAppController() {
         "knowledge-status",
         (event) => {
           setKnowledgeStatus(event.payload);
+          setServiceDiagnostics((previous) =>
+            previous
+              ? {
+                  ...previous,
+                  knowledge: {
+                    ...previous.knowledge,
+                    message: event.payload.message,
+                  },
+                }
+              : previous,
+          );
         },
       );
+
+      const unlistenKnowledgeIngestProgress =
+        await listen<KnowledgeIngestProgress>(
+          "knowledge-ingest-progress",
+          (event) => {
+            setKnowledgeIngestProgress((previous) =>
+              upsertIngestProgress(previous, event.payload),
+            );
+          },
+        );
 
       const unlistenToolCall = await listen<ToolCallEvent>(
         "tool-call-start",
         (event) => {
-          if (event.payload.sessionId !== activeRequestSessionIdRef.current) {
+          if (!matchesActiveRequest(event.payload)) {
             return;
           }
 
@@ -759,7 +870,7 @@ export function useAppController() {
       const unlistenToolResult = await listen<ToolResultEvent>(
         "tool-call-result",
         (event) => {
-          if (event.payload.sessionId !== activeRequestSessionIdRef.current) {
+          if (!matchesActiveRequest(event.payload)) {
             return;
           }
 
@@ -774,6 +885,7 @@ export function useAppController() {
         unlistenActivity();
         unlistenWebSearchStatus();
         unlistenKnowledgeStatus();
+        unlistenKnowledgeIngestProgress();
         unlistenToolCall();
         unlistenToolResult();
       };
@@ -809,9 +921,10 @@ export function useAppController() {
     return () => {
       cancelled = true;
       activeRequestSessionIdRef.current = null;
+      activeRequestIdRef.current = null;
       dispose?.();
     };
-  }, []);
+  }, [matchesActiveRequest]);
 
   const createSession = async () => {
     if (isGenerating || activeRequestSessionIdRef.current) return;
@@ -852,7 +965,9 @@ export function useAppController() {
     if (
       !deletedActiveSession &&
       activeSessionRef.current?.id &&
-      nextSessions.some((session) => session.id === activeSessionRef.current?.id)
+      nextSessions.some(
+        (session) => session.id === activeSessionRef.current?.id,
+      )
     ) {
       return;
     }
@@ -892,10 +1007,13 @@ export function useAppController() {
     const serializedAttachments = hasAttachments
       ? serializeAttachments(readyAttachments)
       : null;
-    const attachmentsSummary = readyAttachments.map((attachment) => attachment.name);
+    const attachmentsSummary = readyAttachments.map(
+      (attachment) => attachment.name,
+    );
 
     lastChatErrorRef.current = null;
     activeRequestSessionIdRef.current = sessionId;
+    activeRequestIdRef.current = null;
 
     const needsWebSearchStartup =
       effectiveWebAssistEnabled && webSearchStatus?.state !== "ready";
@@ -951,12 +1069,13 @@ export function useAppController() {
     setGenerationStatus("Stopping…");
     stopChat();
     try {
-      const response = await invoke<CancelGenerationResponse>("cancel_generation");
+      const response =
+        await invoke<CancelGenerationResponse>("cancel_generation");
       if (response.status === "failed") {
         const message =
           response.message ??
           "Could not stop the current response. Please try again.";
-        console.error("cancel_generation failed:", response.error_code, message);
+        notifyError("Cancellation failed", message);
         setGenerationStatus(message);
         return;
       }
@@ -966,7 +1085,7 @@ export function useAppController() {
         setGenerationStatus(null);
       }
     } catch (error) {
-      console.error("cancel_generation invoke failed:", error);
+      notifyError("Failed to cancel the current response", error);
       setGenerationStatus(null);
     }
   };
@@ -994,16 +1113,35 @@ export function useAppController() {
           input: mergedInput,
         });
         const savedInput = settingsToInput(saved);
+        const refreshPlan = planSettingsRefresh(committedSettings, savedInput);
         committedSettingsRef.current = savedInput;
         if (settingsInputsEqual(desiredSettingsRef.current, mergedInput)) {
           desiredSettingsRef.current = savedInput;
           applySavedSettingsState(saved);
         }
-        try {
-          await refreshBackendStatus({ includeModelInventory: false });
-        } catch (error) {
-          console.warn("refreshBackendStatus after save_settings failed:", error);
+
+        const refreshTasks: Array<Promise<unknown>> = [];
+        if (refreshPlan.backend) {
+          refreshTasks.push(detectBackendStatus());
         }
+        if (refreshPlan.webSearch) {
+          refreshTasks.push(detectWebSearchStatus());
+        }
+        if (refreshPlan.knowledge) {
+          refreshTasks.push(detectKnowledgeStatus());
+        }
+        if (refreshTasks.length > 0) {
+          const refreshResults = await Promise.allSettled(refreshTasks);
+          refreshResults.forEach((result) => {
+            if (result.status === "rejected") {
+              notifyWarning(
+                "Settings saved, but status refresh failed",
+                result.reason,
+              );
+            }
+          });
+        }
+
         return saved;
       });
 
@@ -1037,8 +1175,7 @@ export function useAppController() {
         },
       });
     } catch (err) {
-      console.error("setReplyLanguage failed:", err);
-      alert(`Language switch failed: ${err}`);
+      notifyError("Language switch failed", err);
     }
   };
 
@@ -1170,6 +1307,8 @@ export function useAppController() {
     knowledgeStatus,
     knowledgeSources,
     knowledgeStats,
+    knowledgeIngestProgress,
+    serviceDiagnostics,
     currentModel,
     activeModelId,
     configurableModels,

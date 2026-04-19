@@ -10,8 +10,13 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  validate:
+    name: Validate
+    uses: ./.github/workflows/ci.yml
+
   publish-macos:
     name: Publish macOS (Apple Silicon)
+    needs: validate
     runs-on: macos-latest
     permissions:
       contents: write
@@ -43,6 +48,24 @@ jobs:
 
       - name: Install frontend dependencies
         run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Frontend tests
+        run: npm run test:run
+
+      - name: Frontend build
+        run: npm run build
+
+      - name: Cargo check
+        run: npm run cargo:check
+
+      - name: Cargo test
+        run: npm run cargo:test
+
+      - name: Cargo clippy
+        run: npm run cargo:clippy
 
       - name: Derive release metadata
         id: release_meta

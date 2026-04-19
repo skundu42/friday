@@ -107,7 +107,8 @@ pub fn install_python_runtime_archive(source_path: &Path, target_dir: &Path) -> 
 }
 
 fn runtime_install_matches_archive(target_dir: &Path, expected_archive_hash: &str) -> bool {
-    let has_runtime_dirs = target_dir.join("bin").join("python3").exists() && target_dir.join("lib").exists();
+    let has_runtime_dirs =
+        target_dir.join("bin").join("python3").exists() && target_dir.join("lib").exists();
     if !has_runtime_dirs {
         return false;
     }

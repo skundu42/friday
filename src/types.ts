@@ -150,6 +150,23 @@ export interface KnowledgeStatus {
   message: string;
 }
 
+export interface ServiceDiagnostics {
+  service: string;
+  state: string;
+  lastFailureAt?: string | null;
+  lastFailureStage?: string | null;
+  message: string;
+  consecutiveFailures: number;
+  nextRetryAt?: string | null;
+  logTail?: string | null;
+}
+
+export interface ServiceDiagnosticsBundle {
+  sidecar: ServiceDiagnostics;
+  searxng: ServiceDiagnostics;
+  knowledge: ServiceDiagnostics;
+}
+
 export interface BootstrapPayload {
   sessions: Session[];
   currentSession: Session;
@@ -158,6 +175,12 @@ export interface BootstrapPayload {
   backendStatus: BackendStatus;
   webSearchStatus: WebSearchStatus;
   knowledgeStatus: KnowledgeStatus;
+  knowledgeStats?: KnowledgeStats | null;
+  knowledgeSources: KnowledgeSource[];
+  availableModels: ModelInfo[];
+  downloadedModelIds: string[];
+  activeModel: ModelInfo;
+  serviceDiagnostics: ServiceDiagnosticsBundle;
 }
 
 export interface AppUpdateInfo {
@@ -180,17 +203,20 @@ export interface SessionSelectionResult {
 
 export interface ChatErrorPayload {
   sessionId?: string | null;
+  requestId?: string | null;
   message: string;
 }
 
 export interface ChatTokenPayload {
   sessionId?: string | null;
+  requestId?: string | null;
   token: string;
   kind?: "answer" | "thought";
 }
 
 export interface ChatDonePayload {
   sessionId?: string | null;
+  requestId?: string | null;
   model: string;
   cancelled?: boolean;
   hasContent?: boolean;
@@ -209,14 +235,31 @@ export interface CancelGenerationResponse {
 // Tool calling types
 export interface ToolCallEvent {
   sessionId?: string | null;
+  requestId?: string | null;
   name: string;
   args: Record<string, unknown>;
 }
 
 export interface ToolResultEvent {
   sessionId?: string | null;
+  requestId?: string | null;
   name: string;
   result: Record<string, unknown>;
+}
+
+export type KnowledgeIngestStage =
+  | "indexing"
+  | "embedding"
+  | "complete"
+  | "error";
+
+export interface KnowledgeIngestProgress {
+  sourceId?: string | null;
+  locator: string;
+  stage: KnowledgeIngestStage;
+  message?: string | null;
+  chunkCount?: number | null;
+  error?: string | null;
 }
 
 export type KnowledgeSourceKind = "file" | "url";
