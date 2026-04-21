@@ -295,9 +295,9 @@ describe("SettingsPanel", () => {
       />,
     );
 
-    await waitFor(() =>
-      expect(screen.getByText("Current budget: 6,144 tokens (custom saved value)")).not.toBeNull(),
-    );
+    expect(
+      screen.queryByText("Current budget: 6,144 tokens (custom saved value)"),
+    ).toBeNull();
 
     const replyLanguageSelectors = document.querySelectorAll(".ant-select-selector");
     fireEvent.mouseDown(replyLanguageSelectors[0]!);

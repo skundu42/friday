@@ -64,10 +64,6 @@ function findPresetIndex(value: number) {
     : TOKEN_PRESETS.indexOf(coerceMaxTokens(value));
 }
 
-function formatTokenCount(value: number) {
-  return `${value.toLocaleString("en-IN")} tokens`;
-}
-
 function formatCompactTokenCount(value: number) {
   if (value >= 1024) {
     const compact = value / 1024;
@@ -542,11 +538,6 @@ export default function SettingsPanel({
                     }}
                     tooltip={{ open: false }}
                   />
-                  <div className="settings-token-summary">
-                    Current budget: {formatTokenCount(maxTokens)}
-                    {isCustomTokenValue ? " (custom saved value)" : ""}
-                    {isSaving || isSavingMaxTokens ? " · Applying..." : ""}
-                  </div>
                 </div>
               </div>
             </section>

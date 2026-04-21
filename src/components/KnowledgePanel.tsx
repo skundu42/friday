@@ -22,7 +22,6 @@ import {
 } from "@ant-design/icons";
 import { open } from "@tauri-apps/plugin-dialog";
 import type {
-  KnowledgeIngestProgress,
   KnowledgeSource,
   KnowledgeStats,
   KnowledgeStatus,
@@ -34,7 +33,6 @@ interface KnowledgePanelProps {
   status: KnowledgeStatus | null;
   sources: KnowledgeSource[];
   stats: KnowledgeStats | null;
-  ingestProgress: KnowledgeIngestProgress[];
   onRefresh: () => Promise<void> | void;
   onIngestFile: (filePath: string) => Promise<void> | void;
   onIngestUrl: (url: string) => Promise<void> | void;
@@ -86,7 +84,6 @@ export default function KnowledgePanel({
   status,
   sources,
   stats,
-  ingestProgress = [],
   onRefresh,
   onIngestFile,
   onIngestUrl,
@@ -309,54 +306,6 @@ export default function KnowledgePanel({
             )}
           </section>
 
-          {ingestProgress.length > 0 ? (
-            <section className="settings-section surface-card">
-              <div className="section-heading">
-                <div>
-                  <span className="section-heading__eyebrow">Progress</span>
-                  <h3 className="section-heading__title">
-                    Recent ingest activity
-                  </h3>
-                  <p className="section-heading__body">
-                    Friday streams ingest state per source so long-running
-                    indexing work stays visible.
-                  </p>
-                </div>
-              </div>
-
-              <List
-                dataSource={ingestProgress}
-                renderItem={(item) => (
-                  <List.Item>
-                    <div className="knowledge-source-row__body">
-                      <div className="knowledge-source-copy">
-                        <div className="knowledge-source-title">
-                          <span>{item.sourceId ?? item.locator}</span>
-                          <Space size={8} wrap>
-                            <Tag>{item.stage}</Tag>
-                            {typeof item.chunkCount === "number" ? (
-                              <Tag color="blue">{item.chunkCount} chunks</Tag>
-                            ) : null}
-                          </Space>
-                        </div>
-                        {item.message ? (
-                          <Text type="secondary">{item.message}</Text>
-                        ) : null}
-                        {item.error ? (
-                          <Text
-                            type="danger"
-                            className="knowledge-source-error"
-                          >
-                            {item.error}
-                          </Text>
-                        ) : null}
-                      </div>
-                    </div>
-                  </List.Item>
-                )}
-              />
-            </section>
-          ) : null}
         </div>
 
         <div className="knowledge-stack knowledge-stack--side">

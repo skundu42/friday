@@ -114,12 +114,12 @@ describe("ChatPane", () => {
     expect(screen.getByText("Web on")).not.toBeNull();
   });
 
-  it("shows local grounding copy when Knowledge is enabled", () => {
+  it("keeps the Knowledge pill without showing ready-state grounding copy", () => {
     renderChatPane({ knowledgeEnabled: true });
 
     expect(
-      screen.getByText("Grounding this reply against your local library."),
-    ).not.toBeNull();
+      screen.queryByText("Grounding this reply against your local library."),
+    ).toBeNull();
     expect(screen.getByText("Knowledge on")).not.toBeNull();
   });
 
@@ -145,16 +145,16 @@ describe("ChatPane", () => {
     ).toBeNull();
   });
 
-  it("surfaces lazy Knowledge runtime status while grounding is enabled", () => {
+  it("does not surface Knowledge indexing or runtime status in the chat pane", () => {
     renderChatPane({
       knowledgeEnabled: true,
       knowledgeStatus: {
-        state: "downloading_models",
-        message: "Preparing Knowledge text runtime.",
+        state: "indexing",
+        message: "Indexing sandipank.dev",
       },
     });
 
-    expect(screen.getByText("Preparing Knowledge text runtime.")).not.toBeNull();
+    expect(screen.queryByText("Indexing sandipank.dev")).toBeNull();
   });
 
   it("does not surface the first-use Knowledge models hint", () => {

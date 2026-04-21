@@ -117,35 +117,6 @@ function userFacingWebSearchStatusMessage(
   return null;
 }
 
-function userFacingKnowledgeStatusMessage(
-  knowledgeAvailable: boolean,
-  knowledgeEnabled: boolean,
-  knowledgeStatus: KnowledgeStatus | null,
-): string | null {
-  if (!knowledgeAvailable) {
-    return knowledgeStatus?.message ?? "Knowledge is unavailable.";
-  }
-
-  if (!knowledgeEnabled) {
-    return null;
-  }
-
-  switch (knowledgeStatus?.state) {
-    case "needs_models":
-      return null;
-    case "downloading_models":
-      return knowledgeStatus.message || "Preparing Knowledge models…";
-    case "indexing":
-      return knowledgeStatus.message || "Knowledge is indexing sources…";
-    case "error":
-      return knowledgeStatus.message || "Knowledge is unavailable.";
-    case "ready":
-      return "Grounding this reply against your local library.";
-    default:
-      return knowledgeStatus?.message ?? null;
-  }
-}
-
 interface ChatPaneProps {
   messages: FridayRenderableMessage[];
   isGenerating: boolean;
@@ -740,12 +711,6 @@ export default function ChatPane({
     isWebSearchActive,
     webSearchStatus,
   );
-  const knowledgeStatusMessage = userFacingKnowledgeStatusMessage(
-    knowledgeAvailable,
-    isKnowledgeActive,
-    knowledgeStatus,
-  );
-
   return (
     <div
       ref={dropZoneRef}
@@ -825,8 +790,7 @@ export default function ChatPane({
                   : "Welcome to Friday."}
               </Text>
               <Text type="secondary" className="chat-empty-state__body">
-                Ask Friday to plan work, summarize files, or explain something in
-                clear language without leaving your device by default.
+                How can I help you today?
               </Text>
               <div className="chat-empty-state__suggestions">
                 {[
@@ -1018,7 +982,6 @@ export default function ChatPane({
 
           <div className="chat-composer__footnotes">
             {webSearchStatusMessage ? <span>{webSearchStatusMessage}</span> : null}
-            {knowledgeStatusMessage ? <span>{knowledgeStatusMessage}</span> : null}
             {capabilityStatus ? (
               <span className="is-danger">{capabilityStatus}</span>
             ) : null}
