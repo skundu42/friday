@@ -1,3 +1,4 @@
+import "@ant-design/v5-patch-for-react-19";
 import { afterEach } from "vitest";
 import { cleanup } from "@testing-library/react";
 

@@ -8,18 +8,20 @@ use arrow_schema::{DataType, Field, Schema};
 use embed_anything::config::TextEmbedConfig;
 use embed_anything::embeddings::embed::{EmbedData, Embedder, EmbedderBuilder};
 use embed_anything::file_processor::audio::audio_processor::AudioDecoderModel;
-use embed_anything::{emb_audio, embed_file, embed_query, embed_webpage};
+use embed_anything::{emb_audio, embed_file, embed_query};
 use futures::TryStreamExt;
 use lance_index::scalar::FullTextSearchQuery;
 use lancedb::connection::Connection as LanceConnection;
 use lancedb::index::scalar::FtsIndexBuilder;
 use lancedb::index::Index;
 use lancedb::query::{ExecutableQuery, QueryBase, QueryExecutionOptions};
+use reqwest::header::{CONTENT_TYPE, LOCATION};
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::io::{BufReader, Read};
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -41,9 +43,12 @@ const MAX_PROMPT_TEXT_TOTAL_CHARS: usize = 3000;
 const MAX_PROMPT_TEXT_SNIPPET_CHARS: usize = 600;
 const MIN_VECTOR_INDEX_ROWS: usize = 256;
 const KNOWLEDGE_WRITE_BATCH_SIZE: usize = 64;
-const KNOWLEDGE_RUNTIME_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
+const KNOWLEDGE_RUNTIME_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 const KNOWLEDGE_RUNTIME_IDLE_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 const KNOWLEDGE_DB_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+const KNOWLEDGE_URL_FETCH_TIMEOUT: Duration = Duration::from_secs(15);
+const KNOWLEDGE_URL_MAX_REDIRECTS: usize = 5;
+const KNOWLEDGE_URL_MAX_BYTES: usize = 5 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -698,6 +703,30 @@ struct ImageAssetInsert {
     embedding: Vec<f32>,
 }
 
+struct ValidatedKnowledgePage {
+    requested_url: reqwest::Url,
+    mime_type: Option<String>,
+    bytes: Vec<u8>,
+}
+
+struct StagedKnowledgeUrlFile {
+    path: PathBuf,
+}
+
+impl Drop for StagedKnowledgeUrlFile {
+    fn drop(&mut self) {
+        if let Err(error) = std::fs::remove_file(&self.path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(
+                    path = %self.path.display(),
+                    "Failed to remove staged Knowledge URL file: {}",
+                    error
+                );
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RetrievedTextSnippet {
     pub citation: KnowledgeCitation,
@@ -799,29 +828,33 @@ pub async fn ingest_url(
     url: &str,
 ) -> Result<KnowledgeIngestResult, String> {
     let _use_guard = manager.begin_use();
+    let page = fetch_validated_knowledge_page(url).await?;
+    let requested_url = page.requested_url.as_str().to_string();
+    let staged_file = stage_knowledge_url_page(manager, &page.bytes)?;
+    let content_hash = hash_bytes(&page.bytes);
     manager.ensure_runtime_components(app, true, false).await?;
     manager.set_status(
         app,
         KnowledgeStatus {
             state: KnowledgeStatusState::Indexing,
-            message: format!("Indexing {}", url),
+            message: format!("Indexing {}", requested_url),
         },
     );
     emit_ingest_progress(
         app,
         None,
-        url,
+        &requested_url,
         "indexing",
-        Some(format!("Indexing {}", url)),
+        Some(format!("Indexing {}", requested_url)),
         None,
         None,
     );
     emit_ingest_progress(
         app,
         None,
-        url,
+        &requested_url,
         "embedding",
-        Some(format!("Embedding content from {}", url)),
+        Some(format!("Embedding content from {}", requested_url)),
         None,
         None,
     );
@@ -835,29 +868,30 @@ pub async fn ingest_url(
                 .as_ref()
                 .ok_or_else(|| "Knowledge text runtime is unavailable.".to_string())?;
 
-            let embeddings = embed_webpage(
-                url.to_string(),
+            let embeddings = embed_file(
+                &staged_file.path,
                 text_embedder,
                 Some(&runtime.text_config),
                 None,
             )
             .await
-            .map_err(|error| format!("Failed to ingest URL {}: {}", url, error))?
-            .ok_or_else(|| format!("No Knowledge content was extracted from {}", url))?;
-            let hash = hash_embed_texts(embeddings.iter())
-                .ok_or_else(|| format!("No text content was extracted from {}", url))?;
+            .map_err(|error| format!("Failed to ingest URL {}: {}", requested_url, error))?
+            .ok_or_else(|| format!("No Knowledge content was extracted from {}", requested_url))?;
 
-            let display_name = url.to_string();
+            let display_name = requested_url.clone();
             let source = SourceRecord {
                 id: uuid::Uuid::new_v4().to_string(),
                 source_kind: KnowledgeSourceKind::Url,
                 modality: KnowledgeModality::Webpage,
-                locator: url.to_string(),
+                locator: requested_url.clone(),
                 display_name,
-                mime_type: Some("text/html".to_string()),
-                file_size_bytes: None,
+                mime_type: page
+                    .mime_type
+                    .clone()
+                    .or_else(|| Some("text/html".to_string())),
+                file_size_bytes: Some(page.bytes.len() as u64),
                 asset_path: None,
-                content_hash: hash,
+                content_hash,
                 chunk_count: embeddings.len(),
             };
 
@@ -877,6 +911,12 @@ pub async fn ingest_url(
             }
 
             let chunk_count = write_text_embeddings(manager, &source, embeddings).await?;
+            if chunk_count == 0 {
+                return Err(format!(
+                    "No Knowledge content was extracted from {}",
+                    requested_url
+                ));
+            }
             let mut finalized_source = source;
             finalized_source.chunk_count = chunk_count;
             finalized_source
@@ -900,7 +940,7 @@ pub async fn ingest_url(
             emit_ingest_progress(
                 app,
                 result.source_id.as_deref(),
-                url,
+                &requested_url,
                 "complete",
                 Some(format!("Indexed {}", result.display_name)),
                 Some(result.chunk_count),
@@ -913,15 +953,269 @@ pub async fn ingest_url(
             emit_ingest_progress(
                 app,
                 None,
-                url,
+                &requested_url,
                 "error",
-                Some(format!("Failed to index {}", url)),
+                Some(format!("Failed to index {}", requested_url)),
                 None,
                 Some(error.clone()),
             );
             Err(error)
         }
     }
+}
+
+async fn fetch_validated_knowledge_page(url: &str) -> Result<ValidatedKnowledgePage, String> {
+    let requested_url = parse_knowledge_http_url(url)?;
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(KNOWLEDGE_URL_FETCH_TIMEOUT)
+        .user_agent("Friday Knowledge Ingest")
+        .build()
+        .map_err(|error| format!("Failed to initialize Knowledge URL fetcher: {}", error))?;
+
+    let mut current_url = requested_url.clone();
+    for redirect_count in 0..=KNOWLEDGE_URL_MAX_REDIRECTS {
+        validate_public_knowledge_url(&current_url).await?;
+        let response = client
+            .get(current_url.clone())
+            .send()
+            .await
+            .map_err(|error| format!("Failed to fetch Knowledge URL {}: {}", current_url, error))?;
+        let status = response.status();
+
+        if status.is_redirection() {
+            if redirect_count == KNOWLEDGE_URL_MAX_REDIRECTS {
+                return Err(format!(
+                    "Knowledge URL {} exceeded {} redirects.",
+                    requested_url, KNOWLEDGE_URL_MAX_REDIRECTS
+                ));
+            }
+
+            let location = response
+                .headers()
+                .get(LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .ok_or_else(|| {
+                    format!(
+                        "Knowledge URL {} returned a redirect without a Location header.",
+                        current_url
+                    )
+                })?;
+            current_url = current_url.join(location).map_err(|error| {
+                format!(
+                    "Knowledge URL {} returned an invalid redirect target: {}",
+                    current_url, error
+                )
+            })?;
+            continue;
+        }
+
+        if !status.is_success() {
+            return Err(format!(
+                "Knowledge URL {} returned HTTP status {}.",
+                current_url, status
+            ));
+        }
+
+        let mime_type = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        if let Some(mime_type) = mime_type.as_deref() {
+            validate_knowledge_url_content_type(mime_type, &current_url)?;
+        }
+        if let Some(content_length) = response.content_length() {
+            if content_length > KNOWLEDGE_URL_MAX_BYTES as u64 {
+                return Err(format!(
+                    "Knowledge URL {} is too large: {:.1} MB. Maximum is {:.1} MB.",
+                    current_url,
+                    content_length as f64 / (1024.0 * 1024.0),
+                    KNOWLEDGE_URL_MAX_BYTES as f64 / (1024.0 * 1024.0)
+                ));
+            }
+        }
+
+        let bytes = read_limited_response_body(response, &current_url).await?;
+        if bytes.is_empty() {
+            return Err(format!(
+                "Knowledge URL {} returned an empty body.",
+                current_url
+            ));
+        }
+
+        return Ok(ValidatedKnowledgePage {
+            requested_url,
+            mime_type,
+            bytes,
+        });
+    }
+
+    Err(format!(
+        "Knowledge URL {} exceeded {} redirects.",
+        requested_url, KNOWLEDGE_URL_MAX_REDIRECTS
+    ))
+}
+
+fn parse_knowledge_http_url(raw_url: &str) -> Result<reqwest::Url, String> {
+    let mut parsed = reqwest::Url::parse(raw_url.trim())
+        .map_err(|error| format!("Invalid Knowledge URL: {}", error))?;
+    parsed.set_fragment(None);
+
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err("Knowledge URLs must use http or https.".to_string());
+    }
+    if parsed.host_str().is_none() {
+        return Err("Knowledge URL must include a host.".to_string());
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("Knowledge URLs cannot include credentials.".to_string());
+    }
+    if parsed.port_or_known_default().is_none() {
+        return Err("Knowledge URL must include a valid network port.".to_string());
+    }
+
+    Ok(parsed)
+}
+
+async fn validate_public_knowledge_url(url: &reqwest::Url) -> Result<(), String> {
+    let parsed = parse_knowledge_http_url(url.as_str())?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "Knowledge URL must include a host.".to_string())?;
+    let normalized_host = host.trim_end_matches('.').to_ascii_lowercase();
+    if is_blocked_knowledge_hostname(&normalized_host) {
+        return Err("Local and private network hosts are blocked for Knowledge URLs.".to_string());
+    }
+
+    if let Ok(ip) = normalized_host.parse::<IpAddr>() {
+        if is_disallowed_knowledge_ip(ip) {
+            return Err(
+                "Local and private network hosts are blocked for Knowledge URLs.".to_string(),
+            );
+        }
+        return Ok(());
+    }
+
+    let port = parsed
+        .port_or_known_default()
+        .ok_or_else(|| "Knowledge URL must include a valid network port.".to_string())?;
+    let addrs = tokio::net::lookup_host((normalized_host.as_str(), port))
+        .await
+        .map_err(|error| format!("Failed to resolve Knowledge URL host {}: {}", host, error))?;
+    let mut resolved_any = false;
+    for addr in addrs {
+        resolved_any = true;
+        if is_disallowed_knowledge_ip(addr.ip()) {
+            return Err(
+                "Local and private network hosts are blocked for Knowledge URLs.".to_string(),
+            );
+        }
+    }
+
+    if !resolved_any {
+        return Err(format!(
+            "Knowledge URL host {} did not resolve to a public address.",
+            host
+        ));
+    }
+
+    Ok(())
+}
+
+fn is_blocked_knowledge_hostname(host: &str) -> bool {
+    host == "localhost" || host.ends_with(".localhost") || host.ends_with(".local")
+}
+
+fn is_disallowed_knowledge_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => {
+            let octets = ip.octets();
+            ip.is_private()
+                || ip.is_loopback()
+                || ip.is_link_local()
+                || ip.is_broadcast()
+                || ip.is_documentation()
+                || ip.is_unspecified()
+                || ip.is_multicast()
+                || octets[0] == 0
+                || (octets[0] == 100 && (64..=127).contains(&octets[1]))
+                || (octets[0] == 198 && matches!(octets[1], 18 | 19))
+        }
+        IpAddr::V6(ip) => {
+            if let Some(mapped) = ip.to_ipv4_mapped() {
+                return is_disallowed_knowledge_ip(IpAddr::V4(mapped));
+            }
+            let segments = ip.segments();
+            ip.is_loopback()
+                || ip.is_unspecified()
+                || ip.is_multicast()
+                || ip.is_unique_local()
+                || ip.is_unicast_link_local()
+                || (segments[0] == 0x2001 && segments[1] == 0x0db8)
+        }
+    }
+}
+
+fn validate_knowledge_url_content_type(mime_type: &str, url: &reqwest::Url) -> Result<(), String> {
+    let essence = mime_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    if matches!(
+        essence.as_str(),
+        "text/html" | "text/plain" | "application/xhtml+xml"
+    ) {
+        return Ok(());
+    }
+
+    Err(format!(
+        "Knowledge URL {} returned unsupported content type {}.",
+        url, mime_type
+    ))
+}
+
+async fn read_limited_response_body(
+    response: reqwest::Response,
+    url: &reqwest::Url,
+) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream
+        .try_next()
+        .await
+        .map_err(|error| format!("Failed to read Knowledge URL {}: {}", url, error))?
+    {
+        if bytes.len().saturating_add(chunk.len()) > KNOWLEDGE_URL_MAX_BYTES {
+            return Err(format!(
+                "Knowledge URL {} is too large. Maximum is {:.1} MB.",
+                url,
+                KNOWLEDGE_URL_MAX_BYTES as f64 / (1024.0 * 1024.0)
+            ));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
+fn stage_knowledge_url_page(
+    manager: &KnowledgeManager,
+    bytes: &[u8],
+) -> Result<StagedKnowledgeUrlFile, String> {
+    let staging_dir = manager.storage_dir()?.join("staging");
+    std::fs::create_dir_all(&staging_dir)
+        .map_err(|error| format!("Failed to create Knowledge staging area: {}", error))?;
+    let path = staging_dir.join(format!("url-{}.html", uuid::Uuid::new_v4()));
+    std::fs::write(&path, bytes).map_err(|error| {
+        format!(
+            "Failed to stage Knowledge URL content at {}: {}",
+            path.display(),
+            error
+        )
+    })?;
+    Ok(StagedKnowledgeUrlFile { path })
 }
 
 pub fn list_sources(conn: &rusqlite::Connection) -> Result<Vec<KnowledgeSource>, String> {
@@ -1537,7 +1831,6 @@ fn hash_file(path: &Path) -> Result<String, String> {
         .map_err(|e| format!("Failed to hash {}: {}", path.display(), e))
 }
 
-#[cfg(test)]
 fn hash_bytes(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
@@ -1568,6 +1861,7 @@ fn embed_text(item: &EmbedData) -> Option<&str> {
         .filter(|text| !text.is_empty())
 }
 
+#[cfg(test)]
 fn hash_embed_texts<'a>(embeddings: impl IntoIterator<Item = &'a EmbedData>) -> Option<String> {
     let mut hasher = Sha256::new();
     let mut saw_text = false;
@@ -2632,6 +2926,49 @@ mod tests {
             0,
             now
         ));
+    }
+
+    #[test]
+    fn knowledge_url_parser_rejects_non_http_and_credentials() {
+        assert!(parse_knowledge_http_url("file:///etc/passwd").is_err());
+        assert!(parse_knowledge_http_url("https://user:pass@example.com").is_err());
+        assert_eq!(
+            parse_knowledge_http_url("https://example.com/path#fragment")
+                .expect("valid URL")
+                .as_str(),
+            "https://example.com/path"
+        );
+    }
+
+    #[test]
+    fn knowledge_url_host_policy_blocks_local_names_and_private_ips() {
+        assert!(is_blocked_knowledge_hostname("localhost"));
+        assert!(is_blocked_knowledge_hostname("app.localhost"));
+        assert!(is_blocked_knowledge_hostname("printer.local"));
+        assert!(is_disallowed_knowledge_ip("127.0.0.1".parse().unwrap()));
+        assert!(is_disallowed_knowledge_ip("10.0.0.5".parse().unwrap()));
+        assert!(is_disallowed_knowledge_ip("172.16.0.1".parse().unwrap()));
+        assert!(is_disallowed_knowledge_ip("192.168.1.1".parse().unwrap()));
+        assert!(is_disallowed_knowledge_ip("169.254.1.1".parse().unwrap()));
+        assert!(is_disallowed_knowledge_ip("100.64.0.1".parse().unwrap()));
+        assert!(is_disallowed_knowledge_ip("::1".parse().unwrap()));
+        assert!(is_disallowed_knowledge_ip("fc00::1".parse().unwrap()));
+        assert!(is_disallowed_knowledge_ip("fe80::1".parse().unwrap()));
+        assert!(!is_disallowed_knowledge_ip(
+            "93.184.216.34".parse().unwrap()
+        ));
+        assert!(!is_disallowed_knowledge_ip(
+            "2606:2800:220:1:248:1893:25c8:1946".parse().unwrap()
+        ));
+    }
+
+    #[test]
+    fn knowledge_url_content_type_allows_text_only() {
+        let url = reqwest::Url::parse("https://example.com/").unwrap();
+        assert!(validate_knowledge_url_content_type("text/html; charset=utf-8", &url).is_ok());
+        assert!(validate_knowledge_url_content_type("text/plain", &url).is_ok());
+        assert!(validate_knowledge_url_content_type("application/json", &url).is_err());
+        assert!(validate_knowledge_url_content_type("application/octet-stream", &url).is_err());
     }
 
     #[test]
