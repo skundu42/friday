@@ -1,5 +1,5 @@
 use crate::models::{ChatContent, ChatContentPart, ChatMessage};
-use crate::settings::GenerationRequestConfig;
+use crate::settings::{GenerationRequestConfig, SpeculativeDecodingMode};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -42,15 +42,19 @@ struct WorkerEngineConfig {
     model_path: PathBuf,
     max_num_tokens: u32,
     backend: String,
+    cache_dir: PathBuf,
+    speculative_decoding: SpeculativeDecodingMode,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct PythonWorkerSpawnConfig<'a> {
     pub python_binary: &'a Path,
     pub worker_script: &'a Path,
     pub model_path: &'a Path,
     pub max_num_tokens: u32,
     pub backend: &'a str,
+    pub cache_dir: &'a Path,
+    pub speculative_decoding: SpeculativeDecodingMode,
     pub web_search_base_url: Option<&'a str>,
     pub python_site_packages: &'a Path,
     pub python_runtime_lib_dir: &'a Path,
@@ -76,6 +80,8 @@ enum WorkerCommand {
         model_path: String,
         max_num_tokens: u32,
         backend: String,
+        cache_dir: String,
+        speculative_decoding: SpeculativeDecodingMode,
     },
     Chat {
         request_id: String,
@@ -190,6 +196,8 @@ impl PythonWorkerClient {
             model_path,
             max_num_tokens,
             backend,
+            cache_dir,
+            speculative_decoding,
             web_search_base_url,
             python_site_packages,
             python_runtime_lib_dir,
@@ -247,6 +255,8 @@ impl PythonWorkerClient {
                 model_path: model_path.to_path_buf(),
                 max_num_tokens,
                 backend: backend.to_string(),
+                cache_dir: cache_dir.to_path_buf(),
+                speculative_decoding,
             },
         };
 
@@ -256,10 +266,19 @@ impl PythonWorkerClient {
         Ok(client)
     }
 
-    pub fn matches(&self, model_path: &Path, max_num_tokens: u32, backend: &str) -> bool {
+    pub fn matches(
+        &self,
+        model_path: &Path,
+        max_num_tokens: u32,
+        backend: &str,
+        cache_dir: &Path,
+        speculative_decoding: SpeculativeDecodingMode,
+    ) -> bool {
         self.config.model_path == model_path
             && self.config.max_num_tokens == max_num_tokens
             && self.config.backend == backend
+            && self.config.cache_dir == cache_dir
+            && self.config.speculative_decoding == speculative_decoding
     }
 
     pub async fn send_chat_with_options(
@@ -410,6 +429,8 @@ impl PythonWorkerClient {
             model_path: self.config.model_path.display().to_string(),
             max_num_tokens: self.config.max_num_tokens,
             backend: self.config.backend.clone(),
+            cache_dir: self.config.cache_dir.display().to_string(),
+            speculative_decoding: self.config.speculative_decoding,
         })
         .await?;
 
@@ -791,6 +812,42 @@ mod tests {
                 local_files: false,
                 calculate: true,
                 current_datetime: true,
+            }
+        );
+    }
+
+    #[test]
+    fn worker_engine_match_includes_cache_dir_and_speculative_decoding() {
+        let config = WorkerEngineConfig {
+            model_path: PathBuf::from("/tmp/model.litertlm"),
+            max_num_tokens: 4096,
+            backend: "gpu".to_string(),
+            cache_dir: PathBuf::from("/tmp/friday-cache"),
+            speculative_decoding: SpeculativeDecodingMode::Auto,
+        };
+
+        assert_eq!(
+            config,
+            WorkerEngineConfig {
+                model_path: PathBuf::from("/tmp/model.litertlm"),
+                max_num_tokens: 4096,
+                backend: "gpu".to_string(),
+                cache_dir: PathBuf::from("/tmp/friday-cache"),
+                speculative_decoding: SpeculativeDecodingMode::Auto,
+            }
+        );
+        assert_ne!(
+            config,
+            WorkerEngineConfig {
+                speculative_decoding: SpeculativeDecodingMode::Disabled,
+                ..config.clone()
+            }
+        );
+        assert_ne!(
+            config.clone(),
+            WorkerEngineConfig {
+                cache_dir: PathBuf::from("/tmp/other-cache"),
+                ..config
             }
         );
     }

@@ -71,6 +71,8 @@ export interface BackendStatus {
   supports_thinking: boolean;
   max_context_tokens: number;
   recommended_max_output_tokens: number;
+  runtime_cache_dir: string;
+  speculative_decoding: SpeculativeDecodingMode;
 }
 
 export type WebSearchState =
@@ -128,7 +130,10 @@ export interface GenerationSettings {
   temperature?: number | null;
   top_p?: number | null;
   thinking_enabled?: boolean | null;
+  speculative_decoding: SpeculativeDecodingMode;
 }
+
+export type SpeculativeDecodingMode = "auto" | "enabled" | "disabled";
 
 export interface AppSettingsInput {
   auto_start_backend: boolean;
@@ -267,6 +272,8 @@ export interface KnowledgeIngestProgress {
   message?: string | null;
   chunkCount?: number | null;
   error?: string | null;
+  firstSeenAt?: string;
+  updatedAt?: string;
 }
 
 export type KnowledgeSourceKind = "file" | "url";

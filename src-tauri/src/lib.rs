@@ -23,6 +23,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
+use tauri::menu::{AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::Emitter;
 use tauri::Manager;
 use tauri::State;
@@ -46,6 +47,8 @@ const DEFAULT_SESSION_TITLE: &str = "New chat";
 #[cfg(test)]
 const SESSION_TITLE_PREVIEW_CHARS: usize = 48;
 const MAIN_WINDOW_LABEL: &str = "main";
+const CHECK_FOR_UPDATES_MENU_ID: &str = "check_for_updates";
+const CHECK_FOR_UPDATES_EVENT: &str = "check-for-app-update";
 const UPDATER_CHECK_TIMEOUT: Duration = Duration::from_secs(4);
 
 static OBSERVABILITY_INIT: OnceLock<Result<(), String>> = OnceLock::new();
@@ -1023,11 +1026,117 @@ fn delete_session_and_cleanup_managed_audio(
     Ok(())
 }
 
+fn build_app_menu(app_handle: &tauri::AppHandle<tauri::Wry>) -> tauri::Result<Menu<tauri::Wry>> {
+    let package_info = app_handle.package_info();
+    let config = app_handle.config();
+    let about_metadata = AboutMetadata {
+        name: Some(package_info.name.clone()),
+        version: Some(package_info.version.to_string()),
+        copyright: config.bundle.copyright.clone(),
+        authors: config
+            .bundle
+            .publisher
+            .clone()
+            .map(|publisher| vec![publisher]),
+        ..Default::default()
+    };
+
+    let app_menu = Submenu::with_items(
+        app_handle,
+        package_info.name.clone(),
+        true,
+        &[
+            &PredefinedMenuItem::about(app_handle, None, Some(about_metadata))?,
+            &PredefinedMenuItem::separator(app_handle)?,
+            &MenuItem::with_id(
+                app_handle,
+                CHECK_FOR_UPDATES_MENU_ID,
+                "Check for Updates…",
+                true,
+                None::<&str>,
+            )?,
+            &PredefinedMenuItem::separator(app_handle)?,
+            &PredefinedMenuItem::services(app_handle, None)?,
+            &PredefinedMenuItem::separator(app_handle)?,
+            &PredefinedMenuItem::hide(app_handle, None)?,
+            &PredefinedMenuItem::hide_others(app_handle, None)?,
+            &PredefinedMenuItem::show_all(app_handle, None)?,
+            &PredefinedMenuItem::separator(app_handle)?,
+            &PredefinedMenuItem::quit(app_handle, None)?,
+        ],
+    )?;
+
+    let file_menu = Submenu::with_items(
+        app_handle,
+        "File",
+        true,
+        &[&PredefinedMenuItem::close_window(app_handle, None)?],
+    )?;
+
+    let edit_menu = Submenu::with_items(
+        app_handle,
+        "Edit",
+        true,
+        &[
+            &PredefinedMenuItem::undo(app_handle, None)?,
+            &PredefinedMenuItem::redo(app_handle, None)?,
+            &PredefinedMenuItem::separator(app_handle)?,
+            &PredefinedMenuItem::cut(app_handle, None)?,
+            &PredefinedMenuItem::copy(app_handle, None)?,
+            &PredefinedMenuItem::paste(app_handle, None)?,
+            &PredefinedMenuItem::select_all(app_handle, None)?,
+        ],
+    )?;
+
+    let view_menu = Submenu::with_items(
+        app_handle,
+        "View",
+        true,
+        &[&PredefinedMenuItem::fullscreen(app_handle, None)?],
+    )?;
+
+    let window_menu = Submenu::with_id_and_items(
+        app_handle,
+        tauri::menu::WINDOW_SUBMENU_ID,
+        "Window",
+        true,
+        &[
+            &PredefinedMenuItem::minimize(app_handle, None)?,
+            &PredefinedMenuItem::maximize(app_handle, None)?,
+            &PredefinedMenuItem::separator(app_handle)?,
+            &PredefinedMenuItem::close_window(app_handle, None)?,
+        ],
+    )?;
+
+    let help_menu =
+        Submenu::with_id_and_items(app_handle, tauri::menu::HELP_SUBMENU_ID, "Help", true, &[])?;
+
+    Menu::with_items(
+        app_handle,
+        &[
+            &app_menu,
+            &file_menu,
+            &edit_menu,
+            &view_menu,
+            &window_menu,
+            &help_menu,
+        ],
+    )
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .menu(build_app_menu)
+        .on_menu_event(|app_handle, event| {
+            if event.id() == CHECK_FOR_UPDATES_MENU_ID {
+                if let Err(error) = app_handle.emit(CHECK_FOR_UPDATES_EVENT, ()) {
+                    tracing::warn!("Failed to emit update-check menu event: {}", error);
+                }
+            }
+        })
         .manage(SidecarManager::new())
         .manage(SearXNGManager::new())
         .manage(KnowledgeManager::new())
@@ -1275,6 +1384,7 @@ async fn bootstrap_payload_inner(
     let database = database_handle(state)?;
     let settings = database.load_app_settings()?;
     sidecar.set_max_tokens(settings.chat.max_tokens);
+    sidecar.set_speculative_decoding(settings.chat.generation.speculative_decoding);
     let mut backend_status = sidecar.auto_detect().await;
     if !backend_status.connected && backend_status.state == "ready" {
         match sidecar.ensure_daemon().await {
@@ -1779,6 +1889,7 @@ async fn send_message(
     let app_settings = database.load_app_settings()?;
     let db_path = current_db_path(&state)?;
     sidecar.set_max_tokens(app_settings.chat.max_tokens);
+    sidecar.set_speculative_decoding(app_settings.chat.generation.speculative_decoding);
     let attachment_count = attachments.as_ref().map(Vec::len).unwrap_or(0);
     let effective_thinking_enabled = thinking_enabled
         .or(app_settings.chat.generation.thinking_enabled)
@@ -2507,6 +2618,7 @@ async fn save_settings(
 ) -> Result<settings::AppSettings, String> {
     let saved = database_handle(&state)?.save_app_settings(input)?;
     sidecar.set_max_tokens(saved.chat.max_tokens);
+    sidecar.set_speculative_decoding(saved.chat.generation.speculative_decoding);
     Ok(saved)
 }
 

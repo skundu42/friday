@@ -660,6 +660,8 @@ class EngineConfig:
     model_path: str
     max_num_tokens: int
     backend: str
+    cache_dir: str
+    speculative_decoding: str
 
 
 @dataclass(frozen=True)
@@ -1981,11 +1983,15 @@ class LiteRtWorker:
         model_path: str,
         max_num_tokens: int,
         backend: str,
+        cache_dir: str,
+        speculative_decoding: str,
     ) -> None:
         next_config = EngineConfig(
             model_path=model_path,
             max_num_tokens=max_num_tokens,
             backend=backend,
+            cache_dir=cache_dir,
+            speculative_decoding=speculative_decoding,
         )
         if self._engine is not None and self._engine_config == next_config:
             return
@@ -1993,17 +1999,30 @@ class LiteRtWorker:
         self.close_engine()
         litert_lm = self._load_litert_module()
         main_backend = self._resolve_backend(backend, litert_lm)
-        engine = litert_lm.Engine(
-            model_path,
-            backend=main_backend,
-            max_num_tokens=max_num_tokens,
+        pathlib.Path(cache_dir).mkdir(parents=True, exist_ok=True)
+        engine_kwargs = {
+            "backend": main_backend,
+            "max_num_tokens": max_num_tokens,
+            "cache_dir": cache_dir,
             # Gemma 4 image prompts require the Metal-backed vision encoder on
             # macOS; CPU vision initialization accepts images but does not
             # actually ground responses in them.
-            vision_backend=litert_lm.Backend.GPU,
+            "vision_backend": litert_lm.Backend.GPU,
             # Gemma 4 audio inputs currently require the CPU audio backend even
             # when the main model executor runs on GPU.
-            audio_backend=litert_lm.Backend.CPU,
+            "audio_backend": litert_lm.Backend.CPU,
+        }
+        if speculative_decoding == "enabled":
+            engine_kwargs["enable_speculative_decoding"] = True
+        elif speculative_decoding == "disabled":
+            engine_kwargs["enable_speculative_decoding"] = False
+        elif speculative_decoding != "auto":
+            raise ValueError(
+                f"Unsupported speculative decoding mode: {speculative_decoding}"
+            )
+        engine = litert_lm.Engine(
+            model_path,
+            **engine_kwargs,
         )
         engine.__enter__()
         self._engine = engine
@@ -2013,10 +2032,16 @@ class LiteRtWorker:
         model_path = str(command["model_path"])
         max_num_tokens = int(command["max_num_tokens"])
         backend = str(command.get("backend") or "cpu")
+        cache_dir = str(command.get("cache_dir") or "")
+        if not cache_dir:
+            raise ValueError("Worker warm command is missing cache_dir.")
+        speculative_decoding = str(command.get("speculative_decoding") or "auto")
         self.ensure_engine(
             model_path,
             max_num_tokens,
             backend,
+            cache_dir,
+            speculative_decoding,
         )
         write_event(
             "ready",

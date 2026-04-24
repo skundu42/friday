@@ -37,6 +37,12 @@ import type {
   WebSearchStatus,
 } from "../types";
 
+const CHECK_FOR_APP_UPDATE_EVENT = "check-for-app-update";
+
+type AppUpdateCheckOptions = {
+  notify?: boolean;
+};
+
 function makeId() {
   return (
     globalThis.crypto?.randomUUID?.() ??
@@ -157,6 +163,7 @@ function settingsToInput(settings: AppSettings): AppSettingsInput {
         temperature: settings.chat.generation.temperature,
         top_p: settings.chat.generation.top_p,
         thinking_enabled: settings.chat.generation.thinking_enabled,
+        speculative_decoding: settings.chat.generation.speculative_decoding,
       },
     },
   };
@@ -235,6 +242,11 @@ function mergeQueuedSettingsInput(
           desired.chat.generation.thinking_enabled,
           requested.chat.generation.thinking_enabled,
         ),
+        speculative_decoding: resolveQueuedSettingValue(
+          committed.chat.generation.speculative_decoding,
+          desired.chat.generation.speculative_decoding,
+          requested.chat.generation.speculative_decoding,
+        ),
       },
     },
   };
@@ -272,7 +284,10 @@ function planSettingsRefresh(
   next: AppSettingsInput,
 ) {
   return {
-    backend: previous.chat.max_tokens !== next.chat.max_tokens,
+    backend:
+      previous.chat.max_tokens !== next.chat.max_tokens ||
+      previous.chat.generation.speculative_decoding !==
+        next.chat.generation.speculative_decoding,
     webSearch:
       previous.chat.web_assist_enabled !== next.chat.web_assist_enabled,
     knowledge: previous.chat.knowledge_enabled !== next.chat.knowledge_enabled,
@@ -283,11 +298,27 @@ function upsertIngestProgress(
   current: KnowledgeIngestProgress[],
   next: KnowledgeIngestProgress,
 ) {
-  const key = next.sourceId ?? next.locator;
-  const remaining = current.filter(
-    (entry) => (entry.sourceId ?? entry.locator) !== key,
-  );
-  return [next, ...remaining].slice(0, 12);
+  const now = new Date().toISOString();
+  const existing = current.find((entry) => {
+    if (next.sourceId && entry.sourceId === next.sourceId) {
+      return true;
+    }
+    return entry.locator === next.locator;
+  });
+  const merged: KnowledgeIngestProgress = {
+    ...existing,
+    ...next,
+    sourceId: next.sourceId ?? existing?.sourceId ?? null,
+    firstSeenAt: existing?.firstSeenAt ?? next.firstSeenAt ?? now,
+    updatedAt: now,
+  };
+  const remaining = current.filter((entry) => {
+    if (merged.sourceId && entry.sourceId === merged.sourceId) {
+      return false;
+    }
+    return entry.locator !== merged.locator;
+  });
+  return [merged, ...remaining].slice(0, 12);
 }
 
 function notifyError(title: string, error: unknown) {
@@ -674,26 +705,58 @@ export function useAppController() {
     return (await warmBackendIfNeeded(status)) ?? status;
   };
 
-  const checkForAppUpdate = async () => {
-    try {
-      const update =
-        (await invoke<AppUpdateInfo | null>("check_for_app_update")) ?? null;
-      setAvailableAppUpdate(update);
-      setAppUpdateError(null);
-      return update;
-    } catch (error) {
-      const message = toErrorMessage(error);
-      if (message === "Auto-update signing key is not configured.") {
-        setAvailableAppUpdate(null);
+  const checkForAppUpdate = useCallback(
+    async ({ notify = false }: AppUpdateCheckOptions = {}) => {
+      try {
+        const update =
+          (await invoke<AppUpdateInfo | null>("check_for_app_update")) ?? null;
+        setAvailableAppUpdate(update);
         setAppUpdateError(null);
+        if (notify) {
+          if (update) {
+            notification.info({
+              key: "friday-app-update-check",
+              message: `Update available: v${update.version}`,
+              description: "Use the update banner to download and install it.",
+            });
+          } else {
+            notification.success({
+              key: "friday-app-update-check",
+              message: "Friday is up to date",
+            });
+          }
+        }
+        return update;
+      } catch (error) {
+        const message = toErrorMessage(error);
+        if (message === "Auto-update signing key is not configured.") {
+          setAvailableAppUpdate(null);
+          setAppUpdateError(null);
+          if (notify) {
+            notification.warning({
+              key: "friday-app-update-check",
+              message: "Updates are not configured for this build",
+              description:
+                "A signing key is required before Friday can check release updates.",
+            });
+          }
+          return null;
+        }
+        console.warn("check_for_app_update failed:", error);
+        setAvailableAppUpdate(null);
+        setAppUpdateError(message);
+        if (notify) {
+          notification.warning({
+            key: "friday-app-update-check",
+            message: "Could not check for updates",
+            description: message,
+          });
+        }
         return null;
       }
-      console.warn("check_for_app_update failed:", error);
-      setAvailableAppUpdate(null);
-      setAppUpdateError(message);
-      return null;
-    }
-  };
+    },
+    [],
+  );
 
   const installAppUpdate = useCallback(async () => {
     if (isInstallingAppUpdate) {
@@ -831,6 +894,13 @@ export function useAppController() {
         },
       );
 
+      const unlistenAppUpdateCheck = await listen(
+        CHECK_FOR_APP_UPDATE_EVENT,
+        () => {
+          void checkForAppUpdate({ notify: true });
+        },
+      );
+
       const unlistenWebSearchStatus = await listen<WebSearchStatus>(
         "web-search-status",
         (event) => {
@@ -914,6 +984,7 @@ export function useAppController() {
 
       return () => {
         unlistenActivity();
+        unlistenAppUpdateCheck();
         unlistenWebSearchStatus();
         unlistenKnowledgeStatus();
         unlistenKnowledgeIngestProgress();
@@ -955,7 +1026,7 @@ export function useAppController() {
       activeRequestIdRef.current = null;
       dispose?.();
     };
-  }, [matchesActiveRequest]);
+  }, [checkForAppUpdate, matchesActiveRequest]);
 
   const createSession = async () => {
     if (isGenerating || activeRequestSessionIdRef.current) return;
@@ -1389,6 +1460,7 @@ export function useAppController() {
     ingestKnowledgeFile,
     ingestKnowledgeUrl,
     deleteKnowledgeSource,
+    checkForAppUpdate,
     installAppUpdate,
     restartApp,
     dismissAppUpdate,

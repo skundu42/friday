@@ -147,7 +147,13 @@ class WorkerProtocolTests(unittest.TestCase):
         worker = _MODULE.LiteRtWorker()
         worker._load_litert_module = lambda: FakeLiteRtLm  # type: ignore[method-assign]
 
-        worker.ensure_engine("/tmp/model.litertlm", 4096, "gpu")
+        worker.ensure_engine(
+            "/tmp/model.litertlm",
+            4096,
+            "gpu",
+            "/tmp/friday-litert-cache",
+            "auto",
+        )
 
         self.assertEqual(
             FakeEngine.created_with,
@@ -155,10 +161,43 @@ class WorkerProtocolTests(unittest.TestCase):
                 "model_path": "/tmp/model.litertlm",
                 "backend": FakeBackend.GPU,
                 "max_num_tokens": 4096,
+                "cache_dir": "/tmp/friday-litert-cache",
                 "vision_backend": FakeBackend.GPU,
                 "audio_backend": FakeBackend.CPU,
             },
         )
+
+    def test_ensure_engine_passes_speculative_decoding_modes(self) -> None:
+        class FakeBackend:
+            GPU = "gpu"
+            CPU = "cpu"
+
+        class FakeEngine:
+            created: list[dict[str, object]] = []
+
+            def __init__(self, model_path: str, **kwargs: object) -> None:
+                FakeEngine.created.append({"model_path": model_path, **kwargs})
+
+            def __enter__(self) -> "FakeEngine":
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> None:
+                return None
+
+        class FakeLiteRtLm:
+            Backend = FakeBackend
+            Engine = FakeEngine
+
+        worker = _MODULE.LiteRtWorker()
+        worker._load_litert_module = lambda: FakeLiteRtLm  # type: ignore[method-assign]
+
+        worker.ensure_engine("/tmp/model.litertlm", 4096, "gpu", "/tmp/cache-a", "auto")
+        worker.ensure_engine("/tmp/model.litertlm", 4096, "gpu", "/tmp/cache-b", "enabled")
+        worker.ensure_engine("/tmp/model.litertlm", 4096, "gpu", "/tmp/cache-c", "disabled")
+
+        self.assertNotIn("enable_speculative_decoding", FakeEngine.created[0])
+        self.assertIs(FakeEngine.created[1]["enable_speculative_decoding"], True)
+        self.assertIs(FakeEngine.created[2]["enable_speculative_decoding"], False)
 
     def test_split_messages_uses_last_user_turn_as_prompt(self) -> None:
         preface, prompt = _MODULE.split_messages_for_conversation(
@@ -1858,6 +1897,8 @@ class WorkerLiveIntegrationTests(unittest.TestCase):
                 "model_path": str(self.MODEL_PATH),
                 "max_num_tokens": 4096,
                 "backend": "cpu",
+                "cache_dir": str(self.RUNTIME_DIR / "litert-cache"),
+                "speculative_decoding": "auto",
             }
         )
         try:

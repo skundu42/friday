@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import {
   Alert,
   Button,
+  InputNumber,
   Radio,
   Select,
   Slider,
@@ -27,6 +28,7 @@ import type {
   BackendStatus,
   ModelInfo,
   ReplyLanguage,
+  SpeculativeDecodingMode,
   ThemeMode,
 } from "../types";
 
@@ -41,6 +43,16 @@ const TOKEN_PRESET_LABELS = [
   "64K",
   "128K",
 ] as const;
+const TEMPERATURE_FALLBACK = 1.0;
+const TOP_P_FALLBACK = 0.95;
+const SPECULATIVE_DECODING_OPTIONS: Array<{
+  label: string;
+  value: SpeculativeDecodingMode;
+}> = [
+  { label: "Auto", value: "auto" },
+  { label: "On", value: "enabled" },
+  { label: "Off", value: "disabled" },
+];
 function coerceMaxTokens(value: unknown) {
   if (typeof value !== "number" || !Number.isFinite(value)) {
     return 16384;
@@ -64,16 +76,33 @@ function findPresetIndex(value: number) {
     : TOKEN_PRESETS.indexOf(coerceMaxTokens(value));
 }
 
-function formatTokenCount(value: number) {
-  return `${value.toLocaleString("en-IN")} tokens`;
-}
-
 function formatCompactTokenCount(value: number) {
   if (value >= 1024) {
     const compact = value / 1024;
     return `${Number.isInteger(compact) ? compact : compact.toFixed(1)}K`;
   }
   return value.toString();
+}
+
+function clampGenerationValue(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function formatGenerationValue(value: number) {
+  return Number(value.toFixed(2));
+}
+
+function generationValueFromInput(
+  value: number | string | null,
+  fallback: number,
+  min: number,
+  max: number,
+) {
+  const numericValue = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(numericValue)) {
+    return fallback;
+  }
+  return formatGenerationValue(clampGenerationValue(numericValue, min, max));
 }
 
 interface SettingsPanelProps {
@@ -301,6 +330,112 @@ function ModelCard({
   );
 }
 
+function GenerationField({
+  label,
+  description,
+  value,
+  fallbackValue,
+  min,
+  max,
+  step,
+  lowLabel,
+  highLabel,
+  disabled,
+  loading,
+  onPreview,
+  onCommit,
+}: {
+  label: string;
+  description: string;
+  value: number | null | undefined;
+  fallbackValue: number;
+  min: number;
+  max: number;
+  step: number;
+  lowLabel: string;
+  highLabel: string;
+  disabled: boolean;
+  loading: boolean;
+  onPreview: (value: number) => void;
+  onCommit: (value: number | null) => Promise<void>;
+}) {
+  const effectiveValue = value ?? fallbackValue;
+  const isDefault = value == null;
+
+  return (
+    <div className="settings-field settings-field--generation">
+      <div className="settings-field__copy">
+        <div className="settings-field__label-row">
+          <Text className="settings-field__label">{label}</Text>
+          {isDefault ? <Tag>Model default</Tag> : null}
+        </div>
+        <Text className="settings-field__body">{description}</Text>
+      </div>
+      <div className="settings-field__control settings-field__control--wide">
+        <div className="settings-generation-control">
+          <div className="settings-generation-control__inputs">
+            <InputNumber
+              min={min}
+              max={max}
+              step={step}
+              value={effectiveValue}
+              disabled={disabled}
+              onChange={(nextValue) => {
+                onPreview(
+                  generationValueFromInput(nextValue, fallbackValue, min, max),
+                );
+              }}
+              onBlur={() => void onCommit(effectiveValue)}
+            />
+            <Button
+              size="small"
+              onClick={() =>
+                void onCommit(isDefault ? fallbackValue : null)
+              }
+              loading={loading}
+              disabled={disabled}
+            >
+              {isDefault ? "Customize" : "Reset"}
+            </Button>
+          </div>
+          <Slider
+            min={min}
+            max={max}
+            step={step}
+            value={effectiveValue}
+            disabled={disabled}
+            onChange={(nextValue) => {
+              const numericValue = Array.isArray(nextValue)
+                ? nextValue[0]
+                : nextValue;
+              onPreview(
+                formatGenerationValue(
+                  clampGenerationValue(numericValue, min, max),
+                ),
+              );
+            }}
+            onChangeComplete={(nextValue) => {
+              const numericValue = Array.isArray(nextValue)
+                ? nextValue[0]
+                : nextValue;
+              void onCommit(
+                formatGenerationValue(
+                  clampGenerationValue(numericValue, min, max),
+                ),
+              );
+            }}
+            tooltip={{ formatter: (nextValue) => nextValue?.toFixed(2) }}
+          />
+          <div className="settings-generation-control__scale">
+            <Text>{lowLabel}</Text>
+            <Text>{highLabel}</Text>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function SettingsPanel({
   settings,
   backendStatus,
@@ -319,11 +454,24 @@ export default function SettingsPanel({
     settings.chat.reply_language,
   );
   const [maxTokens, setMaxTokens] = useState(settings.chat.max_tokens);
+  const [temperature, setTemperature] = useState<number | null>(
+    settings.chat.generation.temperature ?? null,
+  );
+  const [topP, setTopP] = useState<number | null>(
+    settings.chat.generation.top_p ?? null,
+  );
+  const [speculativeDecoding, setSpeculativeDecoding] =
+    useState<SpeculativeDecodingMode>(
+      settings.chat.generation.speculative_decoding,
+    );
   const [maxTokenSliderIndex, setMaxTokenSliderIndex] = useState(
     findPresetIndex(settings.chat.max_tokens),
   );
   const [error, setError] = useState<string | null>(null);
   const [isSavingMaxTokens, setIsSavingMaxTokens] = useState(false);
+  const [savingGenerationControl, setSavingGenerationControl] = useState<
+    "temperature" | "top_p" | null
+  >(null);
   const isCustomTokenValue = !TOKEN_PRESETS.includes(
     maxTokens as (typeof TOKEN_PRESETS)[number],
   );
@@ -334,6 +482,9 @@ export default function SettingsPanel({
     setReplyLanguage(settings.chat.reply_language);
     setMaxTokens(settings.chat.max_tokens);
     setMaxTokenSliderIndex(findPresetIndex(settings.chat.max_tokens));
+    setTemperature(settings.chat.generation.temperature ?? null);
+    setTopP(settings.chat.generation.top_p ?? null);
+    setSpeculativeDecoding(settings.chat.generation.speculative_decoding);
   }, [settings]);
 
   const persistAutoDownloadUpdates = async (nextAutoDownloadUpdates: boolean) => {
@@ -463,9 +614,102 @@ export default function SettingsPanel({
     }
   };
 
+  const persistGenerationControl = async (
+    control: "temperature" | "top_p",
+    nextValue: number | null,
+  ) => {
+    const currentValue =
+      control === "temperature"
+        ? (settings.chat.generation.temperature ?? null)
+        : (settings.chat.generation.top_p ?? null);
+    if (Object.is(nextValue, currentValue)) {
+      return;
+    }
+
+    const previousTemperature = temperature;
+    const previousTopP = topP;
+    if (control === "temperature") {
+      setTemperature(nextValue);
+    } else {
+      setTopP(nextValue);
+    }
+    setSavingGenerationControl(control);
+    setError(null);
+
+    try {
+      await onSaveSettings({
+        auto_start_backend: settings.auto_start_backend,
+        auto_download_updates: autoDownloadUpdates,
+        user_display_name: settings.user_display_name,
+        theme_mode: themeMode,
+        chat: {
+          reply_language: replyLanguage,
+          max_tokens: settings.chat.max_tokens,
+          web_assist_enabled: settings.chat.web_assist_enabled,
+          knowledge_enabled: settings.chat.knowledge_enabled,
+          generation: {
+            ...settings.chat.generation,
+            temperature:
+              control === "temperature"
+                ? nextValue
+                : settings.chat.generation.temperature,
+            top_p:
+              control === "top_p" ? nextValue : settings.chat.generation.top_p,
+          },
+        },
+      });
+    } catch (saveError) {
+      setTemperature(previousTemperature);
+      setTopP(previousTopP);
+      setError(
+        saveError instanceof Error ? saveError.message : String(saveError),
+      );
+    } finally {
+      setSavingGenerationControl(null);
+    }
+  };
+
+  const persistSpeculativeDecoding = async (
+    nextSpeculativeDecoding: SpeculativeDecodingMode,
+  ) => {
+    if (
+      nextSpeculativeDecoding === settings.chat.generation.speculative_decoding
+    ) {
+      return;
+    }
+
+    const previousSpeculativeDecoding = speculativeDecoding;
+    setSpeculativeDecoding(nextSpeculativeDecoding);
+    setError(null);
+
+    try {
+      await onSaveSettings({
+        auto_start_backend: settings.auto_start_backend,
+        auto_download_updates: autoDownloadUpdates,
+        user_display_name: settings.user_display_name,
+        theme_mode: themeMode,
+        chat: {
+          reply_language: replyLanguage,
+          max_tokens: settings.chat.max_tokens,
+          web_assist_enabled: settings.chat.web_assist_enabled,
+          knowledge_enabled: settings.chat.knowledge_enabled,
+          generation: {
+            ...settings.chat.generation,
+            speculative_decoding: nextSpeculativeDecoding,
+          },
+        },
+      });
+    } catch (saveError) {
+      setSpeculativeDecoding(previousSpeculativeDecoding);
+      setError(
+        saveError instanceof Error ? saveError.message : String(saveError),
+      );
+    }
+  };
+
   return (
     <div className="settings-panel">
-      <section className="settings-hero surface-card surface-card--accent">
+      <section className="settings-hero">
         <div className="settings-header settings-header--page">
           <Title level={3} className="settings-header__title">
             Settings
@@ -497,56 +741,129 @@ export default function SettingsPanel({
               </div>
 
               <div className="settings-field">
-                <Text className="settings-field__label">Reply language</Text>
-                <Text className="settings-field__body">
-                  Friday defaults to this language unless a prompt explicitly asks
-                  for translation or quoted text in another one.
-                </Text>
-                <Select
-                  value={replyLanguage}
-                  onChange={(value) => void persistReplyLanguage(value)}
-                  className="friday-compact-select"
-                  style={{ width: 220, maxWidth: "100%" }}
-                  options={REPLY_LANGUAGE_OPTIONS}
-                  {...REPLY_LANGUAGE_SELECT_PROPS}
-                  loading={isSaving}
-                />
+                <div className="settings-field__copy">
+                  <Text className="settings-field__label">Reply language</Text>
+                  <Text className="settings-field__body">
+                    Friday defaults to this language unless a prompt explicitly asks
+                    for translation or quoted text in another one.
+                  </Text>
+                </div>
+                <div className="settings-field__control">
+                  <Select
+                    value={replyLanguage}
+                    onChange={(value) => void persistReplyLanguage(value)}
+                    className="friday-compact-select"
+                    style={{ width: 220, maxWidth: "100%" }}
+                    options={REPLY_LANGUAGE_OPTIONS}
+                    {...REPLY_LANGUAGE_SELECT_PROPS}
+                    loading={isSaving}
+                  />
+                </div>
               </div>
 
               <div className="settings-field">
-                <Text className="settings-field__label">Response budget</Text>
-                <Text className="settings-field__body">
-                  Higher budgets allow longer answers, but they can increase latency
-                  and memory use.
-                </Text>
-                <div className="settings-slider-shell">
-                  <Slider
-                    min={0}
-                    max={TOKEN_PRESETS.length - 1}
-                    step={null}
-                    marks={Object.fromEntries(
-                      TOKEN_PRESET_LABELS.map((label, index) => [index, label]),
-                    )}
-                    value={maxTokenSliderIndex}
-                    onChange={(value) => {
-                      const nextIndex = Array.isArray(value) ? value[0] : value;
-                      const nextValue = TOKEN_PRESETS[nextIndex] ?? TOKEN_PRESETS[0];
-                      setMaxTokenSliderIndex(nextIndex);
-                      setMaxTokens(nextValue);
-                    }}
-                    onChangeComplete={(value) => {
-                      const nextIndex = Array.isArray(value) ? value[0] : value;
-                      void persistMaxTokens(
-                        TOKEN_PRESETS[nextIndex] ?? TOKEN_PRESETS[0],
-                      );
-                    }}
-                    tooltip={{ open: false }}
-                  />
-                  <div className="settings-token-summary">
-                    Current budget: {formatTokenCount(maxTokens)}
-                    {isCustomTokenValue ? " (custom saved value)" : ""}
-                    {isSaving || isSavingMaxTokens ? " · Applying..." : ""}
+                <div className="settings-field__copy">
+                  <Text className="settings-field__label">Response budget</Text>
+                  <Text className="settings-field__body">
+                    Higher budgets allow longer answers, but they can increase latency
+                    and memory use.
+                  </Text>
+                </div>
+                <div className="settings-field__control settings-field__control--wide">
+                  <div className="settings-slider-shell">
+                    <Slider
+                      min={0}
+                      max={TOKEN_PRESETS.length - 1}
+                      step={null}
+                      marks={Object.fromEntries(
+                        TOKEN_PRESET_LABELS.map((label, index) => [index, label]),
+                      )}
+                      value={maxTokenSliderIndex}
+                      onChange={(value) => {
+                        const nextIndex = Array.isArray(value) ? value[0] : value;
+                        const nextValue = TOKEN_PRESETS[nextIndex] ?? TOKEN_PRESETS[0];
+                        setMaxTokenSliderIndex(nextIndex);
+                        setMaxTokens(nextValue);
+                      }}
+                      onChangeComplete={(value) => {
+                        const nextIndex = Array.isArray(value) ? value[0] : value;
+                        void persistMaxTokens(
+                          TOKEN_PRESETS[nextIndex] ?? TOKEN_PRESETS[0],
+                        );
+                      }}
+                      tooltip={{ open: false }}
+                    />
                   </div>
+                </div>
+              </div>
+            </section>
+
+            <section className="settings-section">
+              <div className="section-heading">
+                <div>
+                  <h3 className="section-heading__title">Advanced</h3>
+                </div>
+              </div>
+
+              <GenerationField
+                label="Temperature"
+                description="Lower values keep replies focused. Higher values make wording and ideas more varied."
+                value={temperature}
+                fallbackValue={TEMPERATURE_FALLBACK}
+                min={0}
+                max={2}
+                step={0.05}
+                lowLabel="Focused"
+                highLabel="Varied"
+                disabled={isSaving || savingGenerationControl !== null}
+                loading={savingGenerationControl === "temperature"}
+                onPreview={(nextValue) => setTemperature(nextValue)}
+                onCommit={(nextValue) =>
+                  persistGenerationControl("temperature", nextValue)
+                }
+              />
+
+              <GenerationField
+                label="Top-p"
+                description="Lower values sample from a tighter token pool. Higher values leave more alternatives available."
+                value={topP}
+                fallbackValue={TOP_P_FALLBACK}
+                min={0}
+                max={1}
+                step={0.01}
+                lowLabel="Narrow"
+                highLabel="Broad"
+                disabled={isSaving || savingGenerationControl !== null}
+                loading={savingGenerationControl === "top_p"}
+                onPreview={(nextValue) => setTopP(nextValue)}
+                onCommit={(nextValue) =>
+                  persistGenerationControl("top_p", nextValue)
+                }
+              />
+
+              <div className="settings-field">
+                <div className="settings-field__copy">
+                  <Text className="settings-field__label">
+                    Speculative decoding
+                  </Text>
+                  <Text className="settings-field__body">
+                    Auto uses the LiteRT model default. Turning it on can improve
+                    decode latency on supported models.
+                  </Text>
+                </div>
+                <div className="settings-field__control">
+                  <Radio.Group
+                    optionType="button"
+                    buttonStyle="solid"
+                    value={speculativeDecoding}
+                    options={SPECULATIVE_DECODING_OPTIONS}
+                    onChange={(event) =>
+                      void persistSpeculativeDecoding(
+                        event.target.value as SpeculativeDecodingMode,
+                      )
+                    }
+                    disabled={isSaving}
+                  />
                 </div>
               </div>
             </section>
@@ -558,19 +875,29 @@ export default function SettingsPanel({
                 </div>
               </div>
 
-              <div className="settings-appearance-control">
-                <Radio.Group
-                  optionType="button"
-                  buttonStyle="solid"
-                  value={themeMode}
-                  className="settings-theme-toggle"
-                  onChange={(event) =>
-                    void persistThemeMode(event.target.value as ThemeMode)
-                  }
-                >
-                  <Radio.Button value="light">Light</Radio.Button>
-                  <Radio.Button value="dark">Dark</Radio.Button>
-                </Radio.Group>
+              <div className="settings-field">
+                <div className="settings-field__copy">
+                  <Text className="settings-field__label">Theme</Text>
+                  <Text className="settings-field__body">
+                    Match the interface to your working environment.
+                  </Text>
+                </div>
+                <div className="settings-field__control">
+                  <div className="settings-appearance-control">
+                    <Radio.Group
+                      optionType="button"
+                      buttonStyle="solid"
+                      value={themeMode}
+                      className="settings-theme-toggle"
+                      onChange={(event) =>
+                        void persistThemeMode(event.target.value as ThemeMode)
+                      }
+                    >
+                      <Radio.Button value="light">Light</Radio.Button>
+                      <Radio.Button value="dark">Dark</Radio.Button>
+                    </Radio.Group>
+                  </div>
+                </div>
               </div>
             </section>
           </div>
@@ -603,23 +930,27 @@ export default function SettingsPanel({
               </div>
 
               <div className="settings-field">
-                <Text className="settings-field__label">Autodownload</Text>
-                <Text className="settings-field__body">
-                  Friday downloads new releases in the background and only asks
-                  you to restart when the update is ready.
-                  {isInstallingAppUpdate
-                    ? " Downloading the latest update now."
-                    : ""}
-                </Text>
-                <Switch
-                  aria-label="Autodownload"
-                  checked={autoDownloadUpdates}
-                  onChange={(checked) =>
-                    void persistAutoDownloadUpdates(checked)
-                  }
-                  loading={isSaving}
-                  disabled={isSaving || isInstallingAppUpdate}
-                />
+                <div className="settings-field__copy">
+                  <Text className="settings-field__label">Autodownload</Text>
+                  <Text className="settings-field__body">
+                    Friday downloads new releases in the background and only asks
+                    you to restart when the update is ready.
+                    {isInstallingAppUpdate
+                      ? " Downloading the latest update now."
+                      : ""}
+                  </Text>
+                </div>
+                <div className="settings-field__control">
+                  <Switch
+                    aria-label="Autodownload"
+                    checked={autoDownloadUpdates}
+                    onChange={(checked) =>
+                      void persistAutoDownloadUpdates(checked)
+                    }
+                    loading={isSaving}
+                    disabled={isSaving || isInstallingAppUpdate}
+                  />
+                </div>
               </div>
 
               <div className="settings-meta-grid">
