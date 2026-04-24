@@ -298,11 +298,27 @@ function upsertIngestProgress(
   current: KnowledgeIngestProgress[],
   next: KnowledgeIngestProgress,
 ) {
-  const key = next.sourceId ?? next.locator;
-  const remaining = current.filter(
-    (entry) => (entry.sourceId ?? entry.locator) !== key,
-  );
-  return [next, ...remaining].slice(0, 12);
+  const now = new Date().toISOString();
+  const existing = current.find((entry) => {
+    if (next.sourceId && entry.sourceId === next.sourceId) {
+      return true;
+    }
+    return entry.locator === next.locator;
+  });
+  const merged: KnowledgeIngestProgress = {
+    ...existing,
+    ...next,
+    sourceId: next.sourceId ?? existing?.sourceId ?? null,
+    firstSeenAt: existing?.firstSeenAt ?? next.firstSeenAt ?? now,
+    updatedAt: now,
+  };
+  const remaining = current.filter((entry) => {
+    if (merged.sourceId && entry.sourceId === merged.sourceId) {
+      return false;
+    }
+    return entry.locator !== merged.locator;
+  });
+  return [merged, ...remaining].slice(0, 12);
 }
 
 function notifyError(title: string, error: unknown) {

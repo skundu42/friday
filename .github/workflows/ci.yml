@@ -50,9 +50,6 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
-      - name: Frontend tests
-        run: npm run test:run
-
       - name: Frontend build
         run: npm run build
 

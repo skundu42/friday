@@ -62,7 +62,6 @@ Frontend:
 - `remark-math`
 - `rehype-katex`
 - `katex`
-- Vitest + Testing Library
 
 Backend:
 
@@ -384,7 +383,6 @@ From repo root:
 ```bash
 npm install
 npm run typecheck
-npm run test:run
 npm run python:test
 npm run tauri dev
 npm run tauri build

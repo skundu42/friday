@@ -419,6 +419,7 @@ export default function App() {
                         status={controller.knowledgeStatus}
                         sources={controller.knowledgeSources}
                         stats={controller.knowledgeStats}
+                        ingestProgress={controller.knowledgeIngestProgress}
                         onRefresh={() => controller.refreshKnowledge()}
                         onIngestFile={(filePath) =>
                           controller.ingestKnowledgeFile(filePath)

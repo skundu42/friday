@@ -5,6 +5,7 @@ import {
   Empty,
   Input,
   List,
+  Progress,
   Space,
   Statistic,
   Tag,
@@ -12,16 +13,21 @@ import {
 } from "antd";
 import {
   AudioOutlined,
+  CheckCircleOutlined,
+  CloseCircleOutlined,
   DeleteOutlined,
   FileAddOutlined,
   FileImageOutlined,
   FileTextOutlined,
   GlobalOutlined,
   LinkOutlined,
+  LoadingOutlined,
   ReloadOutlined,
 } from "@ant-design/icons";
 import { open } from "@tauri-apps/plugin-dialog";
 import type {
+  KnowledgeIngestProgress,
+  KnowledgeIngestStage,
   KnowledgeSource,
   KnowledgeStats,
   KnowledgeStatus,
@@ -33,6 +39,7 @@ interface KnowledgePanelProps {
   status: KnowledgeStatus | null;
   sources: KnowledgeSource[];
   stats: KnowledgeStats | null;
+  ingestProgress: KnowledgeIngestProgress[];
   onRefresh: () => Promise<void> | void;
   onIngestFile: (filePath: string) => Promise<void> | void;
   onIngestUrl: (url: string) => Promise<void> | void;
@@ -80,10 +87,81 @@ function iconForSource(source: KnowledgeSource) {
   }
 }
 
+function labelForStage(stage: KnowledgeIngestStage) {
+  switch (stage) {
+    case "indexing":
+      return "Indexing";
+    case "embedding":
+      return "Embedding";
+    case "complete":
+      return "Complete";
+    case "error":
+      return "Failed";
+    default:
+      return stage;
+  }
+}
+
+function progressForStage(stage: KnowledgeIngestStage) {
+  switch (stage) {
+    case "indexing":
+      return 35;
+    case "embedding":
+      return 72;
+    case "complete":
+    case "error":
+      return 100;
+    default:
+      return 0;
+  }
+}
+
+function toneForStage(stage: KnowledgeIngestStage) {
+  switch (stage) {
+    case "complete":
+      return "success";
+    case "error":
+      return "error";
+    default:
+      return "processing";
+  }
+}
+
+function iconForStage(stage: KnowledgeIngestStage) {
+  switch (stage) {
+    case "complete":
+      return <CheckCircleOutlined />;
+    case "error":
+      return <CloseCircleOutlined />;
+    default:
+      return <LoadingOutlined />;
+  }
+}
+
+function displayNameForProgress(item: KnowledgeIngestProgress) {
+  if (item.locator.startsWith("http://") || item.locator.startsWith("https://")) {
+    return item.locator;
+  }
+
+  const parts = item.locator.split(/[\\/]/).filter(Boolean);
+  return parts[parts.length - 1] ?? item.locator;
+}
+
+function formatProgressTime(value?: string) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return new Intl.DateTimeFormat(undefined, {
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(date);
+}
+
 export default function KnowledgePanel({
   status,
   sources,
   stats,
+  ingestProgress,
   onRefresh,
   onIngestFile,
   onIngestUrl,
@@ -304,6 +382,93 @@ export default function KnowledgePanel({
                   </List.Item>
                 )}
               />
+            )}
+          </section>
+
+          <section className="settings-section knowledge-activity-section">
+            <div className="section-heading">
+              <div>
+                <span className="section-heading__eyebrow">Activity</span>
+                <h3 className="section-heading__title">Ingest progress</h3>
+                <p className="section-heading__body">
+                  Track recent file and URL indexing work as it moves through
+                  extraction, embedding, and local storage.
+                </p>
+              </div>
+            </div>
+
+            {ingestProgress.length === 0 ? (
+              <Empty
+                image={Empty.PRESENTED_IMAGE_SIMPLE}
+                description="No recent ingest activity"
+              />
+            ) : (
+              <div className="knowledge-progress-list">
+                {ingestProgress.map((item) => {
+                  const stageTone = toneForStage(item.stage);
+                  const progressStatus =
+                    item.stage === "error"
+                      ? "exception"
+                      : item.stage === "complete"
+                        ? "success"
+                        : "active";
+                  const displayName = displayNameForProgress(item);
+                  const updatedAt = formatProgressTime(item.updatedAt);
+
+                  return (
+                    <div
+                      key={`${item.sourceId ?? "pending"}-${item.locator}`}
+                      className={`knowledge-progress-row knowledge-progress-row--${stageTone}`}
+                    >
+                      <div className="knowledge-progress-row__topline">
+                        <span className="knowledge-progress-icon">
+                          {iconForStage(item.stage)}
+                        </span>
+                        <div className="knowledge-progress-copy">
+                          <div className="knowledge-progress-title">
+                            <span>{displayName}</span>
+                            <Tag
+                              color={
+                                item.stage === "complete"
+                                  ? "success"
+                                  : item.stage === "error"
+                                    ? "error"
+                                    : "processing"
+                              }
+                            >
+                              {labelForStage(item.stage)}
+                            </Tag>
+                          </div>
+                          <Text className="knowledge-progress-message">
+                            {item.error ??
+                              item.message ??
+                              "Preparing Knowledge source"}
+                          </Text>
+                        </div>
+                        {updatedAt ? (
+                          <Text className="knowledge-progress-time">
+                            {updatedAt}
+                          </Text>
+                        ) : null}
+                      </div>
+
+                      <Progress
+                        percent={progressForStage(item.stage)}
+                        status={progressStatus}
+                        showInfo={false}
+                        size="small"
+                      />
+
+                      {item.chunkCount != null ? (
+                        <Text className="knowledge-progress-meta">
+                          {item.chunkCount}{" "}
+                          {item.chunkCount === 1 ? "chunk" : "chunks"}
+                        </Text>
+                      ) : null}
+                    </div>
+                  );
+                })}
+              </div>
             )}
           </section>
 

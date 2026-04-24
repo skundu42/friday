@@ -272,6 +272,8 @@ export interface KnowledgeIngestProgress {
   message?: string | null;
   chunkCount?: number | null;
   error?: string | null;
+  firstSeenAt?: string;
+  updatedAt?: string;
 }
 
 export type KnowledgeSourceKind = "file" | "url";

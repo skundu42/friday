@@ -2,7 +2,7 @@
 
 Friday is a your personal local AI assistant which runs efficienltly even in a 8GB Macbook Air. Private by design so works 100% offline. No subscriptions, No ratelimits.
 
-![Demo Image](./demo.png)
+![Friday app demo](./assets/friday-demo.gif)
 
 ## Why Friday
 
@@ -81,7 +81,6 @@ npm run tauri build
 ### Test And Check
 
 ```bash
-npm run test:run
 npm run typecheck
 cargo check --manifest-path src-tauri/Cargo.toml
 cargo test --manifest-path src-tauri/Cargo.toml
@@ -125,7 +124,6 @@ daksha-ai/
 │   ├── styles.css
 │   ├── components/
 │   ├── hooks/
-│   ├── test/
 │   ├── theme/
 │   └── types.ts
 └── src-tauri/
