@@ -88,7 +88,7 @@ npm run cargo:clippy
 npm run check
 ```
 
-`npm run check` is the default local validation flow. CI and release workflows additionally run `npm run cargo:clippy`.
+`npm run check` is the default local validation flow. CI additionally runs `npm run cargo:clippy`.
 
 
 ## Features
@@ -107,52 +107,6 @@ npm run check
 - Collapsible reasoning panel when a reply includes thinking content
 - Connection/privacy status pills and inline tool-activity status text
 - Settings drawer for token budget, theme selection, and model switching/downloads
-
-## Project Layout
-
-```text
-daksha-ai/
-├── README.md
-├── AGENTS.md
-├── package.json
-├── vite.config.ts
-├── .github/
-│   └── workflows/
-├── src/
-│   ├── App.tsx
-│   ├── main.tsx
-│   ├── styles.css
-│   ├── components/
-│   ├── hooks/
-│   ├── theme/
-│   └── types.ts
-└── src-tauri/
-    ├── build.rs
-    ├── Cargo.toml
-    ├── tauri.conf.json
-    ├── migrations/
-    ├── python_tests/
-    ├── resources/
-    └── src/
-```
-
-## Release Workflow
-
-The repo uses a tag-driven macOS release workflow in [`.github/workflows/release.yml`](.github/workflows/release.yml).
-
-Current release behavior:
-
-- any pushed tag triggers the release workflow
-- the workflow builds and uploads the macOS Apple Silicon app assets to the GitHub release for that tag
-- GitHub release notes are generated automatically
-- tags containing `-` are marked as prereleases (for example: `v0.2.0-rc.1`)
-- releases can fall back to ad-hoc signing when Apple signing secrets are missing
-- Apple Silicon is the supported packaging target today because `src-tauri/build.rs` only vendors the managed runtime for `macos/aarch64`
-
-Accepted tag formats:
-
-- `v0.2.0`
-- `0.2.0`
 
 ## Contributing
 
