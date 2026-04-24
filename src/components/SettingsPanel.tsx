@@ -27,6 +27,7 @@ import type {
   BackendStatus,
   ModelInfo,
   ReplyLanguage,
+  SpeculativeDecodingMode,
   ThemeMode,
 } from "../types";
 
@@ -41,6 +42,14 @@ const TOKEN_PRESET_LABELS = [
   "64K",
   "128K",
 ] as const;
+const SPECULATIVE_DECODING_OPTIONS: Array<{
+  label: string;
+  value: SpeculativeDecodingMode;
+}> = [
+  { label: "Auto", value: "auto" },
+  { label: "On", value: "enabled" },
+  { label: "Off", value: "disabled" },
+];
 function coerceMaxTokens(value: unknown) {
   if (typeof value !== "number" || !Number.isFinite(value)) {
     return 16384;
@@ -315,6 +324,10 @@ export default function SettingsPanel({
     settings.chat.reply_language,
   );
   const [maxTokens, setMaxTokens] = useState(settings.chat.max_tokens);
+  const [speculativeDecoding, setSpeculativeDecoding] =
+    useState<SpeculativeDecodingMode>(
+      settings.chat.generation.speculative_decoding,
+    );
   const [maxTokenSliderIndex, setMaxTokenSliderIndex] = useState(
     findPresetIndex(settings.chat.max_tokens),
   );
@@ -330,6 +343,7 @@ export default function SettingsPanel({
     setReplyLanguage(settings.chat.reply_language);
     setMaxTokens(settings.chat.max_tokens);
     setMaxTokenSliderIndex(findPresetIndex(settings.chat.max_tokens));
+    setSpeculativeDecoding(settings.chat.generation.speculative_decoding);
   }, [settings]);
 
   const persistAutoDownloadUpdates = async (nextAutoDownloadUpdates: boolean) => {
@@ -459,6 +473,44 @@ export default function SettingsPanel({
     }
   };
 
+  const persistSpeculativeDecoding = async (
+    nextSpeculativeDecoding: SpeculativeDecodingMode,
+  ) => {
+    if (
+      nextSpeculativeDecoding === settings.chat.generation.speculative_decoding
+    ) {
+      return;
+    }
+
+    const previousSpeculativeDecoding = speculativeDecoding;
+    setSpeculativeDecoding(nextSpeculativeDecoding);
+    setError(null);
+
+    try {
+      await onSaveSettings({
+        auto_start_backend: settings.auto_start_backend,
+        auto_download_updates: autoDownloadUpdates,
+        user_display_name: settings.user_display_name,
+        theme_mode: themeMode,
+        chat: {
+          reply_language: replyLanguage,
+          max_tokens: settings.chat.max_tokens,
+          web_assist_enabled: settings.chat.web_assist_enabled,
+          knowledge_enabled: settings.chat.knowledge_enabled,
+          generation: {
+            ...settings.chat.generation,
+            speculative_decoding: nextSpeculativeDecoding,
+          },
+        },
+      });
+    } catch (saveError) {
+      setSpeculativeDecoding(previousSpeculativeDecoding);
+      setError(
+        saveError instanceof Error ? saveError.message : String(saveError),
+      );
+    }
+  };
+
   return (
     <div className="settings-panel">
       <section className="settings-hero">
@@ -546,6 +598,40 @@ export default function SettingsPanel({
                       tooltip={{ open: false }}
                     />
                   </div>
+                </div>
+              </div>
+            </section>
+
+            <section className="settings-section">
+              <div className="section-heading">
+                <div>
+                  <h3 className="section-heading__title">Advanced</h3>
+                </div>
+              </div>
+
+              <div className="settings-field">
+                <div className="settings-field__copy">
+                  <Text className="settings-field__label">
+                    Speculative decoding
+                  </Text>
+                  <Text className="settings-field__body">
+                    Auto uses the LiteRT model default. Turning it on can improve
+                    decode latency on supported models.
+                  </Text>
+                </div>
+                <div className="settings-field__control">
+                  <Radio.Group
+                    optionType="button"
+                    buttonStyle="solid"
+                    value={speculativeDecoding}
+                    options={SPECULATIVE_DECODING_OPTIONS}
+                    onChange={(event) =>
+                      void persistSpeculativeDecoding(
+                        event.target.value as SpeculativeDecodingMode,
+                      )
+                    }
+                    disabled={isSaving}
+                  />
                 </div>
               </div>
             </section>

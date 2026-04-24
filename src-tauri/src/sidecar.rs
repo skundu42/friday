@@ -9,7 +9,7 @@ use crate::runtime_manifest::{
     RuntimePolicy,
 };
 use crate::service_diagnostics::{DiagnosticsTracker, ServiceDiagnostics, ServiceName};
-use crate::settings::GenerationRequestConfig;
+use crate::settings::{GenerationRequestConfig, SpeculativeDecodingMode};
 use crate::AppState;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -126,6 +126,14 @@ fn backend_label(backend: &str) -> &'static str {
     }
 }
 
+fn speculative_decoding_label(mode: SpeculativeDecodingMode) -> &'static str {
+    match mode {
+        SpeculativeDecodingMode::Auto => "auto",
+        SpeculativeDecodingMode::Enabled => "enabled",
+        SpeculativeDecodingMode::Disabled => "disabled",
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RuntimeFeatureSupport {
     supports_native_tools: bool,
@@ -186,6 +194,8 @@ pub struct BackendStatus {
     pub supports_thinking: bool,
     pub max_context_tokens: u32,
     pub recommended_max_output_tokens: u32,
+    pub runtime_cache_dir: String,
+    pub speculative_decoding: SpeculativeDecodingMode,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -242,6 +252,9 @@ pub struct SidecarManager {
     runtime_installed: Mutex<Option<bool>>,
     daemon_activity: Arc<DaemonActivity>,
     selected_backend: Mutex<String>,
+    speculative_decoding: Mutex<SpeculativeDecodingMode>,
+    selected_speculative_decoding: Mutex<SpeculativeDecodingMode>,
+    last_runtime_warning: Mutex<Option<String>>,
     downloaded_model_ids_cache: Mutex<Option<Vec<String>>>,
     web_search_base_url: Mutex<Option<String>>,
     diagnostics: DiagnosticsTracker,
@@ -301,6 +314,9 @@ impl SidecarManager {
             runtime_installed: Mutex::new(None),
             daemon_activity: Arc::new(DaemonActivity::new()),
             selected_backend: Mutex::new(default_backend().to_string()),
+            speculative_decoding: Mutex::new(SpeculativeDecodingMode::Auto),
+            selected_speculative_decoding: Mutex::new(SpeculativeDecodingMode::Auto),
+            last_runtime_warning: Mutex::new(None),
             downloaded_model_ids_cache: Mutex::new(None),
             web_search_base_url: Mutex::new(None),
             diagnostics: DiagnosticsTracker::new(
@@ -330,12 +346,42 @@ impl SidecarManager {
         self.max_tokens.store(max_tokens, Ordering::SeqCst);
     }
 
+    pub fn set_speculative_decoding(&self, mode: SpeculativeDecodingMode) {
+        let mut guard = self.speculative_decoding.lock().unwrap();
+        if *guard != mode {
+            *self.last_runtime_warning.lock().unwrap() = None;
+        }
+        *guard = mode;
+    }
+
     pub fn set_web_search_base_url(&self, base_url: &str) {
         *self.web_search_base_url.lock().unwrap() = Some(base_url.to_string());
     }
 
     fn selected_backend(&self) -> String {
         self.selected_backend.lock().unwrap().clone()
+    }
+
+    fn speculative_decoding(&self) -> SpeculativeDecodingMode {
+        *self.speculative_decoding.lock().unwrap()
+    }
+
+    fn selected_speculative_decoding(&self) -> SpeculativeDecodingMode {
+        *self.selected_speculative_decoding.lock().unwrap()
+    }
+
+    fn expected_speculative_decoding_for_current_daemon(&self) -> SpeculativeDecodingMode {
+        let requested = self.speculative_decoding();
+        let selected = self.selected_speculative_decoding();
+        let has_runtime_warning = self.last_runtime_warning.lock().unwrap().is_some();
+        if requested == SpeculativeDecodingMode::Enabled
+            && selected == SpeculativeDecodingMode::Auto
+            && has_runtime_warning
+        {
+            SpeculativeDecodingMode::Auto
+        } else {
+            requested
+        }
     }
 
     pub fn active_model(&self) -> &'static RuntimeModelSpec {
@@ -474,6 +520,11 @@ impl SidecarManager {
         let model_downloaded = self.has_model_for(model);
         let total_ram_gb = get_system_ram_gb();
         let ram_error = ram_support_error(model, total_ram_gb);
+        let runtime_cache_dir = self
+            .runtime_cache_dir_path()
+            .map(|path| path.display().to_string())
+            .unwrap_or_default();
+        let runtime_warning = self.last_runtime_warning.lock().unwrap().clone();
         let daemon_running = if runtime_installed && model_downloaded {
             self.daemon_is_running().await
         } else {
@@ -490,12 +541,18 @@ impl SidecarManager {
                 base_url: String::new(),
                 total_ram_gb,
                 state: "connected".to_string(),
-                message: format!(
-                    "LiteRT-LM {} with {} is ready in Friday's Python worker on {}.",
-                    runtime_version(),
-                    model.display_name.as_str(),
-                    backend_label(&self.selected_backend())
-                ),
+                message: {
+                    let message = format!(
+                        "LiteRT-LM {} with {} is ready in Friday's Python worker on {}.",
+                        runtime_version(),
+                        model.display_name.as_str(),
+                        backend_label(&self.selected_backend())
+                    );
+                    match runtime_warning.as_deref() {
+                        Some(warning) => format!("{} {}", message, warning),
+                        None => message,
+                    }
+                },
                 supports_native_tools: features.supports_native_tools,
                 supports_audio_input: features.supports_audio_input,
                 supports_image_input: features.supports_image_input,
@@ -503,6 +560,8 @@ impl SidecarManager {
                 supports_thinking: features.supports_thinking,
                 max_context_tokens: model.max_context_tokens,
                 recommended_max_output_tokens: model.recommended_max_output_tokens,
+                runtime_cache_dir: runtime_cache_dir.clone(),
+                speculative_decoding: self.selected_speculative_decoding(),
             }
         } else if runtime_installed && model_downloaded {
             BackendStatus {
@@ -525,6 +584,8 @@ impl SidecarManager {
                 supports_thinking: features.supports_thinking,
                 max_context_tokens: model.max_context_tokens,
                 recommended_max_output_tokens: model.recommended_max_output_tokens,
+                runtime_cache_dir,
+                speculative_decoding: self.speculative_decoding(),
             }
         } else if !runtime_installed {
             unavailable_status(
@@ -567,8 +628,20 @@ impl SidecarManager {
             };
             let max_tokens = self.max_tokens.load(Ordering::SeqCst);
             let backend = self.selected_backend();
+            let cache_dir = match self.runtime_cache_dir_path() {
+                Ok(path) => path,
+                Err(_) => return false,
+            };
+            let speculative_decoding = self.expected_speculative_decoding_for_current_daemon();
 
-            if daemon.matches(&model_path, max_tokens, &backend) && daemon.is_alive().await {
+            if daemon.matches(
+                &model_path,
+                max_tokens,
+                &backend,
+                &cache_dir,
+                speculative_decoding,
+            ) && daemon.is_alive().await
+            {
                 return true;
             }
 
@@ -634,8 +707,17 @@ impl SidecarManager {
                 let model_path = self.model_storage_path(self.active_model())?;
                 let max_tokens = self.max_tokens.load(Ordering::SeqCst);
                 let backend = self.selected_backend();
+                let cache_dir = self.runtime_cache_dir_path()?;
+                let speculative_decoding = self.expected_speculative_decoding_for_current_daemon();
 
-                if daemon.matches(&model_path, max_tokens, &backend) && daemon.is_alive().await {
+                if daemon.matches(
+                    &model_path,
+                    max_tokens,
+                    &backend,
+                    &cache_dir,
+                    speculative_decoding,
+                ) && daemon.is_alive().await
+                {
                     return Ok(());
                 }
                 tracing::warn!("Replacing Friday LiteRT Python worker to match the active config");
@@ -662,40 +744,86 @@ impl SidecarManager {
         PythonWorkerClient::spawn(config).await
     }
 
+    async fn spawn_daemon_worker_with_speculative_fallback(
+        &self,
+        config: PythonWorkerSpawnConfig<'_>,
+    ) -> Result<(PythonWorkerClient, SpeculativeDecodingMode, Option<String>), String> {
+        match self.spawn_daemon_worker(config).await {
+            Ok(client) => Ok((client, config.speculative_decoding, None)),
+            Err(primary_error)
+                if config.speculative_decoding == SpeculativeDecodingMode::Enabled =>
+            {
+                let fallback_config = PythonWorkerSpawnConfig {
+                    speculative_decoding: SpeculativeDecodingMode::Auto,
+                    ..config
+                };
+                match self.spawn_daemon_worker(fallback_config).await {
+                    Ok(client) => {
+                        let warning = format!(
+                            "Speculative decoding failed to start in enabled mode and fell back to auto: {}",
+                            primary_error
+                        );
+                        Ok((client, SpeculativeDecodingMode::Auto, Some(warning)))
+                    }
+                    Err(fallback_error) => Err(format!(
+                        "Speculative decoding enabled startup failed: {}. Auto retry also failed: {}",
+                        primary_error, fallback_error
+                    )),
+                }
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     async fn start_daemon_inner(&self) -> Result<(), String> {
         self.ensure_ready().await?;
 
         let max_tokens = self.max_tokens.load(Ordering::SeqCst);
         let model = self.active_model();
         let model_path = self.model_storage_path(model)?;
+        let runtime_cache_dir = self.runtime_cache_dir_path()?;
+        std::fs::create_dir_all(&runtime_cache_dir).map_err(|error| {
+            format!(
+                "Failed to create LiteRT compiled artifact cache directory {}: {}",
+                runtime_cache_dir.display(),
+                error
+            )
+        })?;
         let python_binary = self.python_worker_binary_path()?;
         let worker_script = self.python_worker_script_path()?;
         let python_site_packages = self.python_site_packages_path()?;
         let python_runtime_lib_dir = self.python_runtime_lib_dir_path()?;
         let preferred_backend = default_backend();
+        let requested_speculative_decoding = self.speculative_decoding();
         let web_search_base_url = self.web_search_base_url.lock().unwrap().clone();
 
         tracing::info!(
-            "Starting Friday LiteRT Python worker (model={}, max_num_tokens={}, backend={})…",
+            "Starting Friday LiteRT Python worker (model={}, max_num_tokens={}, backend={}, speculative_decoding={}, cache_dir={})…",
             model.id.as_str(),
             max_tokens,
             preferred_backend,
+            speculative_decoding_label(requested_speculative_decoding),
+            runtime_cache_dir.display(),
         );
 
-        let (client, selected_backend) = match self
-            .spawn_daemon_worker(PythonWorkerSpawnConfig {
+        let (client, selected_backend, selected_speculative_decoding, runtime_warning) = match self
+            .spawn_daemon_worker_with_speculative_fallback(PythonWorkerSpawnConfig {
                 python_binary: &python_binary,
                 worker_script: &worker_script,
                 model_path: &model_path,
                 max_num_tokens: max_tokens,
                 backend: preferred_backend,
+                cache_dir: &runtime_cache_dir,
+                speculative_decoding: requested_speculative_decoding,
                 web_search_base_url: web_search_base_url.as_deref(),
                 python_site_packages: &python_site_packages,
                 python_runtime_lib_dir: &python_runtime_lib_dir,
             })
             .await
         {
-            Ok(client) => (client, preferred_backend),
+            Ok((client, speculative_decoding, warning)) => {
+                (client, preferred_backend, speculative_decoding, warning)
+            }
             Err(primary_error) if preferred_backend != "cpu" => {
                 tracing::warn!(
                     "Friday LiteRT Python worker failed to start on {}: {}. Falling back to CPU.",
@@ -704,19 +832,23 @@ impl SidecarManager {
                 );
 
                 match self
-                    .spawn_daemon_worker(PythonWorkerSpawnConfig {
+                    .spawn_daemon_worker_with_speculative_fallback(PythonWorkerSpawnConfig {
                         python_binary: &python_binary,
                         worker_script: &worker_script,
                         model_path: &model_path,
                         max_num_tokens: max_tokens,
                         backend: "cpu",
+                        cache_dir: &runtime_cache_dir,
+                        speculative_decoding: requested_speculative_decoding,
                         web_search_base_url: web_search_base_url.as_deref(),
                         python_site_packages: &python_site_packages,
                         python_runtime_lib_dir: &python_runtime_lib_dir,
                     })
                     .await
                 {
-                    Ok(client) => (client, "cpu"),
+                    Ok((client, speculative_decoding, warning)) => {
+                        (client, "cpu", speculative_decoding, warning)
+                    }
                     Err(fallback_error) => {
                         return Err(format!(
                             "Failed to start Friday LiteRT Python worker on {}: {}. CPU fallback also failed: {}",
@@ -738,13 +870,21 @@ impl SidecarManager {
         *guard = Some(client);
         self.daemon_activity.touch();
         *self.selected_backend.lock().unwrap() = selected_backend.to_string();
-        self.diagnostics.mark_ready(format!(
+        *self.selected_speculative_decoding.lock().unwrap() = selected_speculative_decoding;
+        *self.last_runtime_warning.lock().unwrap() = runtime_warning.clone();
+        let ready_message = format!(
             "LiteRT runtime is ready on {}.",
             backend_label(selected_backend)
-        ));
+        );
+        self.diagnostics
+            .mark_ready(match runtime_warning.as_deref() {
+                Some(warning) => format!("{} {}", ready_message, warning),
+                None => ready_message,
+            });
         tracing::info!(
-            "Friday LiteRT Python worker started on {}",
-            backend_label(selected_backend)
+            "Friday LiteRT Python worker started on {} with speculative decoding {}",
+            backend_label(selected_backend),
+            speculative_decoding_label(selected_speculative_decoding),
         );
         Ok(())
     }
@@ -907,6 +1047,13 @@ impl SidecarManager {
 
     fn lit_home_dir_path(&self) -> Result<PathBuf, String> {
         Ok(self.app_data_dir()?.join("lit-home"))
+    }
+
+    fn runtime_cache_dir_path(&self) -> Result<PathBuf, String> {
+        Ok(self
+            .app_data_dir()?
+            .join("litert-cache")
+            .join("compiled-artifacts"))
     }
 
     fn model_storage_path(&self, model: &RuntimeModelSpec) -> Result<PathBuf, String> {
@@ -1652,6 +1799,8 @@ fn unavailable_status(state: &str, message: impl AsRef<str>) -> BackendStatus {
         supports_thinking: false,
         max_context_tokens: 0,
         recommended_max_output_tokens: 0,
+        runtime_cache_dir: String::new(),
+        speculative_decoding: SpeculativeDecodingMode::Auto,
     }
 }
 
@@ -2016,6 +2165,8 @@ mod tests {
             supports_thinking: features.supports_thinking,
             max_context_tokens: model.max_context_tokens,
             recommended_max_output_tokens: model.recommended_max_output_tokens,
+            runtime_cache_dir: String::new(),
+            speculative_decoding: SpeculativeDecodingMode::Auto,
         };
 
         assert!(!status.connected);

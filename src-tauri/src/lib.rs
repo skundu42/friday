@@ -1384,6 +1384,7 @@ async fn bootstrap_payload_inner(
     let database = database_handle(state)?;
     let settings = database.load_app_settings()?;
     sidecar.set_max_tokens(settings.chat.max_tokens);
+    sidecar.set_speculative_decoding(settings.chat.generation.speculative_decoding);
     let mut backend_status = sidecar.auto_detect().await;
     if !backend_status.connected && backend_status.state == "ready" {
         match sidecar.ensure_daemon().await {
@@ -1888,6 +1889,7 @@ async fn send_message(
     let app_settings = database.load_app_settings()?;
     let db_path = current_db_path(&state)?;
     sidecar.set_max_tokens(app_settings.chat.max_tokens);
+    sidecar.set_speculative_decoding(app_settings.chat.generation.speculative_decoding);
     let attachment_count = attachments.as_ref().map(Vec::len).unwrap_or(0);
     let effective_thinking_enabled = thinking_enabled
         .or(app_settings.chat.generation.thinking_enabled)
@@ -2616,6 +2618,7 @@ async fn save_settings(
 ) -> Result<settings::AppSettings, String> {
     let saved = database_handle(&state)?.save_app_settings(input)?;
     sidecar.set_max_tokens(saved.chat.max_tokens);
+    sidecar.set_speculative_decoding(saved.chat.generation.speculative_decoding);
     Ok(saved)
 }
 

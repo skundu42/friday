@@ -163,6 +163,7 @@ function settingsToInput(settings: AppSettings): AppSettingsInput {
         temperature: settings.chat.generation.temperature,
         top_p: settings.chat.generation.top_p,
         thinking_enabled: settings.chat.generation.thinking_enabled,
+        speculative_decoding: settings.chat.generation.speculative_decoding,
       },
     },
   };
@@ -241,6 +242,11 @@ function mergeQueuedSettingsInput(
           desired.chat.generation.thinking_enabled,
           requested.chat.generation.thinking_enabled,
         ),
+        speculative_decoding: resolveQueuedSettingValue(
+          committed.chat.generation.speculative_decoding,
+          desired.chat.generation.speculative_decoding,
+          requested.chat.generation.speculative_decoding,
+        ),
       },
     },
   };
@@ -278,7 +284,10 @@ function planSettingsRefresh(
   next: AppSettingsInput,
 ) {
   return {
-    backend: previous.chat.max_tokens !== next.chat.max_tokens,
+    backend:
+      previous.chat.max_tokens !== next.chat.max_tokens ||
+      previous.chat.generation.speculative_decoding !==
+        next.chat.generation.speculative_decoding,
     webSearch:
       previous.chat.web_assist_enabled !== next.chat.web_assist_enabled,
     knowledge: previous.chat.knowledge_enabled !== next.chat.knowledge_enabled,

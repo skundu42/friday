@@ -9,6 +9,7 @@ pub const HIGH_RAM_DEFAULT_MAX_TOKENS: u32 = 16384;
 pub const MIN_MAX_TOKENS: u32 = 1024;
 pub const MAX_MAX_TOKENS: u32 = 131072;
 const DEFAULT_THEME_MODE: &str = "light";
+pub const DEFAULT_SPECULATIVE_DECODING: SpeculativeDecodingMode = SpeculativeDecodingMode::Auto;
 const SUPPORTED_REPLY_LANGUAGES: &[&str] = &[
     "english",
     "hindi",
@@ -69,6 +70,7 @@ pub struct GenerationSettings {
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
     pub thinking_enabled: Option<bool>,
+    pub speculative_decoding: SpeculativeDecodingMode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -77,6 +79,7 @@ pub struct GenerationSettingsInput {
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
     pub thinking_enabled: Option<bool>,
+    pub speculative_decoding: SpeculativeDecodingMode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -85,6 +88,39 @@ pub struct GenerationRequestConfig {
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
     pub thinking_enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SpeculativeDecodingMode {
+    #[default]
+    Auto,
+    Enabled,
+    Disabled,
+}
+
+impl SpeculativeDecodingMode {
+    pub fn engine_value(self) -> Option<bool> {
+        match self {
+            Self::Auto => None,
+            Self::Enabled => Some(true),
+            Self::Disabled => Some(false),
+        }
+    }
+}
+
+fn deserialize_speculative_decoding_lossy<'de, D>(
+    deserializer: D,
+) -> Result<SpeculativeDecodingMode, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(match value.as_ref().and_then(serde_json::Value::as_str) {
+        Some("enabled") => SpeculativeDecodingMode::Enabled,
+        Some("disabled") => SpeculativeDecodingMode::Disabled,
+        _ => DEFAULT_SPECULATIVE_DECODING,
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -113,6 +149,8 @@ struct StoredGenerationSettings {
     temperature: Option<f32>,
     top_p: Option<f32>,
     thinking_enabled: Option<bool>,
+    #[serde(deserialize_with = "deserialize_speculative_decoding_lossy")]
+    speculative_decoding: SpeculativeDecodingMode,
 }
 
 impl Default for AppSettings {
@@ -203,6 +241,7 @@ impl From<StoredAppSettings> for AppSettings {
                     temperature: value.chat.generation.temperature,
                     top_p: value.chat.generation.top_p,
                     thinking_enabled: value.chat.generation.thinking_enabled,
+                    speculative_decoding: value.chat.generation.speculative_decoding,
                 },
             },
         }
@@ -225,6 +264,7 @@ impl From<&AppSettingsInput> for StoredAppSettings {
                     temperature: value.chat.generation.temperature,
                     top_p: value.chat.generation.top_p,
                     thinking_enabled: value.chat.generation.thinking_enabled,
+                    speculative_decoding: value.chat.generation.speculative_decoding,
                 },
             },
         }
@@ -416,6 +456,7 @@ mod tests {
                         temperature: Some(0.7),
                         top_p: Some(0.9),
                         thinking_enabled: None,
+                        speculative_decoding: SpeculativeDecodingMode::Enabled,
                     },
                 },
             },
@@ -432,6 +473,10 @@ mod tests {
         assert!(saved.chat.knowledge_enabled);
         assert_eq!(saved.chat.generation.temperature, Some(0.7));
         assert_eq!(saved.chat.generation.top_p, Some(0.9));
+        assert_eq!(
+            saved.chat.generation.speculative_decoding,
+            SpeculativeDecodingMode::Enabled
+        );
 
         let loaded = load_settings(&conn).unwrap();
         assert_eq!(loaded, saved);
@@ -510,6 +555,7 @@ mod tests {
                 temperature: Some(0.6),
                 top_p: Some(0.8),
                 thinking_enabled: None,
+                speculative_decoding: SpeculativeDecodingMode::Disabled,
             },
         };
 
@@ -673,7 +719,8 @@ mod tests {
                 "generation": {
                     "temperature": -0.5,
                     "top_p": 3.2,
-                    "thinking_enabled": true
+                    "thinking_enabled": true,
+                    "speculative_decoding": "unexpected"
                 }
             }
         })
@@ -689,6 +736,10 @@ mod tests {
         assert_eq!(loaded.chat.max_tokens, MIN_MAX_TOKENS);
         assert_eq!(loaded.chat.generation.temperature, Some(0.0));
         assert_eq!(loaded.chat.generation.top_p, Some(1.0));
+        assert_eq!(
+            loaded.chat.generation.speculative_decoding,
+            SpeculativeDecodingMode::Auto
+        );
         assert_eq!(loaded.user_display_name.chars().count(), 60);
 
         let rewritten = storage::load_string_setting(&conn, APP_SETTINGS_KEY)
@@ -702,6 +753,10 @@ mod tests {
         assert_eq!(persisted.chat.max_tokens, MIN_MAX_TOKENS);
         assert_eq!(persisted.chat.generation.temperature, Some(0.0));
         assert_eq!(persisted.chat.generation.top_p, Some(1.0));
+        assert_eq!(
+            persisted.chat.generation.speculative_decoding,
+            SpeculativeDecodingMode::Auto
+        );
     }
 
     #[test]
@@ -709,6 +764,22 @@ mod tests {
         assert!(AppSettings::default().auto_download_updates);
         assert!(AppSettingsInput::default().auto_download_updates);
         assert!(StoredAppSettings::default().auto_download_updates);
+    }
+
+    #[test]
+    fn default_generation_settings_use_auto_speculative_decoding() {
+        assert_eq!(
+            GenerationSettings::default().speculative_decoding,
+            SpeculativeDecodingMode::Auto
+        );
+        assert_eq!(
+            GenerationSettingsInput::default().speculative_decoding,
+            SpeculativeDecodingMode::Auto
+        );
+        assert_eq!(
+            StoredGenerationSettings::default().speculative_decoding,
+            SpeculativeDecodingMode::Auto
+        );
     }
 
     #[test]

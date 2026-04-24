@@ -31,7 +31,7 @@ const settings: AppSettings = {
     max_tokens: 4096,
     web_assist_enabled: false,
     knowledge_enabled: false,
-    generation: {},
+    generation: { speculative_decoding: "auto" },
   },
 };
 
@@ -50,6 +50,8 @@ const backendStatus: BackendStatus = {
   supports_thinking: false,
   max_context_tokens: 131072,
   recommended_max_output_tokens: 4096,
+  runtime_cache_dir: "/tmp/friday-cache",
+  speculative_decoding: "auto",
 };
 
 const activeModel: ModelInfo = {
@@ -271,7 +273,7 @@ describe("SettingsPanel", () => {
         max_tokens: 6144,
         web_assist_enabled: false,
         knowledge_enabled: false,
-        generation: {},
+        generation: { speculative_decoding: "auto" },
       },
     };
     const onSaveSettings = vi.fn(async (input: AppSettingsInput) => ({
@@ -314,7 +316,7 @@ describe("SettingsPanel", () => {
         max_tokens: 6144,
         web_assist_enabled: false,
         knowledge_enabled: false,
-        generation: {},
+        generation: { speculative_decoding: "auto" },
       },
     });
   });
@@ -374,7 +376,7 @@ describe("SettingsPanel", () => {
         max_tokens: 4096,
         web_assist_enabled: false,
         knowledge_enabled: false,
-        generation: {},
+        generation: { speculative_decoding: "auto" },
       },
     });
   });
@@ -414,7 +416,47 @@ describe("SettingsPanel", () => {
         max_tokens: 4096,
         web_assist_enabled: false,
         knowledge_enabled: false,
-        generation: {},
+        generation: { speculative_decoding: "auto" },
+      },
+    });
+  });
+
+  it("persists the speculative decoding mode", async () => {
+    const onSaveSettings = vi.fn(async (input: AppSettingsInput) => ({
+      auto_start_backend: input.auto_start_backend,
+      auto_download_updates: input.auto_download_updates,
+      user_display_name: input.user_display_name,
+      theme_mode: input.theme_mode,
+      chat: input.chat,
+    }));
+
+    render(
+      <SettingsPanel
+        settings={settings}
+        backendStatus={backendStatus}
+        activeModelId={activeModel.id}
+        isSwitchingModel={false}
+        onModelChange={vi.fn(async () => undefined)}
+        isSaving={false}
+        isInstallingAppUpdate={false}
+        onSaveSettings={onSaveSettings}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("radio", { name: "On" }));
+
+    await waitFor(() => expect(onSaveSettings).toHaveBeenCalledTimes(1));
+    expect(onSaveSettings.mock.calls[0]?.[0]).toEqual({
+      auto_start_backend: true,
+      auto_download_updates: true,
+      user_display_name: "Asha",
+      theme_mode: "light",
+      chat: {
+        reply_language: "english",
+        max_tokens: 4096,
+        web_assist_enabled: false,
+        knowledge_enabled: false,
+        generation: { speculative_decoding: "enabled" },
       },
     });
   });
@@ -500,7 +542,7 @@ describe("SettingsPanel", () => {
         max_tokens: 4096,
         web_assist_enabled: false,
         knowledge_enabled: false,
-        generation: {},
+        generation: { speculative_decoding: "auto" },
       },
     });
   });

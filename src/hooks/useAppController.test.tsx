@@ -69,6 +69,8 @@ const backendStatus: BackendStatus = {
   supports_thinking: true,
   max_context_tokens: 131072,
   recommended_max_output_tokens: 4096,
+  runtime_cache_dir: "/tmp/friday-cache",
+  speculative_decoding: "auto",
 };
 
 const readyWebSearchStatus: WebSearchStatus = {
@@ -96,6 +98,7 @@ function makeSettings(
       knowledge_enabled: false,
       generation: {
         thinking_enabled: true,
+        speculative_decoding: "auto",
       },
       ...overrides,
     },
@@ -281,6 +284,8 @@ describe("useAppController", () => {
                   top_p: args?.input?.chat.generation.top_p,
                   thinking_enabled:
                     args?.input?.chat.generation.thinking_enabled,
+                  speculative_decoding:
+                    args?.input?.chat.generation.speculative_decoding ?? "auto",
                 },
               },
             };
@@ -424,6 +429,7 @@ describe("useAppController", () => {
           knowledge_enabled: false,
           generation: {
             thinking_enabled: true,
+            speculative_decoding: "auto",
           },
         },
       });

@@ -29,6 +29,7 @@ const settings: AppSettings = {
     knowledge_enabled: false,
     generation: {
       thinking_enabled: true,
+      speculative_decoding: "auto",
     },
   },
 };
