@@ -461,7 +461,7 @@ export default function SettingsPanel({
 
   return (
     <div className="settings-panel">
-      <section className="settings-hero surface-card surface-card--accent">
+      <section className="settings-hero">
         <div className="settings-header settings-header--page">
           <Title level={3} className="settings-header__title">
             Settings
@@ -493,51 +493,59 @@ export default function SettingsPanel({
               </div>
 
               <div className="settings-field">
-                <Text className="settings-field__label">Reply language</Text>
-                <Text className="settings-field__body">
-                  Friday defaults to this language unless a prompt explicitly asks
-                  for translation or quoted text in another one.
-                </Text>
-                <Select
-                  value={replyLanguage}
-                  onChange={(value) => void persistReplyLanguage(value)}
-                  className="friday-compact-select"
-                  style={{ width: 220, maxWidth: "100%" }}
-                  options={REPLY_LANGUAGE_OPTIONS}
-                  {...REPLY_LANGUAGE_SELECT_PROPS}
-                  loading={isSaving}
-                />
+                <div className="settings-field__copy">
+                  <Text className="settings-field__label">Reply language</Text>
+                  <Text className="settings-field__body">
+                    Friday defaults to this language unless a prompt explicitly asks
+                    for translation or quoted text in another one.
+                  </Text>
+                </div>
+                <div className="settings-field__control">
+                  <Select
+                    value={replyLanguage}
+                    onChange={(value) => void persistReplyLanguage(value)}
+                    className="friday-compact-select"
+                    style={{ width: 220, maxWidth: "100%" }}
+                    options={REPLY_LANGUAGE_OPTIONS}
+                    {...REPLY_LANGUAGE_SELECT_PROPS}
+                    loading={isSaving}
+                  />
+                </div>
               </div>
 
               <div className="settings-field">
-                <Text className="settings-field__label">Response budget</Text>
-                <Text className="settings-field__body">
-                  Higher budgets allow longer answers, but they can increase latency
-                  and memory use.
-                </Text>
-                <div className="settings-slider-shell">
-                  <Slider
-                    min={0}
-                    max={TOKEN_PRESETS.length - 1}
-                    step={null}
-                    marks={Object.fromEntries(
-                      TOKEN_PRESET_LABELS.map((label, index) => [index, label]),
-                    )}
-                    value={maxTokenSliderIndex}
-                    onChange={(value) => {
-                      const nextIndex = Array.isArray(value) ? value[0] : value;
-                      const nextValue = TOKEN_PRESETS[nextIndex] ?? TOKEN_PRESETS[0];
-                      setMaxTokenSliderIndex(nextIndex);
-                      setMaxTokens(nextValue);
-                    }}
-                    onChangeComplete={(value) => {
-                      const nextIndex = Array.isArray(value) ? value[0] : value;
-                      void persistMaxTokens(
-                        TOKEN_PRESETS[nextIndex] ?? TOKEN_PRESETS[0],
-                      );
-                    }}
-                    tooltip={{ open: false }}
-                  />
+                <div className="settings-field__copy">
+                  <Text className="settings-field__label">Response budget</Text>
+                  <Text className="settings-field__body">
+                    Higher budgets allow longer answers, but they can increase latency
+                    and memory use.
+                  </Text>
+                </div>
+                <div className="settings-field__control settings-field__control--wide">
+                  <div className="settings-slider-shell">
+                    <Slider
+                      min={0}
+                      max={TOKEN_PRESETS.length - 1}
+                      step={null}
+                      marks={Object.fromEntries(
+                        TOKEN_PRESET_LABELS.map((label, index) => [index, label]),
+                      )}
+                      value={maxTokenSliderIndex}
+                      onChange={(value) => {
+                        const nextIndex = Array.isArray(value) ? value[0] : value;
+                        const nextValue = TOKEN_PRESETS[nextIndex] ?? TOKEN_PRESETS[0];
+                        setMaxTokenSliderIndex(nextIndex);
+                        setMaxTokens(nextValue);
+                      }}
+                      onChangeComplete={(value) => {
+                        const nextIndex = Array.isArray(value) ? value[0] : value;
+                        void persistMaxTokens(
+                          TOKEN_PRESETS[nextIndex] ?? TOKEN_PRESETS[0],
+                        );
+                      }}
+                      tooltip={{ open: false }}
+                    />
+                  </div>
                 </div>
               </div>
             </section>
@@ -549,19 +557,29 @@ export default function SettingsPanel({
                 </div>
               </div>
 
-              <div className="settings-appearance-control">
-                <Radio.Group
-                  optionType="button"
-                  buttonStyle="solid"
-                  value={themeMode}
-                  className="settings-theme-toggle"
-                  onChange={(event) =>
-                    void persistThemeMode(event.target.value as ThemeMode)
-                  }
-                >
-                  <Radio.Button value="light">Light</Radio.Button>
-                  <Radio.Button value="dark">Dark</Radio.Button>
-                </Radio.Group>
+              <div className="settings-field">
+                <div className="settings-field__copy">
+                  <Text className="settings-field__label">Theme</Text>
+                  <Text className="settings-field__body">
+                    Match the interface to your working environment.
+                  </Text>
+                </div>
+                <div className="settings-field__control">
+                  <div className="settings-appearance-control">
+                    <Radio.Group
+                      optionType="button"
+                      buttonStyle="solid"
+                      value={themeMode}
+                      className="settings-theme-toggle"
+                      onChange={(event) =>
+                        void persistThemeMode(event.target.value as ThemeMode)
+                      }
+                    >
+                      <Radio.Button value="light">Light</Radio.Button>
+                      <Radio.Button value="dark">Dark</Radio.Button>
+                    </Radio.Group>
+                  </div>
+                </div>
               </div>
             </section>
           </div>
@@ -594,23 +612,27 @@ export default function SettingsPanel({
               </div>
 
               <div className="settings-field">
-                <Text className="settings-field__label">Autodownload</Text>
-                <Text className="settings-field__body">
-                  Friday downloads new releases in the background and only asks
-                  you to restart when the update is ready.
-                  {isInstallingAppUpdate
-                    ? " Downloading the latest update now."
-                    : ""}
-                </Text>
-                <Switch
-                  aria-label="Autodownload"
-                  checked={autoDownloadUpdates}
-                  onChange={(checked) =>
-                    void persistAutoDownloadUpdates(checked)
-                  }
-                  loading={isSaving}
-                  disabled={isSaving || isInstallingAppUpdate}
-                />
+                <div className="settings-field__copy">
+                  <Text className="settings-field__label">Autodownload</Text>
+                  <Text className="settings-field__body">
+                    Friday downloads new releases in the background and only asks
+                    you to restart when the update is ready.
+                    {isInstallingAppUpdate
+                      ? " Downloading the latest update now."
+                      : ""}
+                  </Text>
+                </div>
+                <div className="settings-field__control">
+                  <Switch
+                    aria-label="Autodownload"
+                    checked={autoDownloadUpdates}
+                    onChange={(checked) =>
+                      void persistAutoDownloadUpdates(checked)
+                    }
+                    loading={isSaving}
+                    disabled={isSaving || isInstallingAppUpdate}
+                  />
+                </div>
               </div>
 
               <div className="settings-meta-grid">

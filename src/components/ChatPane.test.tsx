@@ -77,14 +77,15 @@ describe("ChatPane", () => {
 
     expect(screen.getByText("Welcome back, Asha.")).not.toBeNull();
     expect(screen.getByText("New chat")).not.toBeNull();
-    expect(screen.getByText("Friday · Connected")).not.toBeNull();
+    expect(screen.queryByText("Friday · Connected")).toBeNull();
+    expect(screen.queryByText("Connected")).toBeNull();
     expect(screen.getByRole("button", { name: "Attach files" })).not.toBeNull();
     expect(screen.getByRole("button", { name: /Web/ })).not.toBeNull();
     expect(screen.getByRole("button", { name: /Knowledge/ })).not.toBeNull();
     expect(screen.getByRole("button", { name: /Think/ })).not.toBeNull();
   });
 
-  it("shows insufficient RAM directly in the header state", () => {
+  it("does not show backend state in the chat header", () => {
     renderChatPane({
       backendStatus: {
         ...backendStatus,
@@ -93,19 +94,9 @@ describe("ChatPane", () => {
       },
     });
 
-    expect(screen.getByText("Friday · Insufficient RAM")).not.toBeNull();
-  });
-
-  it("falls back to disconnected for unknown backend states", () => {
-    renderChatPane({
-      backendStatus: {
-        ...backendStatus,
-        connected: false,
-        state: "mystery_state",
-      },
-    });
-
-    expect(screen.getByText("Friday · Disconnected")).not.toBeNull();
+    expect(screen.getByText("New chat")).not.toBeNull();
+    expect(screen.queryByText("Friday · Insufficient RAM")).toBeNull();
+    expect(screen.queryByText("Insufficient RAM")).toBeNull();
   });
 
   it("shows the web status pill when web search is enabled", () => {

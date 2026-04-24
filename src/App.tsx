@@ -277,7 +277,11 @@ export default function App() {
           </Sider>
         ) : null}
 
-        <Layout className="app-content-shell">
+        <Layout
+          className={`app-content-shell ${
+            sidebarOpen && !isNarrowLayout ? "has-sidebar" : "is-full-window"
+          }`}
+        >
           <Content className="app-content">
             {controller.isBootstrapping ? (
               <PanelFallback label="Starting Friday..." />
@@ -531,6 +535,7 @@ function AppPageFrame({
             Back to chat
           </Button>
         </div>
+        <div className="app-page__toolbar-drag-region" data-tauri-drag-region />
         <Text type="secondary" className="app-page__toolbar-label">
           {title}
         </Text>

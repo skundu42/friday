@@ -42,6 +42,7 @@ export default function Sidebar({
 
   return (
     <div className="sidebar-shell">
+      <div className="sidebar-window-drag-region" data-tauri-drag-region />
       <div className="sidebar-brand">
         <AppLogo size={46} />
         <div className="sidebar-brand__copy">
@@ -49,7 +50,7 @@ export default function Sidebar({
             Friday
           </Title>
           <Text className="sidebar-brand__subtitle">
-            Your Personal AI Assistant
+            Local AI workspace
           </Text>
         </div>
       </div>

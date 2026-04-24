@@ -183,7 +183,7 @@ export default function KnowledgePanel({
 
   return (
     <div className="knowledge-panel">
-      <section className="knowledge-hero surface-card surface-card--accent">
+      <section className="knowledge-hero">
         <div className="knowledge-hero__header">
           <div className="settings-header settings-header--page">
             <Title level={3} className="settings-header__title">
@@ -195,21 +195,22 @@ export default function KnowledgePanel({
             </Paragraph>
           </div>
 
-          <Button
-            icon={<ReloadOutlined />}
-            onClick={() => void handleRefresh()}
-            loading={isRefreshing}
-            className="secondary-action"
-          >
-            Refresh
-          </Button>
+          <div className="knowledge-hero__actions">
+            <span
+              className={`knowledge-status-badge knowledge-status-badge--${toneForStatus(status)}`}
+            >
+              {status?.message ?? "Knowledge status is unavailable."}
+            </span>
+            <Button
+              icon={<ReloadOutlined />}
+              onClick={() => void handleRefresh()}
+              loading={isRefreshing}
+              className="secondary-action"
+            >
+              Refresh
+            </Button>
+          </div>
         </div>
-
-        <Alert
-          showIcon
-          type={toneForStatus(status)}
-          message={status?.message ?? "Knowledge status is unavailable."}
-        />
 
         <div className="knowledge-stats-grid">
           {summaryStats.map((item) => (
@@ -229,9 +230,9 @@ export default function KnowledgePanel({
         />
       ) : null}
 
-      <div className="knowledge-layout">
+      <div className="knowledge-layout knowledge-workbench surface-card">
         <div className="knowledge-stack knowledge-stack--main">
-          <section className="settings-section surface-card">
+          <section className="settings-section">
             <div className="section-heading">
               <div>
                 <span className="section-heading__eyebrow">Sources</span>
@@ -309,7 +310,7 @@ export default function KnowledgePanel({
         </div>
 
         <div className="knowledge-stack knowledge-stack--side">
-          <section className="settings-section surface-card">
+          <section className="settings-section">
             <div className="section-heading">
               <div>
                 <span className="section-heading__eyebrow">Ingest</span>

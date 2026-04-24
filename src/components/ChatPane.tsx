@@ -185,29 +185,6 @@ function isImageAttachmentName(name: string) {
   return IMAGE_EXTENSIONS.includes(ext);
 }
 
-function humanizeBackendState(state?: string) {
-  switch (state) {
-    case "ready":
-      return "Ready";
-    case "runtime_missing":
-      return "Setup required";
-    case "model_missing":
-      return "Model missing";
-    case "insufficient_ram":
-      return "Insufficient RAM";
-    case "start_failed":
-      return "Unavailable";
-    default:
-      return "Disconnected";
-  }
-}
-
-function backendStatusTone(backendStatus: BackendStatus | null) {
-  if (backendStatus?.connected) return "success";
-  if (backendStatus?.state === "ready") return "processing";
-  return "danger";
-}
-
 function isGenericThinkingStatus(status?: string | null) {
   if (!status) return false;
   return status === "Friday is thinking…" || status === "Friday is thinking...";
@@ -696,12 +673,6 @@ export default function ChatPane({
   const readyAttachments = attachments.filter((a) => a.status === "ready");
   const hasLoadingAttachments = attachments.some((a) => a.status === "loading");
   const hasUserMessages = messages.some((message) => message.role === "user");
-  const backendLabel = backendStatus?.connected
-    ? "Connected"
-    : humanizeBackendState(backendStatus?.state);
-  const headerSubtitle = activeSessionTitle
-    ? `Friday · ${backendLabel}`
-    : backendLabel;
   const capabilityStatus = imageInputAvailable
     ? null
     : IMAGE_INPUT_UNAVAILABLE_MESSAGE;
@@ -740,15 +711,14 @@ export default function ChatPane({
             className="friday-icon-button"
           />
           <AppLogo size={40} />
-          <div className="chat-topbar__copy">
+          <div className="chat-topbar__copy" data-tauri-drag-region>
             <Text strong className="chat-topbar__title">
               {activeSessionTitle}
             </Text>
-            <Text type="secondary" className="chat-topbar__subtitle">
-              {headerSubtitle}
-            </Text>
           </div>
         </div>
+
+        <div className="chat-topbar__drag-region" data-tauri-drag-region />
 
         <div className="chat-topbar__meta">
           <Select
@@ -760,9 +730,6 @@ export default function ChatPane({
             className="friday-compact-select"
             aria-label="Reply language"
           />
-          <span className={`friday-status-pill friday-status-pill--${backendStatusTone(backendStatus)}`}>
-            {backendLabel}
-          </span>
           {isWebSearchActive ? (
             <span className="friday-status-pill friday-status-pill--warning">
               Web on

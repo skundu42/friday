@@ -37,6 +37,12 @@ import type {
   WebSearchStatus,
 } from "../types";
 
+const CHECK_FOR_APP_UPDATE_EVENT = "check-for-app-update";
+
+type AppUpdateCheckOptions = {
+  notify?: boolean;
+};
+
 function makeId() {
   return (
     globalThis.crypto?.randomUUID?.() ??
@@ -674,26 +680,58 @@ export function useAppController() {
     return (await warmBackendIfNeeded(status)) ?? status;
   };
 
-  const checkForAppUpdate = async () => {
-    try {
-      const update =
-        (await invoke<AppUpdateInfo | null>("check_for_app_update")) ?? null;
-      setAvailableAppUpdate(update);
-      setAppUpdateError(null);
-      return update;
-    } catch (error) {
-      const message = toErrorMessage(error);
-      if (message === "Auto-update signing key is not configured.") {
-        setAvailableAppUpdate(null);
+  const checkForAppUpdate = useCallback(
+    async ({ notify = false }: AppUpdateCheckOptions = {}) => {
+      try {
+        const update =
+          (await invoke<AppUpdateInfo | null>("check_for_app_update")) ?? null;
+        setAvailableAppUpdate(update);
         setAppUpdateError(null);
+        if (notify) {
+          if (update) {
+            notification.info({
+              key: "friday-app-update-check",
+              message: `Update available: v${update.version}`,
+              description: "Use the update banner to download and install it.",
+            });
+          } else {
+            notification.success({
+              key: "friday-app-update-check",
+              message: "Friday is up to date",
+            });
+          }
+        }
+        return update;
+      } catch (error) {
+        const message = toErrorMessage(error);
+        if (message === "Auto-update signing key is not configured.") {
+          setAvailableAppUpdate(null);
+          setAppUpdateError(null);
+          if (notify) {
+            notification.warning({
+              key: "friday-app-update-check",
+              message: "Updates are not configured for this build",
+              description:
+                "A signing key is required before Friday can check release updates.",
+            });
+          }
+          return null;
+        }
+        console.warn("check_for_app_update failed:", error);
+        setAvailableAppUpdate(null);
+        setAppUpdateError(message);
+        if (notify) {
+          notification.warning({
+            key: "friday-app-update-check",
+            message: "Could not check for updates",
+            description: message,
+          });
+        }
         return null;
       }
-      console.warn("check_for_app_update failed:", error);
-      setAvailableAppUpdate(null);
-      setAppUpdateError(message);
-      return null;
-    }
-  };
+    },
+    [],
+  );
 
   const installAppUpdate = useCallback(async () => {
     if (isInstallingAppUpdate) {
@@ -831,6 +869,13 @@ export function useAppController() {
         },
       );
 
+      const unlistenAppUpdateCheck = await listen(
+        CHECK_FOR_APP_UPDATE_EVENT,
+        () => {
+          void checkForAppUpdate({ notify: true });
+        },
+      );
+
       const unlistenWebSearchStatus = await listen<WebSearchStatus>(
         "web-search-status",
         (event) => {
@@ -914,6 +959,7 @@ export function useAppController() {
 
       return () => {
         unlistenActivity();
+        unlistenAppUpdateCheck();
         unlistenWebSearchStatus();
         unlistenKnowledgeStatus();
         unlistenKnowledgeIngestProgress();
@@ -955,7 +1001,7 @@ export function useAppController() {
       activeRequestIdRef.current = null;
       dispose?.();
     };
-  }, [matchesActiveRequest]);
+  }, [checkForAppUpdate, matchesActiveRequest]);
 
   const createSession = async () => {
     if (isGenerating || activeRequestSessionIdRef.current) return;
@@ -1389,6 +1435,7 @@ export function useAppController() {
     ingestKnowledgeFile,
     ingestKnowledgeUrl,
     deleteKnowledgeSource,
+    checkForAppUpdate,
     installAppUpdate,
     restartApp,
     dismissAppUpdate,
