@@ -145,8 +145,48 @@ jobs:
           APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY }}
         run: ./scripts/prepare-macos-signed-resources.sh --patch-tauri-config
 
+      - name: Check Apple notarization connectivity
+        shell: bash
+        env:
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_PATH: ${{ env.APPLE_API_KEY_PATH }}
+        run: |
+          run_with_retries() {
+            local attempts="$1"
+            local delay="$2"
+            shift 2
+
+            local attempt=1
+            while true; do
+              if "$@"; then
+                return 0
+              fi
+
+              local exit_code="$?"
+              if [ "$attempt" -ge "$attempts" ]; then
+                echo "Command failed after $attempts attempts: $*" >&2
+                return "$exit_code"
+              fi
+
+              local sleep_seconds=$((delay * attempt))
+              echo "Command failed with exit code $exit_code; retrying in ${sleep_seconds}s ($attempt/$attempts)" >&2
+              sleep "$sleep_seconds"
+              attempt=$((attempt + 1))
+            done
+          }
+
+          run_with_retries 5 20 xcrun notarytool history \
+            --key "$APPLE_API_KEY_PATH" \
+            --key-id "$APPLE_API_KEY" \
+            --issuer "$APPLE_API_ISSUER" \
+            --output-format json \
+            --no-progress \
+            > /dev/null
+
       - name: Build and upload release assets
-        id: build_release
+        id: build_release_primary
+        continue-on-error: true
         uses: tauri-apps/tauri-action@v0.6.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -171,6 +211,38 @@ jobs:
           includeUpdaterJson: true
           args: --target aarch64-apple-darwin
 
+      - name: Retry build and upload release assets
+        id: build_release_retry
+        if: steps.build_release_primary.outcome == 'failure'
+        uses: tauri-apps/tauri-action@v0.6.2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_PATH: ${{ env.APPLE_API_KEY_PATH }}
+          APPLE_PROVIDER_SHORT_NAME: ${{ secrets.APPLE_PROVIDER_SHORT_NAME }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ steps.release_meta.outputs.tag_name }}
+          releaseName: Friday ${{ steps.release_meta.outputs.tag_name }}
+          releaseDraft: true
+          prerelease: ${{ steps.release_meta.outputs.prerelease }}
+          generateReleaseNotes: true
+          releaseBody: |
+            Automated release for `${{ steps.release_meta.outputs.tag_name }}`.
+
+            Download the signed and notarized macOS assets below for Apple Silicon.
+          releaseCommitish: ${{ github.sha }}
+          includeUpdaterJson: true
+          args: --target aarch64-apple-darwin
+
+      - name: Fail if release asset build did not succeed
+        if: steps.build_release_primary.outcome == 'failure' && steps.build_release_retry.outcome == 'failure'
+        shell: bash
+        run: exit 1
+
       - name: Notarize disk images and refresh draft assets
         shell: bash
         env:
@@ -181,6 +253,30 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG_NAME: ${{ steps.release_meta.outputs.tag_name }}
         run: |
+          run_with_retries() {
+            local attempts="$1"
+            local delay="$2"
+            shift 2
+
+            local attempt=1
+            while true; do
+              if "$@"; then
+                return 0
+              fi
+
+              local exit_code="$?"
+              if [ "$attempt" -ge "$attempts" ]; then
+                echo "Command failed after $attempts attempts: $*" >&2
+                return "$exit_code"
+              fi
+
+              local sleep_seconds=$((delay * attempt))
+              echo "Command failed with exit code $exit_code; retrying in ${sleep_seconds}s ($attempt/$attempts)" >&2
+              sleep "$sleep_seconds"
+              attempt=$((attempt + 1))
+            done
+          }
+
           mapfile -t DMGS < <(find src-tauri/target -type f -path "*/release/bundle/dmg/*.dmg" | sort)
 
           if [ "${#DMGS[@]}" -eq 0 ]; then
@@ -193,14 +289,14 @@ jobs:
             codesign --force --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$dmg"
 
             echo "Submitting disk image for notarization: $dmg"
-            xcrun notarytool submit "$dmg" \
+            run_with_retries 5 30 xcrun notarytool submit "$dmg" \
               --key "$APPLE_API_KEY_PATH" \
               --key-id "$APPLE_API_KEY" \
               --issuer "$APPLE_API_ISSUER" \
               --wait
 
-            xcrun stapler staple "$dmg"
-            xcrun stapler validate "$dmg"
+            run_with_retries 3 20 xcrun stapler staple "$dmg"
+            run_with_retries 3 20 xcrun stapler validate "$dmg"
 
             gh release upload "$TAG_NAME" "$dmg" --clobber
           done
@@ -237,10 +333,13 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_ID: ${{ steps.build_release.outputs.releaseId }}
+          PRIMARY_RELEASE_ID: ${{ steps.build_release_primary.outputs.releaseId }}
+          RETRY_RELEASE_ID: ${{ steps.build_release_retry.outputs.releaseId }}
           PRERELEASE: ${{ steps.release_meta.outputs.prerelease }}
           TAG_NAME: ${{ steps.release_meta.outputs.tag_name }}
         run: |
+          RELEASE_ID="${PRIMARY_RELEASE_ID:-$RETRY_RELEASE_ID}"
+
           if [ -z "$RELEASE_ID" ]; then
             RELEASE_ID="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG_NAME}" --jq .id)"
           fi
