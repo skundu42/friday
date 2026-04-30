@@ -99,7 +99,6 @@ npm run check
 - Drawer-based session navigation on narrow layouts
 - Streaming chat pane with assistant answer and thought streaming
 - Drag-and-drop and file-picker attachment flow
-- Audio recording button when microphone capture is available
 - Reply language selector
 - Web search toggle
 - Thinking toggle

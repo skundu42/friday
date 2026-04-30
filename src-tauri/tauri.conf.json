@@ -1,8 +1,8 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicholasgasior/tauri/dev/crates/tauri-config-schema/schema.json",
   "productName": "Friday",
-  "version": "0.3.0",
-  "identifier": "com.friday.app",
+  "version": "0.4.0",
+  "identifier": "com.sandipankundu.friday",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1420",
@@ -46,7 +46,11 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "macOS": {
+      "hardenedRuntime": true,
+      "minimumSystemVersion": "12.0"
+    }
   },
   "plugins": {
     "updater": {

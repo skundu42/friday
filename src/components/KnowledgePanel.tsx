@@ -260,44 +260,44 @@ export default function KnowledgePanel({
   };
 
   return (
-    <div className="knowledge-panel">
-      <section className="knowledge-hero">
-        <div className="knowledge-hero__header">
-          <div className="settings-header settings-header--page">
-            <Title level={3} className="settings-header__title">
-              Knowledge
-            </Title>
-            <Paragraph className="settings-header__body">
-              Build a local library that Friday can use to ground replies
-              against your files and explicitly added URLs.
-            </Paragraph>
-          </div>
-
-          <div className="knowledge-hero__actions">
-            <span
-              className={`knowledge-status-badge knowledge-status-badge--${toneForStatus(status)}`}
-            >
-              {status?.message ?? "Knowledge status is unavailable."}
-            </span>
-            <Button
-              icon={<ReloadOutlined />}
-              onClick={() => void handleRefresh()}
-              loading={isRefreshing}
-              className="secondary-action"
-            >
-              Refresh
-            </Button>
-          </div>
+    <div className="knowledge-panel workspace-page workspace-page--knowledge">
+      <section className="workspace-header">
+        <div className="workspace-header__copy">
+          <span className="workspace-header__eyebrow">Grounding library</span>
+          <Title level={3} className="workspace-header__title">
+            Knowledge
+          </Title>
+          <Paragraph className="workspace-header__body">
+            Build a local library that Friday can use to ground replies
+            against your files and explicitly added URLs.
+          </Paragraph>
         </div>
 
-        <div className="knowledge-stats-grid">
-          {summaryStats.map((item) => (
-            <div key={item.label} className="knowledge-stats-card">
-              <Statistic title={item.label} value={item.value} />
-            </div>
-          ))}
+        <div className="workspace-header__actions">
+          <span
+            className={`knowledge-status-badge knowledge-status-badge--${toneForStatus(status)}`}
+          >
+            {status?.message ?? "Knowledge status is unavailable."}
+          </span>
+          <Button
+            icon={<ReloadOutlined />}
+            onClick={() => void handleRefresh()}
+            loading={isRefreshing}
+            className="secondary-action"
+          >
+            Refresh
+          </Button>
         </div>
       </section>
+
+      <div className="workspace-stat-grid">
+        {summaryStats.map((item) => (
+          <div key={item.label} className="workspace-stat">
+            <span className="workspace-stat__label">{item.label}</span>
+            <Statistic value={item.value} />
+          </div>
+        ))}
+      </div>
 
       {actionError ? (
         <Alert
@@ -308,9 +308,9 @@ export default function KnowledgePanel({
         />
       ) : null}
 
-      <div className="knowledge-layout knowledge-workbench surface-card">
-        <div className="knowledge-stack knowledge-stack--main">
-          <section className="settings-section">
+      <div className="workspace-board workspace-board--knowledge">
+        <div className="workspace-main">
+          <section className="workspace-panel">
             <div className="section-heading">
               <div>
                 <span className="section-heading__eyebrow">Sources</span>
@@ -329,10 +329,10 @@ export default function KnowledgePanel({
               />
             ) : (
               <List
-                className="knowledge-source-list"
+                className="knowledge-source-list workspace-list"
                 dataSource={sources}
                 renderItem={(source) => (
-                  <List.Item className="knowledge-source-row">
+                  <List.Item className="knowledge-source-row workspace-list-row">
                     <div className="knowledge-source-row__body">
                       <div className="knowledge-source-row__header">
                         <span className="knowledge-source-icon">
@@ -385,7 +385,7 @@ export default function KnowledgePanel({
             )}
           </section>
 
-          <section className="settings-section knowledge-activity-section">
+          <section className="workspace-panel knowledge-activity-section">
             <div className="section-heading">
               <div>
                 <span className="section-heading__eyebrow">Activity</span>
@@ -474,8 +474,8 @@ export default function KnowledgePanel({
 
         </div>
 
-        <div className="knowledge-stack knowledge-stack--side">
-          <section className="settings-section">
+        <div className="workspace-aside">
+          <section className="workspace-panel">
             <div className="section-heading">
               <div>
                 <span className="section-heading__eyebrow">Ingest</span>

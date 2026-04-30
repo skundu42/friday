@@ -175,7 +175,7 @@ Key files:
 
 ## Runtime And Data Paths
 
-Friday uses the platform app-data directory. On macOS the identifier is `com.friday.app`.
+Friday uses the platform app-data directory. On macOS the identifier is `com.sandipankundu.friday`.
 
 Important subdirectories:
 
@@ -295,7 +295,6 @@ Primary tables:
 - `sessions`
 - `messages`
 - `audit_log`
-- `workspace_memory`
 - `settings`
 - `knowledge_sources`
 - `legacy_rag_archive_log`

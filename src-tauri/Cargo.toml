@@ -1,6 +1,6 @@
 [package]
 name = "friday"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 description = "Friday — Private, local-first AI desktop assistant"
 
