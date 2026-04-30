@@ -153,7 +153,6 @@ fn backfill_legacy_migration_ledger(conn: &Connection) -> Result<(), String> {
     if has_table(conn, "sessions")?
         && has_table(conn, "messages")?
         && has_table(conn, "audit_log")?
-        && has_table(conn, "workspace_memory")?
         && has_table(conn, "settings")?
     {
         record_migration_if_missing(
@@ -816,7 +815,6 @@ mod tests {
         assert!(tables.contains(&"sessions".to_string()));
         assert!(tables.contains(&"messages".to_string()));
         assert!(tables.contains(&"audit_log".to_string()));
-        assert!(tables.contains(&"workspace_memory".to_string()));
         assert!(tables.contains(&"settings".to_string()));
         assert!(tables.contains(&"migration_ledger".to_string()));
         assert!(tables.contains(&"knowledge_sources".to_string()));

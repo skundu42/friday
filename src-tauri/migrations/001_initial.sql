@@ -38,15 +38,6 @@ CREATE TABLE IF NOT EXISTS audit_log (
     error TEXT
 );
 
--- Workspace memory (preferences, glossary, templates)
-CREATE TABLE IF NOT EXISTS workspace_memory (
-    key TEXT PRIMARY KEY,
-    category TEXT NOT NULL,
-    value TEXT NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
 -- Settings
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
@@ -57,4 +48,3 @@ CREATE TABLE IF NOT EXISTS settings (
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_log(timestamp);
-CREATE INDEX IF NOT EXISTS idx_memory_category ON workspace_memory(category);

@@ -1862,7 +1862,7 @@ class WorkerProtocolTests(unittest.TestCase):
     "Requires FRIDAY_RUN_LITERT_E2E=1 and a local runtime/model",
 )
 class WorkerLiveIntegrationTests(unittest.TestCase):
-    APP_HOME = pathlib.Path.home() / "Library" / "Application Support" / "com.friday.app"
+    APP_HOME = pathlib.Path.home() / "Library" / "Application Support" / "com.sandipankundu.friday"
     RUNTIME_DIR = APP_HOME / "litert-runtime" / "0.10.1"
     MODEL_PATH = APP_HOME / "lit-home" / "models" / "gemma-4-e4b-it" / "model.litertlm"
 

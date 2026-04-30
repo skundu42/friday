@@ -84,6 +84,20 @@ function formatCompactTokenCount(value: number) {
   return value.toString();
 }
 
+function formatModelId(value: string) {
+  if (value === "gemma-4-e2b-it") return "Gemma 4 E2B";
+  if (value === "gemma-4-e4b-it") return "Gemma 4 E4B";
+  return value || "Not selected";
+}
+
+function formatTitleCase(value: string) {
+  return value
+    .split(/[-_\s]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
 function clampGenerationValue(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
 }
@@ -708,18 +722,38 @@ export default function SettingsPanel({
   };
 
   return (
-    <div className="settings-panel">
-      <section className="settings-hero">
-        <div className="settings-header settings-header--page">
-          <Title level={3} className="settings-header__title">
+    <div className="settings-panel workspace-page workspace-page--settings">
+      <section className="workspace-header">
+        <div className="workspace-header__copy">
+          <span className="workspace-header__eyebrow">Preferences</span>
+          <Title level={3} className="workspace-header__title">
             Settings
           </Title>
-          <Paragraph className="settings-header__body">
+          <Paragraph className="workspace-header__body">
             Tune conversation behavior, manage the local model, and choose how
             Friday looks.
           </Paragraph>
         </div>
       </section>
+
+      <div className="workspace-stat-grid workspace-stat-grid--settings">
+        <div className="workspace-stat">
+          <span className="workspace-stat__label">Active model</span>
+          <strong>{formatModelId(activeModelId)}</strong>
+        </div>
+        <div className="workspace-stat">
+          <span className="workspace-stat__label">Reply language</span>
+          <strong>{formatTitleCase(replyLanguage)}</strong>
+        </div>
+        <div className="workspace-stat">
+          <span className="workspace-stat__label">Response budget</span>
+          <strong>{formatCompactTokenCount(maxTokens)}</strong>
+        </div>
+        <div className="workspace-stat">
+          <span className="workspace-stat__label">Theme</span>
+          <strong>{formatTitleCase(themeMode)}</strong>
+        </div>
+      </div>
 
       {error ? (
         <Alert
@@ -730,7 +764,7 @@ export default function SettingsPanel({
         />
       ) : null}
 
-      <div className="settings-workbench surface-card">
+      <div className="settings-workbench workspace-board">
         <div className="settings-layout">
           <div className="settings-stack settings-stack--main">
             <section className="settings-section">
