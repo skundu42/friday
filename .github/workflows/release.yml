@@ -277,7 +277,10 @@ jobs:
             done
           }
 
-          mapfile -t DMGS < <(find src-tauri/target -type f -path "*/release/bundle/dmg/*.dmg" | sort)
+          DMGS=()
+          while IFS= read -r dmg; do
+            DMGS+=("$dmg")
+          done < <(find src-tauri/target -type f -path "*/release/bundle/dmg/*.dmg" | sort)
 
           if [ "${#DMGS[@]}" -eq 0 ]; then
             echo "No DMG artifacts were produced." >&2
@@ -316,7 +319,10 @@ jobs:
           xcrun stapler validate "$APP_BUNDLE"
           spctl --assess --type execute --verbose=4 "$APP_BUNDLE"
 
-          mapfile -t DMGS < <(find src-tauri/target -type f -path "*/release/bundle/dmg/*.dmg" | sort)
+          DMGS=()
+          while IFS= read -r dmg; do
+            DMGS+=("$dmg")
+          done < <(find src-tauri/target -type f -path "*/release/bundle/dmg/*.dmg" | sort)
 
           if [ "${#DMGS[@]}" -eq 0 ]; then
             echo "No DMG artifacts were produced." >&2
