@@ -719,28 +719,6 @@ export default function ChatPane({
         </div>
 
         <div className="chat-topbar__drag-region" data-tauri-drag-region />
-
-        <div className="chat-topbar__meta">
-          <Select
-            size="small"
-            value={replyLanguage}
-            onChange={onLanguageChange}
-            options={REPLY_LANGUAGE_OPTIONS}
-            {...REPLY_LANGUAGE_SELECT_PROPS}
-            className="friday-compact-select"
-            aria-label="Reply language"
-          />
-          {isWebSearchActive ? (
-            <span className="friday-status-pill friday-status-pill--warning">
-              Web on
-            </span>
-          ) : null}
-          {isKnowledgeActive ? (
-            <span className="friday-status-pill friday-status-pill--success">
-              Knowledge on
-            </span>
-          ) : null}
-        </div>
       </div>
 
       <div
@@ -750,31 +728,39 @@ export default function ChatPane({
       >
         <div className="chat-thread">
           {!hasUserMessages ? (
-            <div className="chat-empty-state surface-card">
-              <Text strong className="chat-empty-state__title">
-                {userDisplayName
-                  ? `Welcome back, ${userDisplayName}.`
-                  : "Welcome to Friday."}
-              </Text>
-              <Text type="secondary" className="chat-empty-state__body">
-                How can I help you today?
-              </Text>
-              <div className="chat-empty-state__suggestions">
-                {[
-                  "Help me plan today’s work.",
-                  "Summarize the attached document.",
-                  "Review this file and explain the key points.",
-                  "Explain what is in this image",
-                ].map((suggestion) => (
-                  <Button
-                    key={suggestion}
-                    onClick={() => setInput(suggestion)}
-                    className="suggestion-chip"
-                  >
-                    {suggestion}
-                  </Button>
-                ))}
+            <div className="chat-empty-state">
+              <div className="chat-empty-state__hero">
+                <AppLogo size={56} />
+                <Text strong className="chat-empty-state__title">
+                  {userDisplayName ? `Hi ${userDisplayName}` : "Hi there"}
+                </Text>
+                <Text type="secondary" className="chat-empty-state__body">
+                  How can I help you today?
+                </Text>
               </div>
+
+              <ul className="chat-empty-state__capabilities">
+                <li className="chat-empty-state__capability">
+                  <ThunderboltOutlined className="chat-empty-state__capability-icon" />
+                  <span>Ask anything &mdash; coding, writing, analysis</span>
+                </li>
+                <li className="chat-empty-state__capability">
+                  <PlusOutlined className="chat-empty-state__capability-icon" />
+                  <span>Drop in files, images, or audio for context</span>
+                </li>
+                {isWebSearchActive ? (
+                  <li className="chat-empty-state__capability">
+                    <GlobalOutlined className="chat-empty-state__capability-icon" />
+                    <span>Search the web for fresh information</span>
+                  </li>
+                ) : null}
+                {isKnowledgeActive ? (
+                  <li className="chat-empty-state__capability">
+                    <DatabaseOutlined className="chat-empty-state__capability-icon" />
+                    <span>Reference your saved knowledge sources</span>
+                  </li>
+                ) : null}
+              </ul>
             </div>
           ) : null}
 
@@ -807,7 +793,12 @@ export default function ChatPane({
         <div className="chat-composer surface-card">
           {attachments.length > 0 && (
             <div className="chat-composer__attachments">
-              {attachments.map((att) => (
+              {attachments.map((att) => {
+                const isImageWithPreview =
+                  att.mimeType.startsWith("image/") &&
+                  att.content?.dataUrl &&
+                  att.status === "ready";
+                return (
                 <Tag
                   key={att.path}
                   closable={att.status !== "loading"}
@@ -824,7 +815,17 @@ export default function ChatPane({
                       />
                     )
                   }
-                  icon={getFileIcon(att.mimeType)}
+                  icon={
+                    isImageWithPreview ? (
+                      <img
+                        src={att.content!.dataUrl}
+                        alt=""
+                        className="attachment-tag__thumb"
+                      />
+                    ) : (
+                      getFileIcon(att.mimeType)
+                    )
+                  }
                   color={
                     att.status === "error"
                       ? "error"
@@ -832,7 +833,7 @@ export default function ChatPane({
                         ? "processing"
                         : "default"
                   }
-                  className={`attachment-tag attachment-tag--${att.status}`}
+                  className={`attachment-tag attachment-tag--${att.status}${isImageWithPreview ? " attachment-tag--thumb" : ""}`}
                 >
                   <span className="attachment-tag__label">
                     {att.name}
@@ -848,7 +849,8 @@ export default function ChatPane({
                     </span>
                   )}
                 </Tag>
-              ))}
+                );
+              })}
             </div>
           )}
 
@@ -881,6 +883,16 @@ export default function ChatPane({
               >
                 Think
               </Button>
+              <Select
+                size="small"
+                variant="borderless"
+                value={replyLanguage}
+                onChange={onLanguageChange}
+                options={REPLY_LANGUAGE_OPTIONS}
+                {...REPLY_LANGUAGE_SELECT_PROPS}
+                className="composer-language-select"
+                aria-label="Reply language"
+              />
             </div>
 
             <div className="chat-composer__hint">
@@ -891,13 +903,12 @@ export default function ChatPane({
                     <span>{composerGenerationStatus}</span>
                   </>
                 ) : null
-              ) : (
+              ) : readyAttachments.length > 0 ? (
                 <span>
-                  {readyAttachments.length > 0
-                    ? `${readyAttachments.length} item${readyAttachments.length === 1 ? "" : "s"} ready`
-                    : "Shift+Enter for a new line"}
+                  {readyAttachments.length} item
+                  {readyAttachments.length === 1 ? "" : "s"} ready
                 </span>
-              )}
+              ) : null}
             </div>
           </div>
 
@@ -953,7 +964,10 @@ export default function ChatPane({
               <span className="is-danger">{capabilityStatus}</span>
             ) : null}
             <span className="chat-composer__footnote-hint">
-              Enter to send
+              <kbd className="chat-composer__kbd">Enter</kbd> to send
+              {" · "}
+              <kbd className="chat-composer__kbd">Shift</kbd>
+              <kbd className="chat-composer__kbd">Enter</kbd> for new line
             </span>
           </div>
         </div>

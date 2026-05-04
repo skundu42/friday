@@ -508,6 +508,8 @@ function MessageBubble({
   const hasAttachmentTag =
     attachmentsSummary.length > 0 || renderedUserContent.includes("📎");
 
+  const formattedTimestamp = formatBubbleTimestamp(message.created_at);
+
   if (isUser) {
     return (
       <div className="message-row message-row--user">
@@ -522,6 +524,14 @@ function MessageBubble({
                 Files included in context
               </div>
             )}
+            {formattedTimestamp ? (
+              <span
+                className="message-card__timestamp"
+                aria-label={`Sent ${formattedTimestamp}`}
+              >
+                {formattedTimestamp}
+              </span>
+            ) : null}
           </div>
         </div>
       </div>
@@ -535,9 +545,19 @@ function MessageBubble({
           <AppLogo size={34} />
         </div>
         <div className="message-card message-card--assistant">
-          <Text type="secondary" className="message-card__eyebrow">
-            Friday
-          </Text>
+          <div className="message-card__header">
+            <Text type="secondary" className="message-card__eyebrow">
+              Friday
+            </Text>
+            {formattedTimestamp ? (
+              <span
+                className="message-card__timestamp"
+                aria-label={`Sent ${formattedTimestamp}`}
+              >
+                {formattedTimestamp}
+              </span>
+            ) : null}
+          </div>
           {isStreaming && !hasRenderableAssistantContent ? (
             <div className="message-card__loading" aria-live="polite">
               <span className="chat-loading__dot message-card__loading-dot" />
@@ -634,6 +654,16 @@ function MessageBubble({
       </div>
     </div>
   );
+}
+
+function formatBubbleTimestamp(value: string | undefined | null): string | null {
+  if (!value) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toLocaleTimeString(undefined, {
+    hour: "numeric",
+    minute: "2-digit",
+  });
 }
 
 export default memo(

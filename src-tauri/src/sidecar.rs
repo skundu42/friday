@@ -1353,32 +1353,12 @@ impl SidecarManager {
         }
 
         let binary_path = self.lit_binary_path()?;
-        if !binary_path.exists() {
+        let lit_changed = sync_file_if_changed(&lit_source_path, &binary_path, true)?;
+        if lit_changed {
             tracing::info!(
-                "Installing bundled Friday LiteRT runtime into {}",
+                "Installed bundled Friday LiteRT runtime into {}",
                 runtime_dir.display()
             );
-
-            let temp_path = runtime_dir.join(if cfg!(windows) {
-                "lit.exe.part"
-            } else {
-                "lit.part"
-            });
-            if temp_path.exists() {
-                let _ = std::fs::remove_file(&temp_path);
-            }
-            std::fs::copy(&lit_source_path, &temp_path)
-                .map_err(|e| format!("Failed to copy bundled LiteRT-LM runtime: {}", e))?;
-
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&temp_path, std::fs::Permissions::from_mode(0o755))
-                    .map_err(|e| format!("Failed to mark LiteRT-LM runtime executable: {}", e))?;
-            }
-
-            std::fs::rename(&temp_path, &binary_path)
-                .map_err(|e| format!("Failed to finalize LiteRT-LM runtime install: {}", e))?;
         }
 
         ensure_embedded_python_runtime(
