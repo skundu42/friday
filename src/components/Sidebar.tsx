@@ -4,27 +4,23 @@ import type { InputRef } from "antd";
 import {
   DatabaseOutlined,
   DeleteOutlined,
+  EditOutlined,
   EllipsisOutlined,
   MessageOutlined,
   PlusOutlined,
+  PushpinOutlined,
   SearchOutlined,
   SettingOutlined,
 } from "@ant-design/icons";
 import type { Session } from "../types";
+import {
+  BUCKET_LABELS,
+  BUCKET_ORDER,
+  groupSessionsByDate,
+} from "../lib/session-buckets";
 import AppLogo from "./AppLogo";
 
 const { Text, Title } = Typography;
-
-type SessionBucket = "today" | "yesterday" | "week" | "older";
-
-const BUCKET_LABELS: Record<SessionBucket, string> = {
-  today: "Today",
-  yesterday: "Yesterday",
-  week: "Last 7 days",
-  older: "Older",
-};
-
-const BUCKET_ORDER: SessionBucket[] = ["today", "yesterday", "week", "older"];
 
 interface SidebarProps {
   sessions: Session[];
@@ -34,6 +30,8 @@ interface SidebarProps {
   onCreateSession: () => void;
   onSelectSession: (sessionId: string) => void;
   onDeleteSession: (sessionId: string) => void;
+  onRenameSession: (sessionId: string, title: string) => void;
+  onTogglePinSession: (sessionId: string, pinned: boolean) => void;
   onShowKnowledge: () => void;
   onShowSettings: () => void;
 }
@@ -46,11 +44,16 @@ export default function Sidebar({
   onCreateSession,
   onSelectSession,
   onDeleteSession,
+  onRenameSession,
+  onTogglePinSession,
   onShowKnowledge,
   onShowSettings,
 }: SidebarProps) {
   const [query, setQuery] = useState("");
   const searchInputRef = useRef<InputRef>(null);
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [draftTitle, setDraftTitle] = useState("");
+  const renameInputRef = useRef<InputRef>(null);
 
   useEffect(() => {
     const handleKey = (event: KeyboardEvent) => {
@@ -65,9 +68,37 @@ export default function Sidebar({
     return () => document.removeEventListener("keydown", handleKey);
   }, []);
 
+  useEffect(() => {
+    if (renamingId) {
+      renameInputRef.current?.focus();
+      renameInputRef.current?.select();
+    }
+  }, [renamingId]);
+
   const confirmDelete = (session: Session) => {
     if (!window.confirm(`Delete "${session.title}"?`)) return;
     onDeleteSession(session.id);
+  };
+
+  const beginRename = (session: Session) => {
+    setRenamingId(session.id);
+    setDraftTitle(session.title);
+  };
+
+  const commitRename = () => {
+    if (!renamingId) return;
+    const trimmed = draftTitle.trim();
+    const original = sessions.find((session) => session.id === renamingId);
+    if (trimmed && original && trimmed !== original.title) {
+      onRenameSession(renamingId, trimmed);
+    }
+    setRenamingId(null);
+    setDraftTitle("");
+  };
+
+  const cancelRename = () => {
+    setRenamingId(null);
+    setDraftTitle("");
   };
 
   const filteredSessions = useMemo(() => {
@@ -211,9 +242,34 @@ export default function Sidebar({
                             <MessageOutlined />
                           </span>
                           <div className="session-item__copy">
-                            <Text strong className="session-item__title">
-                              {session.title}
-                            </Text>
+                            {renamingId === session.id ? (
+                              <Input
+                                ref={renameInputRef}
+                                size="small"
+                                value={draftTitle}
+                                maxLength={200}
+                                onChange={(event) =>
+                                  setDraftTitle(event.target.value)
+                                }
+                                onClick={(event) => event.stopPropagation()}
+                                onKeyDown={(event) => {
+                                  event.stopPropagation();
+                                  if (event.key === "Enter") {
+                                    event.preventDefault();
+                                    commitRename();
+                                  } else if (event.key === "Escape") {
+                                    event.preventDefault();
+                                    cancelRename();
+                                  }
+                                }}
+                                onBlur={commitRename}
+                                className="session-item__rename-input"
+                              />
+                            ) : (
+                              <Text strong className="session-item__title">
+                                {session.title}
+                              </Text>
+                            )}
                             <Text className="session-item__timestamp">
                               {formatRelativeSessionTime(session.updated_at)}
                             </Text>
@@ -224,6 +280,23 @@ export default function Sidebar({
                           trigger={["click"]}
                           menu={{
                             items: [
+                              {
+                                key: "rename",
+                                icon: <EditOutlined />,
+                                label: "Rename",
+                                onClick: () => beginRename(session),
+                              },
+                              {
+                                key: "pin",
+                                icon: <PushpinOutlined />,
+                                label: session.pinned ? "Unpin" : "Pin",
+                                onClick: () =>
+                                  onTogglePinSession(
+                                    session.id,
+                                    !session.pinned,
+                                  ),
+                              },
+                              { type: "divider" },
                               {
                                 key: "delete",
                                 icon: <DeleteOutlined />,
@@ -283,42 +356,6 @@ export default function Sidebar({
       </div>
     </div>
   );
-}
-
-function bucketForSession(value: string): SessionBucket {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "older";
-
-  const now = new Date();
-  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const startOfTarget = new Date(
-    date.getFullYear(),
-    date.getMonth(),
-    date.getDate(),
-  );
-  const diffDays = Math.round(
-    (startOfToday.getTime() - startOfTarget.getTime()) / (24 * 60 * 60 * 1000),
-  );
-
-  if (diffDays <= 0) return "today";
-  if (diffDays === 1) return "yesterday";
-  if (diffDays < 7) return "week";
-  return "older";
-}
-
-function groupSessionsByDate(
-  sessions: Session[],
-): Record<SessionBucket, Session[]> {
-  const groups: Record<SessionBucket, Session[]> = {
-    today: [],
-    yesterday: [],
-    week: [],
-    older: [],
-  };
-  for (const session of sessions) {
-    groups[bucketForSession(session.updated_at)].push(session);
-  }
-  return groups;
 }
 
 function formatRelativeSessionTime(value: string) {

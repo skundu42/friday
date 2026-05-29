@@ -19,7 +19,11 @@ import { invoke } from "@tauri-apps/api/core";
 import {
   REPLY_LANGUAGE_OPTIONS,
   REPLY_LANGUAGE_SELECT_PROPS,
+  replyLanguageToBcp47,
 } from "../lib/reply-languages";
+import { getMessageText } from "../lib/friday-chat";
+import { markdownToSpeech } from "../lib/markdown-to-speech";
+import { useSpeech } from "../hooks/useSpeech";
 import MessageBubble from "./MessageBubble";
 import AppLogo from "./AppLogo";
 import type {
@@ -119,6 +123,7 @@ function userFacingWebSearchStatusMessage(
 
 interface ChatPaneProps {
   messages: FridayRenderableMessage[];
+  sessionId: string;
   isGenerating: boolean;
   generationStatus?: string | null;
   activeSessionTitle: string;
@@ -202,6 +207,7 @@ function isWebActivityStatus(status?: string | null) {
 
 export default function ChatPane({
   messages,
+  sessionId,
   isGenerating,
   generationStatus = null,
   activeSessionTitle,
@@ -230,6 +236,11 @@ export default function ChatPane({
   const [attachments, setAttachments] = useState<FileAttachment[]>([]);
   const [isDragOver, setIsDragOver] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const speech = useSpeech(replyLanguageToBcp47(replyLanguage));
+  const stopSpeech = speech.stop;
+  useEffect(() => {
+    stopSpeech();
+  }, [sessionId, stopSpeech]);
   const dropZoneRef = useRef<HTMLDivElement>(null);
   const messagesViewportRef = useRef<HTMLDivElement>(null);
   const attachmentsRef = useRef<FileAttachment[]>([]);
@@ -772,6 +783,14 @@ export default function ChatPane({
               isStreaming={message.id === liveAssistantMessageId}
               streamingStatus={
                 message.id === liveAssistantMessageId ? generationStatus : null
+              }
+              canSpeak={speech.supported}
+              isSpeaking={speech.speakingMessageId === message.id}
+              onToggleSpeak={() =>
+                speech.toggle(
+                  message.id,
+                  markdownToSpeech(getMessageText(message)),
+                )
               }
             />
           ))}

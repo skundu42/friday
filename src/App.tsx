@@ -271,6 +271,12 @@ export default function App() {
               onDeleteSession={(sessionId) =>
                 void controller.deleteSession(sessionId)
               }
+              onRenameSession={(sessionId, title) =>
+                void controller.renameSession(sessionId, title)
+              }
+              onTogglePinSession={(sessionId, pinned) =>
+                void controller.togglePinSession(sessionId, pinned)
+              }
               onShowKnowledge={handleShowKnowledge}
               onShowSettings={handleShowSettings}
             />
@@ -368,6 +374,7 @@ export default function App() {
                   <div className="app-view is-active">
                     <ChatPane
                       messages={controller.messages}
+                      sessionId={controller.activeSession?.id ?? ""}
                       isGenerating={controller.isGenerating}
                       generationStatus={controller.generationStatus}
                       onSendMessage={(content, attachments) =>
@@ -496,6 +503,12 @@ export default function App() {
           onSelectSession={handleSelectSession}
           onDeleteSession={(sessionId) =>
             void controller.deleteSession(sessionId)
+          }
+          onRenameSession={(sessionId, title) =>
+            void controller.renameSession(sessionId, title)
+          }
+          onTogglePinSession={(sessionId, pinned) =>
+            void controller.togglePinSession(sessionId, pinned)
           }
           onShowKnowledge={handleShowKnowledge}
           onShowSettings={handleShowSettings}

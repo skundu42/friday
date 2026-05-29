@@ -10,6 +10,7 @@ import {
   toFridayChatMessages,
 } from "../lib/friday-chat";
 import { TauriChatTransport } from "../lib/tauri-chat-transport";
+import { friendlyError } from "../lib/friendly-error";
 import type {
   AppUpdateInfo,
   AppUpdateInstallResult,
@@ -159,6 +160,7 @@ function settingsToInput(settings: AppSettings): AppSettingsInput {
       max_tokens: settings.chat.max_tokens,
       web_assist_enabled: settings.chat.web_assist_enabled,
       knowledge_enabled: settings.chat.knowledge_enabled,
+      custom_instructions: settings.chat.custom_instructions,
       generation: {
         temperature: settings.chat.generation.temperature,
         top_p: settings.chat.generation.top_p,
@@ -225,6 +227,11 @@ function mergeQueuedSettingsInput(
         committed.chat.knowledge_enabled,
         desired.chat.knowledge_enabled,
         requested.chat.knowledge_enabled,
+      ),
+      custom_instructions: resolveQueuedSettingValue(
+        committed.chat.custom_instructions,
+        desired.chat.custom_instructions,
+        requested.chat.custom_instructions,
       ),
       generation: {
         temperature: resolveQueuedSettingValue(
@@ -497,7 +504,7 @@ export function useAppController() {
         makeFridayAssistantMessage({
           id: makeId(),
           sessionId,
-          content: `⚠️ ${message}`,
+          content: `⚠️ ${friendlyError(message)}`,
         }),
       ]);
       clearChatError();
@@ -1013,7 +1020,7 @@ export function useAppController() {
           makeFridayAssistantMessage({
             id: `bootstrap-${makeId()}`,
             sessionId: "bootstrap",
-            content: `⚠️ ${message}`,
+            content: `⚠️ ${friendlyError(message)}`,
           }),
         ),
       ]);
@@ -1087,6 +1094,22 @@ export function useAppController() {
     });
     setActiveSession(selection.session);
     setPersistedMessages(selection.messages);
+  };
+
+  const renameSession = async (sessionId: string, title: string) => {
+    await invoke<Session>("rename_session", { sessionId, title });
+    const nextSessions = await invoke<Session[]>("list_sessions");
+    setSessions(nextSessions);
+    if (activeSessionRef.current?.id === sessionId) {
+      const updated = nextSessions.find((session) => session.id === sessionId);
+      if (updated) setActiveSession(updated);
+    }
+  };
+
+  const togglePinSession = async (sessionId: string, pinned: boolean) => {
+    await invoke<Session>("set_session_pinned", { sessionId, pinned });
+    const nextSessions = await invoke<Session[]>("list_sessions");
+    setSessions(nextSessions);
   };
 
   const sendMessage = async (
@@ -1282,6 +1305,7 @@ export function useAppController() {
           max_tokens: settings.chat.max_tokens,
           web_assist_enabled: settings.chat.web_assist_enabled,
           knowledge_enabled: settings.chat.knowledge_enabled,
+          custom_instructions: settings.chat.custom_instructions,
           generation: settings.chat.generation,
         },
       });
@@ -1307,6 +1331,7 @@ export function useAppController() {
           max_tokens: settings.chat.max_tokens,
           web_assist_enabled: next,
           knowledge_enabled: settings.chat.knowledge_enabled,
+          custom_instructions: settings.chat.custom_instructions,
           generation: settings.chat.generation,
         },
       });
@@ -1333,6 +1358,7 @@ export function useAppController() {
           max_tokens: settings.chat.max_tokens,
           web_assist_enabled: settings.chat.web_assist_enabled,
           knowledge_enabled: settings.chat.knowledge_enabled,
+          custom_instructions: settings.chat.custom_instructions,
           generation: {
             ...settings.chat.generation,
             thinking_enabled: next,
@@ -1362,6 +1388,7 @@ export function useAppController() {
           max_tokens: settings.chat.max_tokens,
           web_assist_enabled: settings.chat.web_assist_enabled,
           knowledge_enabled: next,
+          custom_instructions: settings.chat.custom_instructions,
           generation: settings.chat.generation,
         },
       });
@@ -1434,6 +1461,8 @@ export function useAppController() {
     createSession,
     selectSession,
     deleteSession,
+    renameSession,
+    togglePinSession,
     sendMessage,
     cancelGeneration,
     refreshBackendStatus,

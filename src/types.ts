@@ -42,6 +42,7 @@ export interface Session {
   title: string;
   created_at: string;
   updated_at: string;
+  pinned: boolean;
 }
 
 export interface Message {
@@ -115,6 +116,7 @@ export interface ChatSettings {
   max_tokens: number;
   web_assist_enabled: boolean;
   knowledge_enabled: boolean;
+  custom_instructions: string;
   generation: GenerationSettings;
 }
 
@@ -145,6 +147,7 @@ export interface AppSettingsInput {
     max_tokens: number;
     web_assist_enabled: boolean;
     knowledge_enabled: boolean;
+    custom_instructions: string;
     generation: GenerationSettings;
   };
 }
