@@ -15,12 +15,14 @@ const MIGRATION_003_ID: &str = "003_message_content_parts";
 const MIGRATION_004_ID: &str = "004_knowledge";
 const MIGRATION_005_ID: &str = "005_migration_ledger";
 const MIGRATION_006_ID: &str = "006_audit_log_v2";
+const MIGRATION_007_ID: &str = "007_session_pinned";
 
 const MIGRATION_001_SQL: &str = include_str!("../../migrations/001_initial.sql");
 const MIGRATION_003_SQL: &str = include_str!("../../migrations/003_message_content_parts.sql");
 const MIGRATION_004_SQL: &str = include_str!("../../migrations/004_knowledge.sql");
 const MIGRATION_005_SQL: &str = include_str!("../../migrations/005_migration_ledger.sql");
 const MIGRATION_006_SQL: &str = include_str!("../../migrations/006_audit_log_v2.sql");
+const MIGRATION_007_SQL: &str = include_str!("../../migrations/007_session_pinned.sql");
 const DB_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 type MigrationHook = fn(&Connection) -> Result<(), String>;
 
@@ -61,6 +63,7 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
         Some(archive_legacy_rag_tables),
     )?;
     apply_migration(conn, MIGRATION_006_ID, MIGRATION_006_SQL, None)?;
+    apply_migration(conn, MIGRATION_007_ID, MIGRATION_007_SQL, None)?;
 
     tracing::info!("Database migrations applied successfully");
     Ok(())
@@ -190,6 +193,14 @@ fn backfill_legacy_migration_ledger(conn: &Connection) -> Result<(), String> {
             conn,
             MIGRATION_006_ID,
             migration_checksum(MIGRATION_006_SQL),
+        )?;
+    }
+
+    if has_column(conn, "sessions", "pinned")? {
+        record_migration_if_missing(
+            conn,
+            MIGRATION_007_ID,
+            migration_checksum(MIGRATION_007_SQL),
         )?;
     }
 
@@ -450,7 +461,7 @@ impl DatabaseHandle {
         self.read(|conn| {
             let mut stmt = conn
                 .prepare(
-                    "SELECT id, title, created_at, updated_at FROM sessions ORDER BY updated_at DESC",
+                    "SELECT id, title, created_at, updated_at, pinned FROM sessions ORDER BY pinned DESC, updated_at DESC",
                 )
                 .map_err(|e| e.to_string())?;
             let sessions = stmt
@@ -467,7 +478,7 @@ impl DatabaseHandle {
         self.read(move |conn| {
             let mut stmt = conn
                 .prepare(
-                    "SELECT id, title, created_at, updated_at FROM sessions WHERE id = ?1 LIMIT 1",
+                    "SELECT id, title, created_at, updated_at, pinned FROM sessions WHERE id = ?1 LIMIT 1",
                 )
                 .map_err(|e| e.to_string())?;
 
@@ -536,6 +547,7 @@ impl DatabaseHandle {
                 title,
                 created_at: now.clone(),
                 updated_at: now,
+                pinned: false,
             })
         })
     }
@@ -565,6 +577,52 @@ impl DatabaseHandle {
                     Err(error.to_string())
                 }
             }
+        })
+    }
+
+    pub fn rename_session(&self, session_id: &str, title: &str) -> Result<Session, String> {
+        let session_id = session_id.to_string();
+        let title = title.to_string();
+        self.write(move |conn| {
+            let now = chrono::Utc::now().to_rfc3339();
+            let updated = conn
+                .execute(
+                    "UPDATE sessions SET title = ?1, updated_at = ?2 WHERE id = ?3",
+                    params![title, now, session_id],
+                )
+                .map_err(|e| e.to_string())?;
+            if updated == 0 {
+                return Err("Session not found".to_string());
+            }
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, title, created_at, updated_at, pinned FROM sessions WHERE id = ?1 LIMIT 1",
+                )
+                .map_err(|e| e.to_string())?;
+            stmt.query_row([session_id], session_from_row)
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    pub fn set_session_pinned(&self, session_id: &str, pinned: bool) -> Result<Session, String> {
+        let session_id = session_id.to_string();
+        self.write(move |conn| {
+            let updated = conn
+                .execute(
+                    "UPDATE sessions SET pinned = ?1 WHERE id = ?2",
+                    params![bool_to_sqlite(pinned), session_id],
+                )
+                .map_err(|e| e.to_string())?;
+            if updated == 0 {
+                return Err("Session not found".to_string());
+            }
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, title, created_at, updated_at, pinned FROM sessions WHERE id = ?1 LIMIT 1",
+                )
+                .map_err(|e| e.to_string())?;
+            stmt.query_row([session_id], session_from_row)
+                .map_err(|e| e.to_string())
         })
     }
 
@@ -675,6 +733,7 @@ fn session_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
         title: row.get(1)?,
         created_at: row.get(2)?,
         updated_at: row.get(3)?,
+        pinned: row.get::<_, i64>(4).unwrap_or(0) != 0,
     })
 }
 
@@ -845,6 +904,7 @@ mod tests {
                 MIGRATION_004_ID.to_string(),
                 MIGRATION_005_ID.to_string(),
                 MIGRATION_006_ID.to_string(),
+                MIGRATION_007_ID.to_string(),
             ]
         );
     }
@@ -962,7 +1022,72 @@ mod tests {
         let sessions = handle.list_sessions().unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].id, created.id);
+        assert!(!created.pinned);
+        assert!(!sessions[0].pinned);
 
         let _ = std::fs::remove_dir_all(temp_root);
+    }
+
+    fn test_handle() -> DatabaseHandle {
+        let temp_root =
+            std::env::temp_dir().join(format!("friday-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_root).unwrap();
+        DatabaseHandle::new(&temp_root.join("friday.db")).unwrap()
+    }
+
+    #[test]
+    fn session_pinned_column_is_available_after_migration() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        assert!(has_column(&conn, "sessions", "pinned").unwrap());
+    }
+
+    #[test]
+    fn rename_session_updates_title_and_returns_row() {
+        let handle = test_handle();
+        let created = handle.create_session("Original").unwrap();
+
+        let renamed = handle.rename_session(&created.id, "Renamed").unwrap();
+        assert_eq!(renamed.title, "Renamed");
+
+        let reloaded = handle.load_session(&created.id).unwrap();
+        assert_eq!(reloaded.title, "Renamed");
+    }
+
+    #[test]
+    fn rename_session_unknown_id_errors() {
+        let handle = test_handle();
+        let error = handle.rename_session("missing", "Whatever").unwrap_err();
+        assert!(error.contains("not found"));
+    }
+
+    #[test]
+    fn pinned_sessions_sort_before_unpinned() {
+        let handle = test_handle();
+        let older = handle.create_session("Older").unwrap();
+        let _newer = handle.create_session("Newer").unwrap();
+
+        let pinned = handle.set_session_pinned(&older.id, true).unwrap();
+        assert!(pinned.pinned);
+
+        let sessions = handle.list_sessions().unwrap();
+        assert_eq!(sessions[0].id, older.id);
+        assert!(sessions[0].pinned);
+    }
+
+    #[test]
+    fn set_session_pinned_preserves_updated_at() {
+        let handle = test_handle();
+        let created = handle.create_session("Keep timestamp").unwrap();
+
+        let pinned = handle.set_session_pinned(&created.id, true).unwrap();
+        assert_eq!(pinned.updated_at, created.updated_at);
+    }
+
+    #[test]
+    fn set_session_pinned_unknown_id_errors() {
+        let handle = test_handle();
+        let error = handle.set_session_pinned("missing", true).unwrap_err();
+        assert!(error.contains("not found"));
     }
 }

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import {
   Alert,
   Button,
+  Input,
   InputNumber,
   Radio,
   Select,
@@ -478,6 +479,11 @@ export default function SettingsPanel({
     useState<SpeculativeDecodingMode>(
       settings.chat.generation.speculative_decoding,
     );
+  const [customInstructions, setCustomInstructions] = useState(
+    settings.chat.custom_instructions,
+  );
+  const [savingCustomInstructions, setSavingCustomInstructions] =
+    useState(false);
   const [maxTokenSliderIndex, setMaxTokenSliderIndex] = useState(
     findPresetIndex(settings.chat.max_tokens),
   );
@@ -499,6 +505,7 @@ export default function SettingsPanel({
     setTemperature(settings.chat.generation.temperature ?? null);
     setTopP(settings.chat.generation.top_p ?? null);
     setSpeculativeDecoding(settings.chat.generation.speculative_decoding);
+    setCustomInstructions(settings.chat.custom_instructions);
   }, [settings]);
 
   const persistAutoDownloadUpdates = async (nextAutoDownloadUpdates: boolean) => {
@@ -521,6 +528,7 @@ export default function SettingsPanel({
           max_tokens: settings.chat.max_tokens,
           web_assist_enabled: settings.chat.web_assist_enabled,
           knowledge_enabled: settings.chat.knowledge_enabled,
+          custom_instructions: customInstructions,
           generation: settings.chat.generation,
         },
       });
@@ -552,6 +560,7 @@ export default function SettingsPanel({
           max_tokens: settings.chat.max_tokens,
           web_assist_enabled: settings.chat.web_assist_enabled,
           knowledge_enabled: settings.chat.knowledge_enabled,
+          custom_instructions: customInstructions,
           generation: settings.chat.generation,
         },
       });
@@ -560,6 +569,39 @@ export default function SettingsPanel({
       setError(
         saveError instanceof Error ? saveError.message : String(saveError),
       );
+    }
+  };
+
+  const persistCustomInstructions = async (nextInstructions: string) => {
+    if (nextInstructions === settings.chat.custom_instructions) {
+      return;
+    }
+
+    setSavingCustomInstructions(true);
+    setError(null);
+
+    try {
+      await onSaveSettings({
+        auto_start_backend: settings.auto_start_backend,
+        auto_download_updates: autoDownloadUpdates,
+        user_display_name: settings.user_display_name,
+        theme_mode: themeMode,
+        chat: {
+          reply_language: replyLanguage,
+          max_tokens: settings.chat.max_tokens,
+          web_assist_enabled: settings.chat.web_assist_enabled,
+          knowledge_enabled: settings.chat.knowledge_enabled,
+          custom_instructions: nextInstructions,
+          generation: settings.chat.generation,
+        },
+      });
+    } catch (saveError) {
+      setCustomInstructions(settings.chat.custom_instructions);
+      setError(
+        saveError instanceof Error ? saveError.message : String(saveError),
+      );
+    } finally {
+      setSavingCustomInstructions(false);
     }
   };
 
@@ -583,6 +625,7 @@ export default function SettingsPanel({
           max_tokens: nextMaxTokens,
           web_assist_enabled: settings.chat.web_assist_enabled,
           knowledge_enabled: settings.chat.knowledge_enabled,
+          custom_instructions: customInstructions,
           generation: settings.chat.generation,
         },
       });
@@ -617,6 +660,7 @@ export default function SettingsPanel({
           max_tokens: settings.chat.max_tokens,
           web_assist_enabled: settings.chat.web_assist_enabled,
           knowledge_enabled: settings.chat.knowledge_enabled,
+          custom_instructions: customInstructions,
           generation: settings.chat.generation,
         },
       });
@@ -661,6 +705,7 @@ export default function SettingsPanel({
           max_tokens: settings.chat.max_tokens,
           web_assist_enabled: settings.chat.web_assist_enabled,
           knowledge_enabled: settings.chat.knowledge_enabled,
+          custom_instructions: customInstructions,
           generation: {
             ...settings.chat.generation,
             temperature:
@@ -707,6 +752,7 @@ export default function SettingsPanel({
           max_tokens: settings.chat.max_tokens,
           web_assist_enabled: settings.chat.web_assist_enabled,
           knowledge_enabled: settings.chat.knowledge_enabled,
+          custom_instructions: customInstructions,
           generation: {
             ...settings.chat.generation,
             speculative_decoding: nextSpeculativeDecoding,
@@ -791,6 +837,34 @@ export default function SettingsPanel({
                     options={REPLY_LANGUAGE_OPTIONS}
                     {...REPLY_LANGUAGE_SELECT_PROPS}
                     loading={isSaving}
+                  />
+                </div>
+              </div>
+
+              <div className="settings-field">
+                <div className="settings-field__copy">
+                  <Text className="settings-field__label">
+                    Custom instructions
+                  </Text>
+                  <Text className="settings-field__body">
+                    Friday applies these to every reply (persona, tone, standing
+                    rules). Safety and language rules still take priority.
+                  </Text>
+                </div>
+                <div className="settings-field__control settings-field__control--wide">
+                  <Input.TextArea
+                    value={customInstructions}
+                    onChange={(event) =>
+                      setCustomInstructions(event.target.value)
+                    }
+                    onBlur={() =>
+                      void persistCustomInstructions(customInstructions)
+                    }
+                    maxLength={2000}
+                    showCount
+                    autoSize={{ minRows: 3, maxRows: 8 }}
+                    placeholder="e.g. You are my concise coding assistant. Prefer TypeScript and explain trade-offs briefly."
+                    disabled={isSaving || savingCustomInstructions}
                   />
                 </div>
               </div>

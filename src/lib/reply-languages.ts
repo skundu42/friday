@@ -25,3 +25,21 @@ export const REPLY_LANGUAGE_SELECT_PROPS: Pick<
   optionFilterProp: "label",
   listHeight: 128,
 };
+
+export const REPLY_LANGUAGE_BCP47: Record<ReplyLanguage, string> = {
+  english: "en",
+  hindi: "hi",
+  bengali: "bn",
+  marathi: "mr",
+  tamil: "ta",
+  punjabi: "pa",
+  spanish: "es",
+  french: "fr",
+  mandarin: "zh",
+  portuguese: "pt",
+  japanese: "ja",
+};
+
+export function replyLanguageToBcp47(lang: ReplyLanguage): string {
+  return REPLY_LANGUAGE_BCP47[lang] ?? "en";
+}

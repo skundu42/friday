@@ -1159,6 +1159,8 @@ pub fn run() {
             cancel_generation,
             create_session,
             delete_session,
+            rename_session,
+            set_session_pinned,
             list_sessions,
             select_session,
             load_messages,
@@ -1978,6 +1980,7 @@ async fn send_message(
         &app_settings.chat.reply_language,
         effective_thinking_enabled,
         tools_enabled,
+        &app_settings.chat.custom_instructions,
     );
     let system_message = models::ChatMessage::text("system", system_prompt);
 
@@ -2675,6 +2678,31 @@ fn delete_session(
     Ok(())
 }
 
+const MAX_SESSION_TITLE_CHARS: usize = 200;
+
+#[tauri::command]
+fn rename_session(
+    state: State<'_, AppState>,
+    session_id: String,
+    title: String,
+) -> Result<Session, String> {
+    let trimmed = title.trim();
+    if trimmed.is_empty() {
+        return Err("Title cannot be empty.".to_string());
+    }
+    let normalized: String = trimmed.chars().take(MAX_SESSION_TITLE_CHARS).collect();
+    database_handle(&state)?.rename_session(&session_id, &normalized)
+}
+
+#[tauri::command]
+fn set_session_pinned(
+    state: State<'_, AppState>,
+    session_id: String,
+    pinned: bool,
+) -> Result<Session, String> {
+    database_handle(&state)?.set_session_pinned(&session_id, pinned)
+}
+
 // --- Knowledge Commands ---
 
 #[tauri::command]
@@ -3153,6 +3181,7 @@ fn system_prompt_for_preferences(
     reply_language: &str,
     thinking_enabled: bool,
     web_tools_enabled: bool,
+    custom_instructions: &str,
 ) -> String {
     let language_instruction = reply_language_instruction(reply_language);
 
@@ -3169,13 +3198,26 @@ fn system_prompt_for_preferences(
     };
     let markdown_instruction = "When formatting with Markdown, emit valid CommonMark. Default to Markdown for multi-part answers. Use short paragraphs, one bullet per line, and blank lines between paragraphs, lists, tables, and code blocks. Put a space after heading markers (#), bullet markers (-, *), and ordered list markers (1.). Never collapse headings or list items into running text. If a structured format would be malformed, prefer plain text over broken Markdown.";
 
+    let custom_instructions_block = {
+        let trimmed = custom_instructions.trim();
+        if trimmed.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " The user has provided the following custom instructions. Follow them unless they conflict with the rules above: {}",
+                trimmed
+            )
+        }
+    };
+
     format!(
-        "You are Friday, a helpful local AI assistant. Be concise, clear, practical and useful. {} {} {} {} {}",
+        "You are Friday, a helpful local AI assistant. Be concise, clear, practical and useful. {} {} {} {} {}{}",
         language_instruction,
         thinking_instruction,
         datetime_instruction,
         web_tools_instruction,
-        markdown_instruction
+        markdown_instruction,
+        custom_instructions_block
     )
 }
 
@@ -3334,6 +3376,7 @@ mod tests {
             title: format!("Chat {}", id),
             created_at: "2026-01-01T00:00:00Z".to_string(),
             updated_at: "2026-01-01T00:00:00Z".to_string(),
+            pinned: false,
         }
     }
 
@@ -3448,17 +3491,17 @@ mod tests {
 
     #[test]
     fn system_prompt_obeys_selected_reply_language() {
-        let english = system_prompt_for_preferences("english", false, false);
-        let hindi = system_prompt_for_preferences("hindi", false, false);
-        let bengali = system_prompt_for_preferences("bengali", false, false);
-        let marathi = system_prompt_for_preferences("marathi", false, false);
-        let tamil = system_prompt_for_preferences("tamil", false, false);
-        let punjabi = system_prompt_for_preferences("punjabi", false, false);
-        let spanish = system_prompt_for_preferences("spanish", false, false);
-        let french = system_prompt_for_preferences("french", false, false);
-        let mandarin = system_prompt_for_preferences("mandarin", false, false);
-        let portuguese = system_prompt_for_preferences("portuguese", false, false);
-        let japanese = system_prompt_for_preferences("japanese", false, false);
+        let english = system_prompt_for_preferences("english", false, false, "");
+        let hindi = system_prompt_for_preferences("hindi", false, false, "");
+        let bengali = system_prompt_for_preferences("bengali", false, false, "");
+        let marathi = system_prompt_for_preferences("marathi", false, false, "");
+        let tamil = system_prompt_for_preferences("tamil", false, false, "");
+        let punjabi = system_prompt_for_preferences("punjabi", false, false, "");
+        let spanish = system_prompt_for_preferences("spanish", false, false, "");
+        let french = system_prompt_for_preferences("french", false, false, "");
+        let mandarin = system_prompt_for_preferences("mandarin", false, false, "");
+        let portuguese = system_prompt_for_preferences("portuguese", false, false, "");
+        let japanese = system_prompt_for_preferences("japanese", false, false, "");
 
         assert!(english.contains("Reply in English only"));
         assert!(hindi.contains("Reply in Hindi only"));
@@ -3475,15 +3518,31 @@ mod tests {
 
     #[test]
     fn system_prompt_includes_thinking_instruction_when_enabled() {
-        let prompt = system_prompt_for_preferences("english", true, false);
+        let prompt = system_prompt_for_preferences("english", true, false, "");
 
         assert!(prompt.contains("Reason privately before answering"));
         assert!(prompt.contains("Never expose chain-of-thought"));
     }
 
     #[test]
+    fn system_prompt_includes_custom_instructions_when_present() {
+        let prompt =
+            system_prompt_for_preferences("english", false, false, "Always answer as a pirate.");
+
+        assert!(prompt.contains("Always answer as a pirate."));
+        assert!(prompt.contains("custom instructions"));
+    }
+
+    #[test]
+    fn system_prompt_omits_custom_instructions_block_when_empty() {
+        let prompt = system_prompt_for_preferences("english", false, false, "   ");
+
+        assert!(!prompt.contains("custom instructions"));
+    }
+
+    #[test]
     fn system_prompt_instructs_model_to_use_current_datetime_tool() {
-        let prompt = system_prompt_for_preferences("english", false, false);
+        let prompt = system_prompt_for_preferences("english", false, false, "");
 
         assert!(prompt.contains("get_current_datetime"));
         assert!(prompt.contains("Do not rely on memory for those answers"));
@@ -3492,7 +3551,7 @@ mod tests {
 
     #[test]
     fn system_prompt_explicitly_disallows_web_claims_when_disabled() {
-        let prompt = system_prompt_for_preferences("english", false, false);
+        let prompt = system_prompt_for_preferences("english", false, false, "");
 
         assert!(prompt.contains("Web tools are unavailable in this turn"));
         assert!(prompt.contains("Do not claim to have browsed"));
@@ -3501,7 +3560,7 @@ mod tests {
 
     #[test]
     fn system_prompt_includes_native_web_tool_guidance_when_enabled() {
-        let prompt = system_prompt_for_preferences("english", false, true);
+        let prompt = system_prompt_for_preferences("english", false, true, "");
 
         assert!(prompt.contains("Web tools are available in this turn"));
         assert!(prompt.contains("use the available web tools before answering"));
@@ -3607,7 +3666,7 @@ mod tests {
 
     #[test]
     fn system_prompt_includes_markdown_formatting_guidance() {
-        let prompt = system_prompt_for_preferences("english", false, false);
+        let prompt = system_prompt_for_preferences("english", false, false, "");
 
         assert!(prompt.contains("emit valid CommonMark"));
         assert!(prompt.contains("Default to Markdown for multi-part answers"));

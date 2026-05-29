@@ -12,6 +12,8 @@ import {
   CheckOutlined,
   DownOutlined,
   UpOutlined,
+  SoundOutlined,
+  PauseOutlined,
 } from "@ant-design/icons";
 import { invoke } from "@tauri-apps/api/core";
 import ReactMarkdown from "react-markdown";
@@ -47,6 +49,9 @@ interface Props {
   showCopyActions?: boolean;
   isStreaming?: boolean;
   streamingStatus?: string | null;
+  canSpeak?: boolean;
+  isSpeaking?: boolean;
+  onToggleSpeak?: () => void;
 }
 
 export function areMessageBubblePropsEqual(previous: Props, next: Props) {
@@ -54,6 +59,8 @@ export function areMessageBubblePropsEqual(previous: Props, next: Props) {
     previous.showCopyActions === next.showCopyActions &&
     previous.isStreaming === next.isStreaming &&
     previous.streamingStatus === next.streamingStatus &&
+    previous.canSpeak === next.canSpeak &&
+    previous.isSpeaking === next.isSpeaking &&
     previous.message.id === next.message.id &&
     previous.message.role === next.message.role &&
     previous.message.content === next.message.content &&
@@ -184,7 +191,7 @@ function normalizeMarkdownTextSegment(content: string): string {
     "$1$2 $3",
   );
   normalized = normalized.replace(
-    /(#{1,6}\s+[^\n#]*?[a-z0-9\)])(?=[A-Z][a-z])/g,
+    /(#{1,6}\s+[^\n#]*?[a-z0-9)])(?=[A-Z][a-z])/g,
     "$1\n",
   );
   normalized = normalized
@@ -389,6 +396,9 @@ function MessageBubble({
   showCopyActions = true,
   isStreaming = false,
   streamingStatus = null,
+  canSpeak = false,
+  isSpeaking = false,
+  onToggleSpeak,
 }: Props) {
   const isUser = message.role === "user";
   const [isThinkingExpanded, setIsThinkingExpanded] = useState(isStreaming);
@@ -647,6 +657,17 @@ function MessageBubble({
           ) : null}
           {showCopyActions ? (
             <div className="message-card__copy">
+              {canSpeak && assistantContent.length > 0 ? (
+                <Button
+                  size="small"
+                  type="text"
+                  className="copy-button"
+                  icon={isSpeaking ? <PauseOutlined /> : <SoundOutlined />}
+                  onClick={() => onToggleSpeak?.()}
+                  aria-label={isSpeaking ? "Stop reading" : "Read aloud"}
+                  title={isSpeaking ? "Stop" : "Read aloud"}
+                />
+              ) : null}
               <CopyButton text={assistantContent} label="Copy reply" />
             </div>
           ) : null}

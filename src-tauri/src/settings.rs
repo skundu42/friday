@@ -8,6 +8,7 @@ pub const DEFAULT_MAX_TOKENS: u32 = 4096;
 pub const HIGH_RAM_DEFAULT_MAX_TOKENS: u32 = 16384;
 pub const MIN_MAX_TOKENS: u32 = 1024;
 pub const MAX_MAX_TOKENS: u32 = 131072;
+pub const MAX_CUSTOM_INSTRUCTIONS_CHARS: usize = 2000;
 const DEFAULT_THEME_MODE: &str = "light";
 pub const DEFAULT_SPECULATIVE_DECODING: SpeculativeDecodingMode = SpeculativeDecodingMode::Auto;
 const SUPPORTED_REPLY_LANGUAGES: &[&str] = &[
@@ -41,6 +42,7 @@ pub struct ChatSettings {
     pub max_tokens: u32,
     pub web_assist_enabled: bool,
     pub knowledge_enabled: bool,
+    pub custom_instructions: String,
     pub generation: GenerationSettings,
 }
 
@@ -61,6 +63,7 @@ pub struct ChatSettingsInput {
     pub max_tokens: u32,
     pub web_assist_enabled: bool,
     pub knowledge_enabled: bool,
+    pub custom_instructions: String,
     pub generation: GenerationSettingsInput,
 }
 
@@ -140,6 +143,7 @@ struct StoredChatSettings {
     max_tokens: u32,
     web_assist_enabled: bool,
     knowledge_enabled: bool,
+    custom_instructions: String,
     generation: StoredGenerationSettings,
 }
 
@@ -172,6 +176,7 @@ impl Default for ChatSettings {
             max_tokens: DEFAULT_MAX_TOKENS,
             web_assist_enabled: false,
             knowledge_enabled: false,
+            custom_instructions: String::new(),
             generation: GenerationSettings::default(),
         }
     }
@@ -196,6 +201,7 @@ impl Default for ChatSettingsInput {
             max_tokens: DEFAULT_MAX_TOKENS,
             web_assist_enabled: false,
             knowledge_enabled: false,
+            custom_instructions: String::new(),
             generation: GenerationSettingsInput::default(),
         }
     }
@@ -220,6 +226,7 @@ impl Default for StoredChatSettings {
             max_tokens: DEFAULT_MAX_TOKENS,
             web_assist_enabled: false,
             knowledge_enabled: false,
+            custom_instructions: String::new(),
             generation: StoredGenerationSettings::default(),
         }
     }
@@ -237,6 +244,7 @@ impl From<StoredAppSettings> for AppSettings {
                 max_tokens: value.chat.max_tokens,
                 web_assist_enabled: value.chat.web_assist_enabled,
                 knowledge_enabled: value.chat.knowledge_enabled,
+                custom_instructions: value.chat.custom_instructions,
                 generation: GenerationSettings {
                     temperature: value.chat.generation.temperature,
                     top_p: value.chat.generation.top_p,
@@ -260,6 +268,7 @@ impl From<&AppSettingsInput> for StoredAppSettings {
                 max_tokens: value.chat.max_tokens,
                 web_assist_enabled: value.chat.web_assist_enabled,
                 knowledge_enabled: value.chat.knowledge_enabled,
+                custom_instructions: value.chat.custom_instructions.clone(),
                 generation: StoredGenerationSettings {
                     temperature: value.chat.generation.temperature,
                     top_p: value.chat.generation.top_p,
@@ -351,6 +360,13 @@ fn validate_settings_input(input: &AppSettingsInput) -> Result<(), String> {
         return Err("user_display_name must be 60 characters or fewer".to_string());
     }
 
+    if input.chat.custom_instructions.trim().chars().count() > MAX_CUSTOM_INSTRUCTIONS_CHARS {
+        return Err(format!(
+            "custom_instructions must be {} characters or fewer",
+            MAX_CUSTOM_INSTRUCTIONS_CHARS
+        ));
+    }
+
     let theme_mode = input.theme_mode.as_str();
     if !matches!(theme_mode, "light" | "dark") {
         return Err(format!("Unsupported theme mode: {}", theme_mode));
@@ -389,6 +405,15 @@ fn normalize_stored_settings(
 
     if stored.user_display_name.chars().count() > 60 {
         stored.user_display_name = stored.user_display_name.chars().take(60).collect();
+    }
+
+    if stored.chat.custom_instructions.chars().count() > MAX_CUSTOM_INSTRUCTIONS_CHARS {
+        stored.chat.custom_instructions = stored
+            .chat
+            .custom_instructions
+            .chars()
+            .take(MAX_CUSTOM_INSTRUCTIONS_CHARS)
+            .collect();
     }
 
     stored
@@ -452,6 +477,7 @@ mod tests {
                     max_tokens: 6144,
                     web_assist_enabled: true,
                     knowledge_enabled: true,
+                    custom_instructions: "Always answer as a pirate.".to_string(),
                     generation: GenerationSettingsInput {
                         temperature: Some(0.7),
                         top_p: Some(0.9),
@@ -471,6 +497,7 @@ mod tests {
         assert_eq!(saved.chat.max_tokens, 6144);
         assert!(saved.chat.web_assist_enabled);
         assert!(saved.chat.knowledge_enabled);
+        assert_eq!(saved.chat.custom_instructions, "Always answer as a pirate.");
         assert_eq!(saved.chat.generation.temperature, Some(0.7));
         assert_eq!(saved.chat.generation.top_p, Some(0.9));
         assert_eq!(
@@ -551,6 +578,7 @@ mod tests {
             max_tokens: 8192,
             web_assist_enabled: false,
             knowledge_enabled: true,
+            custom_instructions: String::new(),
             generation: GenerationSettings {
                 temperature: Some(0.6),
                 top_p: Some(0.8),
@@ -661,6 +689,67 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("user_display_name"));
+    }
+
+    #[test]
+    fn save_settings_rejects_too_long_custom_instructions() {
+        let conn = test_conn();
+
+        let error = save_settings(
+            &conn,
+            &AppSettingsInput {
+                auto_start_backend: true,
+                auto_download_updates: true,
+                user_display_name: String::new(),
+                theme_mode: DEFAULT_THEME_MODE.to_string(),
+                chat: ChatSettingsInput {
+                    custom_instructions: "a".repeat(MAX_CUSTOM_INSTRUCTIONS_CHARS + 1),
+                    ..ChatSettingsInput::default()
+                },
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.contains("custom_instructions"));
+    }
+
+    #[test]
+    fn save_settings_counts_custom_instructions_by_characters() {
+        let conn = test_conn();
+        let valid = "आ".repeat(MAX_CUSTOM_INSTRUCTIONS_CHARS);
+        let too_long = "आ".repeat(MAX_CUSTOM_INSTRUCTIONS_CHARS + 1);
+
+        let saved = save_settings(
+            &conn,
+            &AppSettingsInput {
+                auto_start_backend: true,
+                auto_download_updates: true,
+                user_display_name: String::new(),
+                theme_mode: DEFAULT_THEME_MODE.to_string(),
+                chat: ChatSettingsInput {
+                    custom_instructions: valid.clone(),
+                    ..ChatSettingsInput::default()
+                },
+            },
+        )
+        .expect("save valid multibyte custom instructions");
+        assert_eq!(saved.chat.custom_instructions, valid);
+
+        let error = save_settings(
+            &conn,
+            &AppSettingsInput {
+                auto_start_backend: true,
+                auto_download_updates: true,
+                user_display_name: String::new(),
+                theme_mode: DEFAULT_THEME_MODE.to_string(),
+                chat: ChatSettingsInput {
+                    custom_instructions: too_long,
+                    ..ChatSettingsInput::default()
+                },
+            },
+        )
+        .unwrap_err();
+        assert!(error.contains("custom_instructions"));
     }
 
     #[test]
